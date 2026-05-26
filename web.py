@@ -269,6 +269,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
             client_secret=credentials["trakt"]["client_secret"],
             access_token=credentials["trakt"]["access_token"],
             refresh_token=credentials["trakt"]["refresh_token"],
+            access_token_expires_at=credentials["trakt"]["access_token_expires_at"],
             username=trakt_username,
             enabled=bool(credentials["trakt"]["client_id"] and credentials["trakt"]["access_token"]),
             sync_watchlist=credentials["trakt"]["sync_watchlist"],
@@ -551,7 +552,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             failed_resolution_cache=profile.get("failed_resolution_cache", {}),
             manual_list_additions=profile.get("manual_list_additions", {}),
             list_state=profile.get("list_state", {}),
-            trakt_token_refreshed_callback=lambda at, rt: _profile_store.update_trakt_tokens(profile_id, at, rt),
+            trakt_token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_trakt_tokens(profile_id, at, rt, exp),
         )
         results = service.run()
         run_id = str(profile.get("sync_job_id", "") or "")
@@ -976,9 +977,15 @@ def _remove_managed_selection(profile: dict, managed_entry: dict) -> dict:
                 client_secret=credentials["trakt"]["client_secret"],
                 access_token=credentials["trakt"]["access_token"],
                 refresh_token=credentials["trakt"]["refresh_token"],
+                access_token_expires_at=credentials["trakt"]["access_token_expires_at"],
                 username=credentials["trakt"]["username"],
             )
-            liked_lists = TraktClient(trakt_config).get_liked_lists_metadata()
+            liked_lists = TraktClient(
+                trakt_config,
+                token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_trakt_tokens(
+                    str(profile.get("profile_id", "") or ""), at, rt, exp
+                ),
+            ).get_liked_lists_metadata()
             remaining_liked = [
                 item for item in liked_lists
                 if not (
@@ -1449,10 +1456,21 @@ def api_trakt_device_check():
         )
 
     if data.get("access_token"):
+        expires_at = TraktClient._expires_at_from_token_payload(data)
+        profile_id = _current_profile_id()
+        if profile_id:
+            _profile_store.update_trakt_tokens(
+                profile_id,
+                str(data.get("access_token") or ""),
+                str(data.get("refresh_token") or ""),
+                expires_at,
+            )
         return jsonify({
             "status": "approved",
             "access_token": data.get("access_token"),
             "refresh_token": data.get("refresh_token", ""),
+            "access_token_expires_at": expires_at,
+            "saved": bool(profile_id),
         })
 
     return jsonify({
@@ -1466,11 +1484,17 @@ def api_trakt_catalogs():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
     client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
     access_token = str(body.get("access_token", "")).strip()
+    refresh_token = str(body.get("refresh_token", "")).strip()
+    access_token_expires_at = str(body.get("access_token_expires_at", "")).strip()
     query = str(body.get("query", "")).strip()
     if private_profile:
         client_id = client_id or private_profile["credentials"]["trakt"]["client_id"]
+        client_secret = client_secret or private_profile["credentials"]["trakt"]["client_secret"]
         access_token = access_token or private_profile["credentials"]["trakt"]["access_token"]
+        refresh_token = refresh_token or private_profile["credentials"]["trakt"]["refresh_token"]
+        access_token_expires_at = access_token_expires_at or private_profile["credentials"]["trakt"]["access_token_expires_at"]
 
     if not client_id:
         return _json_error("Trakt client ID is required", 400)
@@ -1478,7 +1502,20 @@ def api_trakt_catalogs():
         return _json_error("Trakt access token is required", 400)
 
     try:
-        client = TraktClient(TraktConfig(client_id=client_id, access_token=access_token))
+        profile_id = str(private_profile.get("profile_id", "") or "") if private_profile else ""
+        client = TraktClient(
+            TraktConfig(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                access_token_expires_at=access_token_expires_at,
+            ),
+            token_refreshed_callback=(
+                (lambda at, rt, exp="": _profile_store.update_trakt_tokens(profile_id, at, rt, exp))
+                if profile_id else None
+            ),
+        )
         if query:
             items = client.search_lists(query)
         else:
@@ -1494,7 +1531,14 @@ def api_trakt_catalogs():
             hint=_derive_provider_hint("Trakt", exc, fallback_hint),
         )
 
-    return jsonify({"items": items, "query": query})
+    payload = {"items": items, "query": query}
+    if client._config.access_token and client._config.access_token != access_token:
+        payload["token_refreshed"] = True
+        payload["access_token"] = client._config.access_token
+        payload["refresh_token"] = client._config.refresh_token
+        payload["access_token_expires_at"] = client._config.access_token_expires_at
+        payload["saved"] = bool(profile_id)
+    return jsonify(payload)
 
 
 @app.route("/api/mdblist/lists", methods=["POST"])

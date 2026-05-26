@@ -5,17 +5,44 @@ from src.trakt_client import TraktAuthenticationError, TraktClient
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, text: str = "") -> None:
+    def __init__(self, status_code: int, text: str = "", payload=None) -> None:
         self.status_code = status_code
         self.text = text
+        self._payload = payload
 
     def raise_for_status(self) -> None:
-        raise AssertionError("401 responses should be converted before raise_for_status")
+        if self.status_code >= 400:
+            raise AssertionError("401 responses should be converted before raise_for_status")
+
+    def json(self):
+        return self._payload if self._payload is not None else {}
 
 
 class FakeSession:
     def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
         return FakeResponse(401, "unauthorized")
+
+
+class RefreshingSession:
+    def __init__(self) -> None:
+        self.headers = {"Authorization": "Bearer old"}
+        self.requests = 0
+        self.refreshes = 0
+
+    def post(self, url: str, json=None, timeout=None) -> FakeResponse:
+        self.refreshes += 1
+        return FakeResponse(200, "{}", {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 7200,
+            "created_at": 1893456000,
+        })
+
+    def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
+        self.requests += 1
+        if self.requests == 1:
+            return FakeResponse(401, "unauthorized")
+        return FakeResponse(200, "[]", [])
 
 
 class TraktClientTests(unittest.TestCase):
@@ -25,6 +52,36 @@ class TraktClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TraktAuthenticationError, "Trakt token expired, reconnect Trakt"):
             client._get("/sync/playback/movies")
+
+    def test_401_refreshes_token_and_retries_request(self) -> None:
+        captured = {}
+        client = TraktClient(
+            TraktConfig(
+                base_url="https://api.trakt.tv",
+                client_id="client",
+                client_secret="secret",
+                access_token="old",
+                refresh_token="refresh",
+            ),
+            token_refreshed_callback=lambda at, rt, exp="": captured.update({
+                "access": at,
+                "refresh": rt,
+                "expires_at": exp,
+            }),
+        )
+        session = RefreshingSession()
+        client._session = session
+
+        result = client._get("/sync/playback/movies")
+
+        self.assertEqual(result, [])
+        self.assertEqual(session.refreshes, 1)
+        self.assertEqual(session.requests, 2)
+        self.assertEqual(session.headers["Authorization"], "Bearer new-access")
+        self.assertEqual(client._config.refresh_token, "new-refresh")
+        self.assertEqual(captured["access"], "new-access")
+        self.assertEqual(captured["refresh"], "new-refresh")
+        self.assertTrue(captured["expires_at"])
 
     def test_normalize_movie_watchlist_entry(self) -> None:
         client = TraktClient(TraktConfig())

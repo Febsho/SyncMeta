@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -14,6 +14,7 @@ from .config import TraktConfig
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (5, 6)
+TOKEN_REFRESH_SKEW_SECONDS = 3600
 
 DEFAULT_CATALOGS = {
     "trending-movies": {
@@ -64,6 +65,44 @@ class TraktClient:
         self._refresh_lock = threading.Lock()
         self._refresh_attempted = False
         self._refresh_succeeded = False
+
+    @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+        try:
+            if candidate.endswith("Z"):
+                candidate = candidate[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _expires_at_from_token_payload(data: dict) -> str:
+        try:
+            expires_in = int(data.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            expires_in = 0
+        if expires_in <= 0:
+            return ""
+        try:
+            created_at = int(data.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        base = datetime.fromtimestamp(created_at, timezone.utc) if created_at > 0 else datetime.now(timezone.utc)
+        return (base + timedelta(seconds=expires_in)).isoformat()
+
+    def _access_token_expiring_soon(self) -> bool:
+        expires_at = self._parse_datetime(getattr(self._config, "access_token_expires_at", ""))
+        if expires_at is None:
+            return False
+        return expires_at <= datetime.now(timezone.utc) + timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS)
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -132,16 +171,21 @@ class TraktClient:
                 data = resp.json() or {}
                 new_access = str(data.get("access_token") or "").strip()
                 new_refresh = str(data.get("refresh_token") or "").strip()
+                new_expires_at = self._expires_at_from_token_payload(data)
                 if not new_access:
                     logger.warning("Trakt token refresh returned no access_token")
                     return False
                 self._config.access_token = new_access
                 if new_refresh:
                     self._config.refresh_token = new_refresh
+                if new_expires_at:
+                    self._config.access_token_expires_at = new_expires_at
                 self._session.headers["Authorization"] = f"Bearer {new_access}"
                 logger.info("Trakt access token refreshed automatically")
                 if self._token_refreshed_callback:
                     try:
+                        self._token_refreshed_callback(new_access, new_refresh or self._config.refresh_token, new_expires_at)
+                    except TypeError:
                         self._token_refreshed_callback(new_access, new_refresh or self._config.refresh_token)
                     except Exception as cb_exc:
                         logger.warning("Trakt token refresh callback failed: %s", cb_exc)
@@ -154,6 +198,8 @@ class TraktClient:
     def _request_response(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self._config.base_url}{path}"
         self._check_cancelled()
+        if not path.startswith("/oauth/") and self._access_token_expiring_soon():
+            self._attempt_token_refresh()
         response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
         self._check_cancelled()
         if response.status_code == 401:

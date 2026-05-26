@@ -288,6 +288,7 @@ def normalize_credentials(credentials: dict | None) -> dict:
             "client_secret": str(trakt.get("client_secret", "")).strip(),
             "access_token": str(trakt.get("access_token", "")).strip(),
             "refresh_token": str(trakt.get("refresh_token", "")).strip(),
+            "access_token_expires_at": str(trakt.get("access_token_expires_at", "")).strip(),
             "username": str(trakt.get("username", "")).strip(),
             "sync_watchlist": legacy_sync_watchlist,
             "sync_watchlist_movies": bool(trakt.get("sync_watchlist_movies", legacy_sync_watchlist)),
@@ -325,6 +326,7 @@ def public_credentials(credentials: dict | None) -> dict:
             "client_secret_saved": bool(raw["trakt"]["client_secret"]),
             "access_token_saved": bool(raw["trakt"]["access_token"]),
             "refresh_token_saved": bool(raw["trakt"]["refresh_token"]),
+            "access_token_expires_at": raw["trakt"]["access_token_expires_at"],
             "username": raw["trakt"]["username"],
             "sync_watchlist": raw["trakt"]["sync_watchlist"],
             "sync_watchlist_movies": raw["trakt"]["sync_watchlist_movies"],
@@ -505,6 +507,7 @@ def merge_credentials(existing: dict | None, updates: dict | None) -> dict:
             "client_secret": keep_secret("trakt", "client_secret"),
             "access_token": keep_secret("trakt", "access_token"),
             "refresh_token": keep_secret("trakt", "refresh_token"),
+            "access_token_expires_at": incoming["trakt"]["access_token_expires_at"] or current["trakt"]["access_token_expires_at"],
             "username": incoming["trakt"]["username"],
             "sync_watchlist": incoming["trakt"]["sync_watchlist"],
             "sync_watchlist_movies": incoming["trakt"]["sync_watchlist_movies"],
@@ -1930,7 +1933,7 @@ class ProfileStore:
             raise PermissionError("Invalid profile password")
         return profile
 
-    def update_trakt_tokens(self, profile_id: str, access_token: str, refresh_token: str) -> None:
+    def update_trakt_tokens(self, profile_id: str, access_token: str, refresh_token: str, access_token_expires_at: str = "") -> None:
         """Persist refreshed Trakt OAuth tokens without touching any other profile state."""
         with self._lock:
             try:
@@ -1940,6 +1943,8 @@ class ProfileStore:
             profile["credentials"]["trakt"]["access_token"] = access_token
             if refresh_token:
                 profile["credentials"]["trakt"]["refresh_token"] = refresh_token
+            if access_token_expires_at:
+                profile["credentials"]["trakt"]["access_token_expires_at"] = access_token_expires_at
             self._save_locked()
 
     def _get_profile_locked(self, profile_id: str) -> dict:

@@ -273,7 +273,36 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data["status"], "approved")
+        self.assertEqual(data["access_token"], "access")
         self.assertEqual(data["refresh_token"], "refresh")
+        self.assertFalse(data["saved"])
+
+    @patch("web.TraktClient.poll_device_token")
+    def test_trakt_device_check_approved_persists_tokens_for_signed_in_profile(self, mock_poll_device_token) -> None:
+        mock_poll_device_token.return_value = {
+            "access_token": "access-new",
+            "refresh_token": "refresh-new",
+            "expires_in": 7200,
+            "created_at": 1893456000,
+        }
+        profile = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "client", "client_secret": "secret", "access_token": "old", "refresh_token": "old-refresh"},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb"},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/trakt/device/check", json={"device_code": "device"})
+        data = response.get_json()
+        private_profile = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["saved"])
+        self.assertEqual(private_profile["credentials"]["trakt"]["access_token"], "access-new")
+        self.assertEqual(private_profile["credentials"]["trakt"]["refresh_token"], "refresh-new")
+        self.assertTrue(private_profile["credentials"]["trakt"]["access_token_expires_at"])
 
     @patch("web.TraktClient.poll_device_token")
     def test_trakt_device_check_pending_is_not_reported_as_error(self, mock_poll_device_token) -> None:

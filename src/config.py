@@ -47,6 +47,7 @@ class TraktConfig:
     client_secret: str = ""
     access_token: str = ""
     refresh_token: str = ""
+    access_token_expires_at: str = ""
     username: str = ""
     enabled: bool = False
     sync_watchlist: bool = True
@@ -136,6 +137,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
     cfg.trakt.client_secret = os.getenv("TRAKT_CLIENT_SECRET", "")
     cfg.trakt.access_token = os.getenv("TRAKT_ACCESS_TOKEN", "")
     cfg.trakt.refresh_token = os.getenv("TRAKT_REFRESH_TOKEN", "")
+    cfg.trakt.access_token_expires_at = os.getenv("TRAKT_ACCESS_TOKEN_EXPIRES_AT", "")
     cfg.trakt.username = os.getenv("TRAKT_USERNAME", "")
 
     cfg.mdblist.api_key = os.getenv("MDBLIST_API_KEY", "")
@@ -228,6 +230,8 @@ def _apply_config_file(cfg: AppConfig, data: dict) -> None:
         cfg.trakt.access_token = trakt.get("access_token", "")
     if not cfg.trakt.refresh_token:
         cfg.trakt.refresh_token = trakt.get("refresh_token", "")
+    if not cfg.trakt.access_token_expires_at:
+        cfg.trakt.access_token_expires_at = trakt.get("access_token_expires_at", "")
     if not cfg.trakt.username:
         cfg.trakt.username = trakt.get("username", "")
     if not os.getenv("TRAKT_ENABLED"):

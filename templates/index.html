@@ -850,6 +850,7 @@
     let traktSelectedLists = [];
     let traktSyncAllLikedLists = false;
     let traktDefaultCatalogsInitialized = false;
+    let traktAccessTokenExpiresAt = '';
     let mdblistCatalogTab = 'my-lists';
     let mdblistLists = [];
     let mdblistDiscoverLists = [];
@@ -1157,6 +1158,7 @@
           client_secret: el('trakt-client-secret').value.trim(),
           access_token: el('trakt-access-token').value.trim(),
           refresh_token: el('trakt-refresh-token').value.trim(),
+          access_token_expires_at: traktAccessTokenExpiresAt,
           username: '',
           sync_watchlist: syncWatchlistMovies || syncWatchlistShows,
           sync_watchlist_movies: syncWatchlistMovies,
@@ -1282,6 +1284,7 @@
       el('anilist-username').value = anilist.username || '';
       anilistSelectedStatuses = normalizeAniListSelectedStatuses(anilist.selected_statuses);
       el('trakt-client-id').value = trakt.client_id || '';
+      traktAccessTokenExpiresAt = trakt.access_token_expires_at || '';
       setSecretInputState('trakt-client-secret', 'trakt', 'client_secret_saved', 'Required for device auth');
       setSecretInputState('trakt-access-token', 'trakt', 'access_token_saved', 'Filled after Trakt auth');
       setSecretInputState('trakt-refresh-token', 'trakt', 'refresh_token_saved', 'Saved for future refresh support');
@@ -1826,6 +1829,15 @@
       node.style.color = isError ? 'var(--red)' : '';
     }
 
+    function applyTraktTokenRefresh(data) {
+      if (!data || !data.token_refreshed || !data.access_token) return;
+      el('trakt-access-token').value = data.access_token;
+      el('trakt-refresh-token').value = data.refresh_token || el('trakt-refresh-token').value;
+      traktAccessTokenExpiresAt = data.access_token_expires_at || traktAccessTokenExpiresAt;
+      setTraktAuthStatus(data.saved ? 'Trakt token refreshed and saved automatically.' : 'Trakt token refreshed. Save the profile to persist it.', false);
+      saveDraft();
+    }
+
     function switchTraktTab(tab) {
       traktCatalogTab = tab;
       renderTraktCatalogs();
@@ -2090,13 +2102,19 @@
       setTraktCatalogStatus('Loading your Trakt lists...', false);
       try {
         const payload = { client_id: el('trakt-client-id').value.trim() };
+        const clientSecret = el('trakt-client-secret').value.trim();
         const token = el('trakt-access-token').value.trim();
+        const refreshToken = el('trakt-refresh-token').value.trim();
+        if (clientSecret) payload.client_secret = clientSecret;
         if (token) payload.access_token = token;
+        if (refreshToken) payload.refresh_token = refreshToken;
+        if (traktAccessTokenExpiresAt) payload.access_token_expires_at = traktAccessTokenExpiresAt;
         const result = await apiPost('/api/trakt/catalogs', payload);
         if (!result.ok) {
           setTraktCatalogStatus(formatApiError(result.data, 'Could not load Trakt lists.'), true);
           return;
         }
+        applyTraktTokenRefresh(result.data);
         const items = Array.isArray(result.data.items) ? normalizeTraktSelectedLists(result.data.items) : [];
         traktPersonalLists = items.filter(item => item.source === 'personal');
         traktLikedLists = items.filter(item => item.source === 'liked');
@@ -2126,13 +2144,19 @@
           client_id: el('trakt-client-id').value.trim(),
           query: query,
         };
+        const clientSecret = el('trakt-client-secret').value.trim();
         const token = el('trakt-access-token').value.trim();
+        const refreshToken = el('trakt-refresh-token').value.trim();
+        if (clientSecret) payload.client_secret = clientSecret;
         if (token) payload.access_token = token;
+        if (refreshToken) payload.refresh_token = refreshToken;
+        if (traktAccessTokenExpiresAt) payload.access_token_expires_at = traktAccessTokenExpiresAt;
         const result = await apiPost('/api/trakt/catalogs', payload);
         if (!result.ok) {
           setTraktCatalogStatus(formatApiError(result.data, 'Could not search Trakt lists.'), true);
           return;
         }
+        applyTraktTokenRefresh(result.data);
         traktDiscoverLists = Array.isArray(result.data.items) ? normalizeTraktSelectedLists(result.data.items) : [];
         renderTraktCatalogs();
       } catch {
@@ -2514,14 +2538,15 @@
         if (result.data.status === 'approved' && result.data.access_token) {
           el('trakt-access-token').value = result.data.access_token;
           el('trakt-refresh-token').value = result.data.refresh_token || '';
+          traktAccessTokenExpiresAt = result.data.access_token_expires_at || '';
           clearTraktDeviceState();
           setTraktAuthCode('');
           updateDots();
           saveDraft();
           renderTraktCatalogs();
           refreshTraktLists(true);
-          setTraktAuthStatus('Trakt access token received and filled in.', false);
-          showToast('Trakt token added.', false, true);
+          setTraktAuthStatus(result.data.saved ? 'Trakt token received and saved to this profile.' : 'Trakt token received. Save the profile to persist it.', false);
+          showToast(result.data.saved ? 'Trakt token saved.' : 'Trakt token added. Save the profile.', false, true);
           return;
         }
 
