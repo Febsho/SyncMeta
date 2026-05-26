@@ -1930,6 +1930,20 @@ class ProfileStore:
             raise PermissionError("Invalid profile password")
         return profile
 
+    def update_trakt_tokens(self, profile_id: str, access_token: str, refresh_token: str) -> None:
+        """Persist refreshed Trakt OAuth tokens without touching any other profile state."""
+        with self._lock:
+            try:
+                profile = self._get_profile_locked(profile_id)
+            except KeyError:
+                return
+            creds = profile.get("credentials") or {}
+            trakt = creds.get("trakt") or {}
+            trakt["access_token"] = access_token
+            if refresh_token:
+                trakt["refresh_token"] = refresh_token
+            self._save_locked()
+
     def _get_profile_locked(self, profile_id: str) -> dict:
         normalized_id = self._normalize_profile_id(profile_id)
         profile = self._profiles.get(normalized_id)

@@ -221,10 +221,15 @@ class SyncService:
         failed_resolution_cache: dict | None = None,
         manual_list_additions: dict | None = None,
         list_state: dict | None = None,
+        trakt_token_refreshed_callback=None,
     ):
         self._config = config
         self._simkl = SimklClient(config.simkl, cancel_requested_callback=cancel_requested_callback)
-        self._trakt = TraktClient(config.trakt, cancel_requested_callback=cancel_requested_callback)
+        self._trakt = TraktClient(
+            config.trakt,
+            cancel_requested_callback=cancel_requested_callback,
+            token_refreshed_callback=trakt_token_refreshed_callback,
+        )
         self._mdblist = MdbListClient(config.mdblist, cancel_requested_callback=cancel_requested_callback)
         self._pmdb = PublicMetaDBClient(config.pmdb, cancel_requested_callback=cancel_requested_callback)
         self._anilist_root_client = AniListClient(

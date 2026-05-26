@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -55,10 +56,14 @@ class TraktAuthenticationError(RuntimeError):
 class TraktClient:
     """Client for the Trakt API."""
 
-    def __init__(self, config: TraktConfig, cancel_requested_callback=None):
+    def __init__(self, config: TraktConfig, cancel_requested_callback=None, token_refreshed_callback=None):
         self._config = config
         self._session = self._build_session()
         self._cancel_requested_callback = cancel_requested_callback
+        self._token_refreshed_callback = token_refreshed_callback
+        self._refresh_lock = threading.Lock()
+        self._refresh_attempted = False
+        self._refresh_succeeded = False
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -99,13 +104,66 @@ class TraktClient:
             pass
         return session
 
+    def _attempt_token_refresh(self) -> bool:
+        """Try to refresh the access token using the stored refresh_token.
+
+        Uses a lock so concurrent calls only attempt one refresh; subsequent
+        callers get the result of the first attempt.  Returns True if the
+        session now has a valid access token.
+        """
+        if not (self._config.refresh_token and self._config.client_id and self._config.client_secret):
+            return False
+        with self._refresh_lock:
+            if self._refresh_attempted:
+                return self._refresh_succeeded
+            self._refresh_attempted = True
+            try:
+                resp = self._session.post(
+                    f"{self._config.base_url}/oauth/token",
+                    json={
+                        "refresh_token": self._config.refresh_token,
+                        "client_id": self._config.client_id,
+                        "client_secret": self._config.client_secret,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                data = resp.json() or {}
+                new_access = str(data.get("access_token") or "").strip()
+                new_refresh = str(data.get("refresh_token") or "").strip()
+                if not new_access:
+                    logger.warning("Trakt token refresh returned no access_token")
+                    return False
+                self._config.access_token = new_access
+                if new_refresh:
+                    self._config.refresh_token = new_refresh
+                self._session.headers["Authorization"] = f"Bearer {new_access}"
+                logger.info("Trakt access token refreshed automatically")
+                if self._token_refreshed_callback:
+                    try:
+                        self._token_refreshed_callback(new_access, new_refresh or self._config.refresh_token)
+                    except Exception as cb_exc:
+                        logger.warning("Trakt token refresh callback failed: %s", cb_exc)
+                self._refresh_succeeded = True
+                return True
+            except Exception as exc:
+                logger.warning("Trakt token refresh failed: %s", exc)
+                return False
+
     def _request_response(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self._config.base_url}{path}"
         self._check_cancelled()
         response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
         self._check_cancelled()
         if response.status_code == 401:
-            raise TraktAuthenticationError("Trakt token expired, reconnect Trakt.")
+            if self._attempt_token_refresh():
+                response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
+                self._check_cancelled()
+                if response.status_code == 401:
+                    raise TraktAuthenticationError("Trakt token expired, reconnect Trakt.")
+            else:
+                raise TraktAuthenticationError("Trakt token expired, reconnect Trakt.")
         response.raise_for_status()
         return response
 

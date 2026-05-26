@@ -551,6 +551,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             failed_resolution_cache=profile.get("failed_resolution_cache", {}),
             manual_list_additions=profile.get("manual_list_additions", {}),
             list_state=profile.get("list_state", {}),
+            trakt_token_refreshed_callback=lambda at, rt: _profile_store.update_trakt_tokens(profile_id, at, rt),
         )
         results = service.run()
         run_id = str(profile.get("sync_job_id", "") or "")
