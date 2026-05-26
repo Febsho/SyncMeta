@@ -1937,11 +1937,9 @@ class ProfileStore:
                 profile = self._get_profile_locked(profile_id)
             except KeyError:
                 return
-            creds = profile.get("credentials") or {}
-            trakt = creds.get("trakt") or {}
-            trakt["access_token"] = access_token
+            profile["credentials"]["trakt"]["access_token"] = access_token
             if refresh_token:
-                trakt["refresh_token"] = refresh_token
+                profile["credentials"]["trakt"]["refresh_token"] = refresh_token
             self._save_locked()
 
     def _get_profile_locked(self, profile_id: str) -> dict:
