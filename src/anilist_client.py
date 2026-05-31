@@ -455,12 +455,18 @@ class AniListClient:
                 canonical = data["User"].get("name") or self._config.username
                 if canonical != self._config.username:
                     logger.info(
-                        "AniList username corrected: '%s' → '%s'",
+                        "AniList username corrected: '%s' -> '%s'",
                         self._config.username, canonical,
                     )
                     self._config.username = canonical
+            else:
+                logger.error(
+                    "AniList user '%s' not found — check spelling in Settings. "
+                    "AniList usernames are case-sensitive.",
+                    self._config.username,
+                )
         except Exception as exc:
-            logger.debug("AniList username lookup failed: %s", exc)
+            logger.warning("AniList username lookup failed for '%s': %s", self._config.username, exc)
 
     def _fetch_base_status(self, status: str) -> list[dict]:
         self._resolve_username()

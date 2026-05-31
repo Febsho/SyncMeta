@@ -18,14 +18,24 @@ _entries: deque[dict] = deque(maxlen=_MAX_ENTRIES)
 _seq: int = 0
 
 _thread_ctx = threading.local()
+# Global fallback: when a sync sets the profile context, child threads
+# spawned by ThreadPoolExecutor inherit this value automatically.  Only
+# one sync runs at a time per process, so a single global is safe.
+_global_profile_id: str = ""
 
 
 def set_profile_context(profile_id: str | None) -> None:
-    _thread_ctx.profile_id = (profile_id or "")[:16]
+    global _global_profile_id
+    pid = (profile_id or "")[:16]
+    _thread_ctx.profile_id = pid
+    # Also set the global fallback so child threads pick it up.
+    _global_profile_id = pid
 
 
 def get_profile_context() -> str:
-    return getattr(_thread_ctx, "profile_id", "")
+    # Thread-local takes priority; fall back to the global sync context.
+    local = getattr(_thread_ctx, "profile_id", "")
+    return local if local else _global_profile_id
 
 
 class BufferHandler(logging.Handler):
@@ -79,7 +89,7 @@ def snapshot(after_seq: int = 0, limit: int = 300, profile_id: str = "") -> list
         pid_prefix = profile_id[:16]
         items = [
             e for e in items
-            if not e.get("profile_id") or e["profile_id"] == pid_prefix
+            if e.get("profile_id") == pid_prefix
         ]
     return items[-limit:]
 

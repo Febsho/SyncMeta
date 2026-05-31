@@ -55,7 +55,8 @@ SIMKL_HISTORY_STATUS_SCAN_ORDER = [
     SIMKL_STATUS_COMPLETED,
     SIMKL_STATUS_ON_HOLD,
     SIMKL_STATUS_DROPPED,
-    SIMKL_STATUS_PLAN_TO_WATCH,
+    # Plan-to-watch is excluded — items on the watchlist should not
+    # generate watched history entries in PMDB.
 ]
 
 
@@ -669,7 +670,7 @@ class SimklClient:
         # "start of next episode" bookmark rather than pretending it's exact playback.
         position_ms = max(1, int(round(runtime_ms * 0.05)))
         return {
-            "tmdb_id": int(ids["tmdb"]) if ids.get("tmdb") else None,
+            "tmdb_id": _safe_lookup_int(ids.get("tmdb")),
             "media_type": "tv",
             "season": season,
             "episode": episode,
@@ -737,7 +738,7 @@ class SimklClient:
                 or movie.get("watched_at")
             )
             history.append({
-                "tmdb_id": int(ids["tmdb"]) if ids.get("tmdb") else None,
+                "tmdb_id": _safe_lookup_int(ids.get("tmdb")),
                 "media_type": "movie",
                 "simkl_type": "movies",
                 "watched_at": watched_at,
@@ -851,7 +852,7 @@ class SimklClient:
             fribb_entry = self._lookup_exact_anime_mapping(ids, show, entry, resolver_mode="history_identity")
             self._enrich_ids_from_fribb(ids, fribb_entry)
         title = show.get("title", "Unknown")
-        tmdb_id = int(ids["tmdb"]) if ids.get("tmdb") else None
+        tmdb_id = _safe_lookup_int(ids.get("tmdb"))
         root_ids = self._resolve_anime_root_ids(ids) if media_key == "anime" else {}
         if root_ids.get("root_anilist"):
             ids["root_anilist"] = root_ids["root_anilist"]
@@ -1021,7 +1022,7 @@ class SimklClient:
             runtime_ms = int(float(runtime_minutes) * 60_000)
             position_ms = int(round(runtime_ms * (progress / 100.0)))
             return {
-                "tmdb_id": int(tmdb_id) if tmdb_id else None,
+                "tmdb_id": _safe_lookup_int(tmdb_id),
                 "media_type": "movie",
                 "position_ms": position_ms,
                 "runtime_ms": runtime_ms,
@@ -1061,7 +1062,7 @@ class SimklClient:
             runtime_ms = int(float(runtime_minutes) * 60_000)
             position_ms = int(round(runtime_ms * (progress / 100.0)))
             return {
-                "tmdb_id": int(tmdb_id) if tmdb_id else None,
+                "tmdb_id": _safe_lookup_int(tmdb_id),
                 "media_type": "tv",
                 "season": int(season),
                 "episode": int(number),
