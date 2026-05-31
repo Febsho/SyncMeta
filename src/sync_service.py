@@ -1948,7 +1948,9 @@ class SyncService:
     def _sync_anilist(self) -> list[SyncStats]:
         """Sync configured AniList anime statuses."""
         if "anime" not in self._config.sync.media_types:
+            logger.info("AniList sync skipped — 'anime' not in media_types: %s", self._config.sync.media_types)
             return []
+        logger.info("── AniList Sync ───────────────────────────────────────")
 
         from .anilist_client import AniListClient
 
