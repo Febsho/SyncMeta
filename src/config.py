@@ -100,6 +100,7 @@ class SyncConfig:
     trakt_sync_full_watch_counts: bool = False
     trakt_reconcile_watched_history: bool = False
     trakt_sync_resume_progress: bool = False
+    simkl_skip_watched_up_shows: bool = True  # Skip "watching" shows where all aired episodes are watched
     simkl_visibility: str = "private"
     anilist_visibility: str = "private"
     trakt_personal_visibility: str = "private"
@@ -288,6 +289,8 @@ def _apply_config_file(cfg: AppConfig, data: dict) -> None:
         cfg.sync.interval_minutes = sync["interval_minutes"]
     if "media_types" in sync and not os.getenv("SYNC_MEDIA_TYPES"):
         cfg.sync.media_types = sync["media_types"]
+    if "simkl_skip_watched_up_shows" in sync:
+        cfg.sync.simkl_skip_watched_up_shows = bool(sync["simkl_skip_watched_up_shows"])
     if "simkl_visibility" in sync:
         cfg.sync.simkl_visibility = sync["simkl_visibility"]
     if "anilist_visibility" in sync:

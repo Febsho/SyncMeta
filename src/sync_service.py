@@ -344,6 +344,20 @@ class SyncService:
         return "status_list"
 
     @staticmethod
+    def _is_watched_up(item: dict) -> bool:
+        """Return True if the user has watched all aired episodes of this show.
+
+        SIMKL keeps shows as 'watching' even when all aired episodes are done
+        (waiting for a future season).  This detects that state so callers can
+        exclude these from the active watching list.
+        """
+        watched = int(item.get("watched_episodes_count") or 0)
+        total = int(item.get("total_episodes_count") or 0)
+        if watched <= 0 or total <= 0:
+            return False
+        return watched >= total
+
+    @staticmethod
     def _compute_source_fingerprint(source_items: list[dict], activities_ts: str = "") -> str:
         normalized = [
             _stable_item_identity(item)
@@ -796,6 +810,25 @@ class SyncService:
 
         for simkl_type, status_key, items in all_items_by_status:
             self._check_cancelled()
+            # Filter out "watching" shows where the user has watched all aired
+            # episodes — SIMKL keeps these as "watching" because a new season
+            # might air, but they clutter the active watchlist in PMDB.
+            if (
+                self._config.sync.simkl_skip_watched_up_shows
+                and status_key == "watching"
+                and simkl_type in ("shows", "anime")
+            ):
+                before = len(items)
+                items = [
+                    item for item in items
+                    if not self._is_watched_up(item)
+                ]
+                skipped = before - len(items)
+                if skipped:
+                    logger.info(
+                        "Skipped %d fully-watched-up %s from SIMKL Watching list",
+                        skipped, simkl_type,
+                    )
             name = _status_list_name(simkl_type, status_key)
             display_name = _display_status_name(simkl_type, status_key)
             description = (

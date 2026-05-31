@@ -688,7 +688,8 @@
                   <div class="hint">Minimum 21600 s (6 h). Default 43200 s (12 h). Scheduled from end of last successful run.</div>
                 </div>
                 <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label>Remove items no longer in source</label></div>
-                <div class="toggle-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label>Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label>Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                <div class="toggle-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-simkl-skip-watched-up" checked><span class="slider"></span></label><label>Skip fully caught-up shows from SIMKL Watching list</label><div class="hint">Hides shows where you've watched all aired episodes from the Watching list. They stay on SIMKL as 'Watching' for future seasons.</div></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">PMDB Native Watchlist</div>
@@ -1225,6 +1226,7 @@
         trakt_sync_to_pmdb_watchlist: el('opt-trakt-pmdb-watchlist').checked,
         anilist_sync_to_pmdb_watchlist: el('opt-anilist-pmdb-watchlist').checked,
         delete_disabled_lists: el('opt-delete-disabled-lists').checked,
+        simkl_skip_watched_up_shows: el('opt-simkl-skip-watched-up').checked,
         activity_history_source: el('opt-activity-history-source').value,
         auto_history_sync: el('opt-auto-history-sync').checked,
         simkl_history_anime_only: el('opt-simkl-history-anime-only').checked,
@@ -1351,6 +1353,7 @@
       el('opt-trakt-pmdb-watchlist').checked = !!options.trakt_sync_to_pmdb_watchlist;
       el('opt-anilist-pmdb-watchlist').checked = !!options.anilist_sync_to_pmdb_watchlist;
       el('opt-delete-disabled-lists').checked = !!options.delete_disabled_lists;
+      el('opt-simkl-skip-watched-up').checked = options.simkl_skip_watched_up_shows !== false;
       el('opt-activity-history-source').value = options.activity_history_source || (options.simkl_sync_watched_history ? 'simkl' : (options.trakt_sync_watched_history ? 'trakt' : 'off'));
       el('opt-auto-history-sync').checked = !!options.auto_history_sync;
       el('opt-history-interval-seconds').value = Math.max(86400, options.trakt_watched_history_interval_seconds || 86400);

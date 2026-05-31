@@ -359,6 +359,12 @@ class SimklClient:
             "ids": ids,
             "status": entry.get("status"),
             "added_at": entry.get("added_to_watchlist_at"),
+            "watched_episodes_count": _safe_lookup_int(entry.get("watched_episodes_count")) or 0,
+            "total_episodes_count": _safe_lookup_int(
+                entry.get("total_episodes_count")
+                or media.get("total_episodes")
+                or media.get("episodes")
+            ) or 0,
         }
 
     @staticmethod
