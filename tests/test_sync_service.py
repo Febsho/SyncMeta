@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1429,6 +1430,133 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(watched_stats.items_fetched, 0)
         self.assertEqual(watched_stats.items_added, 0)
         self.assertEqual(pmdb.watched, [])
+
+    def test_simkl_completed_anime_fallback_accepts_media_typed_tmdb_id(self) -> None:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["anime"],
+                simkl_sync_watched_history=True,
+                simkl_history_anime_only=True,
+            ),
+        )
+
+        class CompletedAnimeSimklClient(StubSimklClient):
+            def get_watched_history(self, since: str | None = None) -> list[dict]:
+                self.last_history_since = since
+                return []
+
+            def get_status(self, status_key: str, media_types: list[str]) -> dict[str, list[dict]]:
+                if status_key == "completed":
+                    return {"anime": [{
+                        "media_type": "tv",
+                        "simkl_type": "anime",
+                        "title": "Completed Anime",
+                        "tmdb_id": {"tv": 63926},
+                        "status": "completed",
+                        "last_watched_at": "2026-04-01T13:00:00Z",
+                    }]}
+                return super().get_status(status_key, media_types)
+
+        service = SyncService(config)
+        pmdb = StubPMDBClient()
+        service._simkl = CompletedAnimeSimklClient()
+        service._matcher = StubActivityMatcher()
+        service._pmdb = pmdb
+
+        results = service.run()
+
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+        self.assertEqual(watched_stats.items_added, 1)
+        self.assertEqual(pmdb.watched[0]["tmdb_id"], 63926)
+        self.assertEqual(pmdb.watched[0]["season"], 1)
+
+    def test_simkl_completed_anime_fallback_skips_without_completed_evidence(self) -> None:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["anime"],
+                simkl_sync_watched_history=True,
+                simkl_history_anime_only=True,
+            ),
+        )
+
+        class AmbiguousAnimeSimklClient(StubSimklClient):
+            def get_watched_history(self, since: str | None = None) -> list[dict]:
+                self.last_history_since = since
+                return []
+
+            def get_status(self, status_key: str, media_types: list[str]) -> dict[str, list[dict]]:
+                if status_key == "completed":
+                    return {"anime": [{
+                        "media_type": "tv",
+                        "simkl_type": "anime",
+                        "title": "Ambiguous Anime",
+                        "tmdb_id": 63926,
+                    }]}
+                return super().get_status(status_key, media_types)
+
+        service = SyncService(config)
+        pmdb = StubPMDBClient()
+        service._simkl = AmbiguousAnimeSimklClient()
+        service._matcher = StubActivityMatcher()
+        service._pmdb = pmdb
+
+        results = service.run()
+
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+        self.assertEqual(watched_stats.items_added, 0)
+        self.assertEqual(pmdb.watched, [])
+
+    def test_list_write_preserves_source_order_after_parallel_resolution(self) -> None:
+        config = AppConfig(
+            simkl=SimklConfig(client_id="simkl-client", access_token="simkl-token"),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(remove_missing=False, delete_disabled_lists=False, dry_run=False, media_types=["movies"]),
+        )
+
+        class SlowFirstMatcher:
+            def stats_snapshot(self) -> dict[str, int]:
+                return {"lookups": 0, "cache_hits": 0, "failed_cache_hits": 0}
+
+            def resolve_match(self, item: dict) -> MatchResult:
+                if item["title"] == "First":
+                    time.sleep(0.02)
+                    return MatchResult(tmdb_id=111, resolution_kind="direct_tmdb")
+                return MatchResult(tmdb_id=222, resolution_kind="direct_tmdb")
+
+        service = SyncService(config)
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+        service._matcher = SlowFirstMatcher()
+
+        service._sync_list(
+            [
+                {"title": "First", "media_type": "movie"},
+                {"title": "Second", "media_type": "movie"},
+            ],
+            "Order Test",
+            "Order Test",
+            source_name="SIMKL",
+        )
+
+        self.assertEqual([item["tmdb_id"] for item in pmdb.added_items], [111, 222])
 
     def test_simkl_history_remaps_sequel_anime_into_single_root_season(self) -> None:
         class OffsetAnimeSimklClient(StubSimklClient):

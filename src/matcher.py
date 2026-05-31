@@ -54,6 +54,30 @@ _BLOCKED_ANIME_PMDB_TMDB_IDS: frozenset[int] = frozenset([
 ])
 
 
+def _coerce_tmdb_id(value: object, media_type: str = "") -> int | None:
+    if isinstance(value, dict):
+        media_key = str(media_type or "").strip().lower()
+        candidates: list[str] = []
+        if media_key:
+            candidates.append(media_key)
+        if media_key == "tv":
+            candidates.extend(["show", "series"])
+        elif media_key == "movie":
+            candidates.append("movies")
+        candidates.extend(["tv", "movie", "show", "series"])
+        for key in candidates:
+            if key in value:
+                return _coerce_tmdb_id(value.get(key), media_type)
+        return None
+    try:
+        if value is None or value == "":
+            return None
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class MatchResult:
     tmdb_id: int | None
@@ -77,7 +101,12 @@ class ItemMatcher:
         self._pmdb = pmdb
         # Pre-populate with persisted resolutions from a previous sync run so
         # unchanged items resolve instantly without any external API calls.
-        self._cache: dict[str, int | None] = dict(initial_cache) if initial_cache else {}
+        self._cache: dict[str, int | None] = {
+            str(key): coerced
+            for key, value in (initial_cache or {}).items()
+            for coerced in [_coerce_tmdb_id(value)]
+            if coerced is not None
+        }
         # Lock protecting _cache and _failed_cache so concurrent provider syncs
         # (e.g. SIMKL shows + AniList anime) don't race on cache writes.
         self._lock = threading.Lock()
@@ -258,12 +287,13 @@ class ItemMatcher:
             if callable(detailed_lookup):
                 detail = detailed_lookup(id_type, ext_id, media_type) or {}
                 return (
-                    detail.get("tmdb_id"),
+                    _coerce_tmdb_id(detail.get("tmdb_id"), media_type),
                     str(detail.get("status") or "miss"),
                     int(detail.get("votes") or 0),
                     str(detail.get("title") or ""),
                 )
             tmdb_id = self._pmdb.lookup_by_external_id(id_type, ext_id, media_type)
+            tmdb_id = _coerce_tmdb_id(tmdb_id, media_type)
             return tmdb_id, "hit" if tmdb_id else "miss", 0, ""
         except requests.HTTPError as exc:
             response = getattr(exc, "response", None)
@@ -476,9 +506,9 @@ class ItemMatcher:
 
         if not is_anime:
             tmdb_raw = item.get("tmdb_id")
-            if tmdb_raw:
+            tmdb_id = _coerce_tmdb_id(tmdb_raw, media_type)
+            if tmdb_id:
                 try:
-                    tmdb_id = int(tmdb_raw)
                     logger.debug("Resolved '%s' via direct TMDB ID: %d", title, tmdb_id)
                     result = MatchResult(
                         tmdb_id=tmdb_id,
@@ -552,10 +582,10 @@ class ItemMatcher:
                 lookup_unavailable = True
 
         tmdb_raw = item.get("tmdb_id")
-        if tmdb_raw:
+        tmdb_id = _coerce_tmdb_id(tmdb_raw, media_type)
+        if tmdb_id:
             if not is_anime or self._can_accept_anime_direct_tmdb(item):
                 try:
-                    tmdb_id = int(tmdb_raw)
                     logger.debug("Resolved '%s' via direct TMDB ID: %d", title, tmdb_id)
                     result = MatchResult(
                         tmdb_id=tmdb_id,
@@ -685,11 +715,7 @@ class ItemMatcher:
                 anime_mapping_source="fribb_exact",
             )
 
-        tmdb_raw = entry.get("themoviedb")
-        try:
-            tmdb_id = int(tmdb_raw) if tmdb_raw else None
-        except (TypeError, ValueError):
-            tmdb_id = None
+        tmdb_id = _coerce_tmdb_id(entry.get("themoviedb"), item.get("media_type") or "")
         if not tmdb_id:
             return MatchResult(
                 tmdb_id=None,
@@ -738,7 +764,8 @@ class ItemMatcher:
         )
         try:
             tmdb_raw = item.get("tmdb_id")
-            if tmdb_raw:
+            tmdb_id = _coerce_tmdb_id(tmdb_raw, item.get("media_type") or "")
+            if tmdb_id:
                 from . import fribb_client
                 ids = item.get("ids") or {}
                 lookup_order = (
@@ -761,12 +788,12 @@ class ItemMatcher:
                 if exact_entry is not None:
                     fribb_tmdb = exact_entry.get("themoviedb")
                     if fribb_tmdb:
-                        return int(tmdb_raw) == int(fribb_tmdb)
+                        return tmdb_id == _coerce_tmdb_id(fribb_tmdb, item.get("media_type") or "")
                     fribb_type = str(exact_entry.get("type") or "").strip().lower()
                     expected_media_type = "movie" if fribb_type == "movie" else "tv"
                     item_media_type = str(item.get("media_type") or "").strip().lower()
                     if item_media_type == expected_media_type:
-                        return fribb_client.validate_tmdb(exact_entry, int(tmdb_raw))
+                        return fribb_client.validate_tmdb(exact_entry, tmdb_id)
         except Exception:
             logger.debug("Anime direct TMDB verification failed; trying softer fallback", exc_info=True)
         if not self._anime_root_resolver:

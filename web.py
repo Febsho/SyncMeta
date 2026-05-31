@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import contextvars
 import gzip as _gzip
 import logging
 import os
@@ -12,10 +13,13 @@ import secrets
 import threading
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
+from collections import defaultdict, deque
 from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, make_response, redirect, render_template, request, url_for
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from src.config import (
     AniListConfig,
@@ -62,6 +66,7 @@ ACCESS_WINDOW_SECONDS = int(os.getenv("SYNCMETA_ACCESS_WINDOW_SECONDS", "900"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 ADMIN_COOKIE_NAME = "syncmeta_admin"
 ADMIN_SESSION_TTL = 3600
+PROFILE_LOG_LIMIT = max(100, int(os.getenv("SYNCMETA_PROFILE_LOG_LIMIT", "500") or "500"))
 _server_start_time = time.time()
 
 SIMKL_STATUS_BY_LABEL = {
@@ -86,30 +91,61 @@ ANILIST_STATUS_BY_LABEL = {
 _profile_store = ProfileStore(PROFILE_STORE_FILE)
 _scheduler_lock = threading.Lock()
 _scheduler_started = False
+_log_profile_id: contextvars.ContextVar[str] = contextvars.ContextVar("syncmeta_profile_id", default="")
+
+
+def _stable_session_secret() -> str:
+    explicit = str(os.getenv("SYNCMETA_SESSION_SECRET", "")).strip()
+    if explicit:
+        return explicit
+    master = str(os.getenv("SYNCMETA_MASTER_KEY", "")).strip()
+    if master:
+        return master
+    key_file = Path(os.getenv("SYNCMETA_MASTER_KEY_FILE", PROFILE_STORE_FILE.parent / "profiles.key"))
+    if key_file.exists():
+        value = key_file.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    return "syncmeta-dev-session-secret"
 
 
 class ServerSessionStore:
-    """Simple in-memory session store keyed by opaque cookies."""
+    """Signed cookie session store with legacy in-memory-token fallback."""
 
-    def __init__(self, ttl_seconds: int = SESSION_TTL_SECONDS):
+    def __init__(self, ttl_seconds: int = SESSION_TTL_SECONDS, salt: str = "syncmeta-session"):
         self._ttl_seconds = ttl_seconds
+        self._signer = URLSafeTimedSerializer(_stable_session_secret(), salt=salt)
         self._lock = threading.RLock()
         self._sessions: dict[str, dict] = {}
+        self._revoked: dict[str, float] = {}
 
     def create(self, profile_id: str) -> str:
-        token = secrets.token_urlsafe(32)
         now = time.time()
-        with self._lock:
-            self._sessions[token] = {
-                "profile_id": profile_id,
-                "expires_at": now + self._ttl_seconds,
-            }
-        return token
+        payload = {
+            "profile_id": profile_id,
+            "nonce": secrets.token_urlsafe(8),
+            "iat": int(now),
+        }
+        return self._signer.dumps(payload)
 
     def get_profile_id(self, token: str | None) -> str | None:
         if not token:
             return None
         now = time.time()
+        with self._lock:
+            self._prune_revoked_locked(now)
+            if token in self._revoked:
+                return None
+        try:
+            payload = self._signer.loads(token, max_age=self._ttl_seconds)
+            profile_id = str(payload.get("profile_id", "")).strip() if isinstance(payload, dict) else ""
+            return profile_id or None
+        except SignatureExpired:
+            return None
+        except BadSignature:
+            pass
+
+        # Legacy support for cookies issued before signed sessions existed.
         with self._lock:
             session = self._sessions.get(token)
             if not session:
@@ -123,8 +159,68 @@ class ServerSessionStore:
     def destroy(self, token: str | None) -> None:
         if not token:
             return
+        expires_at = time.time() + self._ttl_seconds
         with self._lock:
             self._sessions.pop(token, None)
+            self._revoked[token] = expires_at
+
+    def _prune_revoked_locked(self, now: float) -> None:
+        stale = [token for token, expires_at in self._revoked.items() if expires_at <= now]
+        for token in stale:
+            self._revoked.pop(token, None)
+
+
+class ProfileLogStore:
+    """Bounded in-memory log buffer partitioned by profile id."""
+
+    def __init__(self, per_profile_limit: int = PROFILE_LOG_LIMIT):
+        self._per_profile_limit = per_profile_limit
+        self._lock = threading.RLock()
+        self._seq = 0
+        self._entries: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=self._per_profile_limit))
+
+    def append(self, profile_id: str, record: logging.LogRecord) -> None:
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return
+        message = _sanitize_error_text(record.getMessage())
+        if not message:
+            return
+        with self._lock:
+            self._seq += 1
+            self._entries[profile_id].append({
+                "id": self._seq,
+                "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": message,
+            })
+
+    def get(self, profile_id: str, after: int = 0, limit: int = 200) -> dict:
+        profile_id = str(profile_id or "").strip()
+        limit = min(max(int(limit or 200), 1), self._per_profile_limit)
+        after = max(int(after or 0), 0)
+        with self._lock:
+            entries = list(self._entries.get(profile_id, ()))
+        filtered = [entry for entry in entries if int(entry.get("id", 0)) > after]
+        if len(filtered) > limit:
+            filtered = filtered[-limit:]
+        latest_id = entries[-1]["id"] if entries else after
+        return {"entries": filtered, "latest_id": latest_id}
+
+    def clear(self, profile_id: str) -> None:
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return
+        with self._lock:
+            self._entries.pop(profile_id, None)
+
+
+class ProfileLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        profile_id = str(getattr(record, "profile_id", "") or _log_profile_id.get("") or "").strip()
+        if profile_id:
+            _profile_log_store.append(profile_id, record)
 
 
 class LoginAttemptLimiter:
@@ -164,8 +260,12 @@ class LoginAttemptLimiter:
 
 _session_store = ServerSessionStore()
 _login_limiter = LoginAttemptLimiter()
-_access_store = ServerSessionStore()
+_access_store = ServerSessionStore(salt="syncmeta-site-access")
 _access_limiter = LoginAttemptLimiter(max_attempts=ACCESS_MAX_ATTEMPTS, window_seconds=ACCESS_WINDOW_SECONDS)
+_profile_log_store = ProfileLogStore()
+_profile_log_handler = ProfileLogHandler()
+_profile_log_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_profile_log_handler)
 
 
 _SECRET_PATTERNS = [
@@ -522,6 +622,7 @@ def _clear_access_cookie(response):
 def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | None = None) -> None:
     profile_id = profile["profile_id"]
     modes = sync_modes or profile.get("pending_sync_modes") or {"lists": True, "history": False, "resume": False}
+    log_token = _log_profile_id.set(profile_id)
     try:
         try:
             latest_profile = _profile_store.get_private_profile_by_id(profile_id)
@@ -580,6 +681,8 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             dry_run=dry_run,
             sync_modes=modes,
         )
+    finally:
+        _log_profile_id.reset(log_token)
 
 
 class SyncRunner:
@@ -1140,6 +1243,9 @@ def _ensure_scheduler_started() -> None:
 @app.before_request
 def _before_request() -> None:
     _ensure_scheduler_started()
+    profile_id = _current_profile_id()
+    if profile_id:
+        request.environ["syncmeta_log_token"] = _log_profile_id.set(profile_id)
     if not SITE_ACCESS_PASSWORD:
         return
     # Profile login and creation must always be reachable so users can
@@ -1154,6 +1260,14 @@ def _before_request() -> None:
         # for other requests and clearing it would cascade-lock the user out.
         return make_response(jsonify({"error": "Site password required"}), 401)
     return _clear_access_cookie(make_response(render_template("access.html", error=None), 401))
+
+
+@app.after_request
+def _reset_log_profile(response):
+    token = request.environ.pop("syncmeta_log_token", None)
+    if token is not None:
+        _log_profile_id.reset(token)
+    return response
 
 
 @app.after_request
@@ -1249,11 +1363,13 @@ def api_profile_login():
 
     _login_limiter.clear(client_key)
     session_token = _session_store.create(profile["profile_id"])
+    logger.info("Profile signed in", extra={"profile_id": profile["profile_id"]})
     return _with_session_cookie(_profile_response(profile, include_credentials=True), session_token)
 
 
 @app.route("/api/profile/logout", methods=["POST"])
 def api_profile_logout():
+    logger.info("Profile signed out")
     _session_store.destroy(_session_token())
     return _clear_session_cookie(make_response(jsonify({"status": "logged_out"})))
 
@@ -1667,6 +1783,29 @@ def api_profile_sync_run_details():
     return jsonify({"run": _sanitize_run_detail(payload)})
 
 
+@app.route("/api/profile/logs", methods=["POST"])
+def api_profile_logs():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        after = int(body.get("after", 0) or 0)
+        limit = int(body.get("limit", 200) or 200)
+    except (TypeError, ValueError):
+        return _json_error("Invalid log cursor", 400)
+    return jsonify(_profile_log_store.get(profile_id, after=after, limit=limit))
+
+
+@app.route("/api/profile/logs/clear", methods=["POST"])
+def api_profile_logs_clear():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    _profile_log_store.clear(profile_id)
+    return jsonify({"status": "cleared"})
+
+
 @app.route("/api/profile/list/delete", methods=["POST"])
 def api_profile_list_delete():
     body = request.get_json(silent=True) or {}
@@ -1730,6 +1869,7 @@ def api_profile_sync():
 
     sync_modes = {"lists": True, "history": False, "resume": False}
     _sync_runner.enqueue(profile, dry_run, sync_modes)
+    logger.info("Queued %slist sync", "dry-run " if dry_run else "")
     return jsonify({"status": "started", "dry_run": dry_run, "queued_jobs": _sync_runner.queue_size()})
 
 
@@ -1768,6 +1908,7 @@ def api_profile_activity_sync():
         return _json_error("Sync already in progress", 409)
 
     _sync_runner.enqueue(claimed, False, sync_modes)
+    logger.info("Queued %s sync", mode)
     return jsonify({"status": "started", "mode": mode, "queued_jobs": _sync_runner.queue_size()})
 
 

@@ -16,6 +16,7 @@ class WebTests(unittest.TestCase):
         self.original_admin_password = web.ADMIN_PASSWORD
         web._profile_store = web.ProfileStore(Path(self.tmpdir.name) / "profiles.json")
         web._session_store = web.ServerSessionStore(ttl_seconds=3600)
+        web._profile_log_store = web.ProfileLogStore()
         web._login_limiter = web.LoginAttemptLimiter(max_attempts=5, window_seconds=60)
         web._access_store = web.ServerSessionStore(ttl_seconds=3600)
         web._access_limiter = web.LoginAttemptLimiter(max_attempts=5, window_seconds=60)
@@ -472,6 +473,62 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status_data["profile"]["profile_id"], profile["profile_id"])
         self.assertTrue(status_data["profile"]["credentials"]["simkl"]["access_token_saved"])
         self.assertNotIn("access_token", status_data["profile"]["credentials"]["simkl"])
+
+    def test_signed_profile_session_survives_session_store_recreation(self) -> None:
+        profile = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+
+        login_response = self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"],
+            "password": "secret",
+        })
+        self.assertEqual(login_response.status_code, 200)
+
+        web._session_store = web.ServerSessionStore(ttl_seconds=3600)
+        status_response = self.client.post("/api/profile/status", json={"include_credentials": True})
+        status_data = status_response.get_json()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_data["profile"]["profile_id"], profile["profile_id"])
+        self.assertTrue(status_data["profile"]["credentials"]["pmdb"]["api_key_saved"])
+
+    def test_profile_logs_are_scoped_to_signed_in_profile(self) -> None:
+        first = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+        second = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+
+        self.client.post("/api/profile/login", json={"profile_id": first["profile_id"], "password": "secret"})
+        web.logger.info("first-only log", extra={"profile_id": first["profile_id"]})
+        web.logger.info("second-only log", extra={"profile_id": second["profile_id"]})
+
+        logs_response = self.client.post("/api/profile/logs", json={"after": 0})
+        messages = [entry["message"] for entry in logs_response.get_json()["entries"]]
+
+        self.assertEqual(logs_response.status_code, 200)
+        self.assertIn("first-only log", messages)
+        self.assertNotIn("second-only log", messages)
+
+        clear_response = self.client.post("/api/profile/logs/clear", json={})
+        logs_after_clear = self.client.post("/api/profile/logs", json={"after": 0})
+
+        self.assertEqual(clear_response.status_code, 200)
+        self.assertEqual(logs_after_clear.get_json()["entries"], [])
 
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {

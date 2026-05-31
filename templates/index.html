@@ -75,6 +75,9 @@
     .conn-token-error.visible{display:flex}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--z800);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
     .empty{text-align:center;padding:40px 20px;color:var(--z600);font-size:13px}.history-item{padding:12px 18px;border-bottom:1px solid rgba(39,39,46,.3);font-size:13px;display:flex;justify-content:space-between;align-items:center}.history-item:last-child{border-bottom:none}.history-time{color:var(--z500);font-size:12px}.history-stats{display:flex;gap:14px;font-variant-numeric:tabular-nums}
+    .log-console{min-height:280px;max-height:62vh;overflow:auto;background:#000;border-top:1px solid var(--z900);padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.55}
+    .log-row{display:grid;grid-template-columns:170px 58px 130px minmax(0,1fr);gap:10px;padding:3px 0;color:var(--z400);border-bottom:1px solid rgba(39,39,46,.18)}
+    .log-row:last-child{border-bottom:none}.log-time{color:var(--z600);font-variant-numeric:tabular-nums}.log-level{font-weight:800}.log-level.INFO{color:var(--green)}.log-level.WARNING{color:var(--orange)}.log-level.ERROR,.log-level.CRITICAL{color:var(--red)}.log-name{color:var(--z500);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.log-message{color:var(--z300);word-break:break-word}.log-toolbar{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}.log-live.active{border-color:rgba(52,211,153,.5);color:var(--green);background:rgba(20,83,45,.18)}
     .activity-cards{margin-bottom:0}
     .activity-card{min-height:150px}
     .activity-card .card-value{display:flex;align-items:baseline;gap:8px}
@@ -230,6 +233,7 @@
       .panel-header .actions-bar{margin-top:0;flex-wrap:wrap}
       .panel-body{padding:14px}
       .history-item{flex-wrap:wrap;gap:4px}
+      .log-row{grid-template-columns:1fr;gap:2px;padding:8px 0}.log-console{max-height:none}
       .history-stats{flex-wrap:wrap;gap:8px}
       .table-actions{min-width:0;width:auto}
       .inline-actions{min-width:0;flex-wrap:wrap}
@@ -278,6 +282,7 @@
       </a>
       <div class="nav-links">
         <button class="nav-link" data-nav="dashboard" style="display:none">Dashboard</button>
+        <button class="nav-link" data-nav="logs" style="display:none">Logs</button>
         <button class="nav-link" data-nav="stats" style="display:none">Stats</button>
         <button class="nav-link" data-nav="settings" style="display:none">Settings</button>
         <a class="nav-external" href="https://github.com/Febsho/SyncMeta-for-PublicMetaDB" target="_blank" rel="noopener">GitHub</a>
@@ -383,6 +388,20 @@
         <div class="panel" id="sync-history-panel">
           <div class="panel-header">Sync History</div>
           <div id="history-body"><div class="empty">No history yet.</div></div>
+        </div>
+      </div>
+
+      <div id="view-logs" style="display:none">
+        <div class="panel">
+          <div class="panel-header">
+            <span>Application Logs</span>
+            <div class="log-toolbar">
+              <span class="history-time" id="profile-logs-status">Only logs from the signed-in profile are shown.</span>
+              <button class="btn btn-sm log-live active" type="button" id="btn-profile-logs-live" onclick="toggleProfileLogsLive()">▶ Live</button>
+              <button class="btn btn-sm" type="button" onclick="clearProfileLogs()">Clear</button>
+            </div>
+          </div>
+          <div class="log-console" id="profile-logs-body"><div class="empty">Waiting for log entries...</div></div>
         </div>
       </div>
 
@@ -874,6 +893,10 @@
     let currentIssueTab = 'unresolved';
     let runDetailsCache = {};
     let latestDetailedRuns = [];
+    let profileLogs = [];
+    let profileLogsCursor = 0;
+    let profileLogsPolling = null;
+    let profileLogsLive = true;
     let _statusGeneration = 0; // bumped to discard renders from stale in-flight polls
     let profileDraftDirty = false;
     let pollingIntervalMs = 0;
@@ -1531,19 +1554,21 @@
         clearInterval(siteStatsPolling);
         siteStatsPolling = null;
       }
+      stopProfileLogPolling();
     }
 
     function switchView(name) {
       const navTarget = name;
       if (['connections', 'rules'].includes(name)) {
         name = 'settings';
-      } else if (['sync-now', 'mapping', 'history', 'logs'].includes(name)) {
+      } else if (['sync-now', 'mapping', 'history'].includes(name)) {
         name = 'dashboard';
       }
       document.querySelectorAll('.nav-link').forEach(link => {
-        link.classList.toggle('active', link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard'));
+        link.classList.toggle('active', link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard' && !['logs'].includes(navTarget)));
       });
       el('view-dashboard').style.display = name === 'dashboard' ? 'block' : 'none';
+      el('view-logs').style.display = name === 'logs' ? 'block' : 'none';
       el('view-stats').style.display = name === 'stats' ? 'block' : 'none';
       el('view-settings').style.display = name === 'settings' ? 'block' : 'none';
       if (navTarget === 'connections') {
@@ -1558,8 +1583,10 @@
       } else if (navTarget === 'history') {
         setTimeout(() => el('sync-history-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
       } else if (navTarget === 'logs') {
-        setTimeout(() => el('logs-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+        fetchProfileLogs(true);
+        startProfileLogPolling();
       }
+      if (navTarget !== 'logs') stopProfileLogPolling();
       if (name === 'stats') {
         fetchSiteStats();
         if (!siteStatsPolling) {
@@ -1584,6 +1611,7 @@
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify(payload),
       });
       let data = {};
@@ -1594,12 +1622,100 @@
     }
 
     async function apiGet(url) {
-      const response = await fetch(url, { method: 'GET' });
+      const response = await fetch(url, { method: 'GET', credentials: 'same-origin' });
       let data = {};
       try {
         data = await response.json();
       } catch {}
       return { ok: response.ok, status: response.status, data: data };
+    }
+
+    function renderProfileLogs() {
+      const body = el('profile-logs-body');
+      if (!body) return;
+      if (!profileLogs.length) {
+        body.innerHTML = '<div class="empty">Waiting for log entries...</div>';
+        return;
+      }
+      body.innerHTML = profileLogs.map(entry => {
+        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+        const level = String(entry.level || 'INFO').toUpperCase();
+        return `<div class="log-row">
+          <div class="log-time">${esc(stamp)}</div>
+          <div class="log-level ${esc(level)}">${esc(level)}</div>
+          <div class="log-name">${esc(entry.logger || 'app')}</div>
+          <div class="log-message">${esc(entry.message || '')}</div>
+        </div>`;
+      }).join('');
+      if (profileLogsLive) body.scrollTop = body.scrollHeight;
+    }
+
+    async function fetchProfileLogs(reset) {
+      const statusNode = el('profile-logs-status');
+      if (reset) {
+        profileLogs = [];
+        profileLogsCursor = 0;
+        renderProfileLogs();
+      }
+      try {
+        const result = await apiPost('/api/profile/logs', { after: profileLogsCursor, limit: reset ? 200 : 100 });
+        if (!result.ok) {
+          if (statusNode) statusNode.textContent = result.status === 401 ? 'Sign in to view your profile logs.' : 'Could not load logs.';
+          stopProfileLogPolling();
+          return;
+        }
+        const entries = Array.isArray(result.data.entries) ? result.data.entries : [];
+        if (entries.length) {
+          profileLogs = profileLogs.concat(entries).slice(-500);
+          profileLogsCursor = Number(entries[entries.length - 1].id || result.data.latest_id || profileLogsCursor);
+          renderProfileLogs();
+        } else {
+          profileLogsCursor = Number(result.data.latest_id || profileLogsCursor);
+        }
+        if (statusNode) statusNode.textContent = entries.length ? `Last update: ${new Date().toLocaleTimeString()}` : 'Live and waiting for new profile logs.';
+      } catch {
+        if (statusNode) statusNode.textContent = 'Log connection unavailable.';
+      }
+    }
+
+    function startProfileLogPolling() {
+      if (!profileLogsLive || profileLogsPolling) return;
+      profileLogsPolling = setInterval(() => fetchProfileLogs(false), 2000);
+    }
+
+    function stopProfileLogPolling() {
+      if (profileLogsPolling) {
+        clearInterval(profileLogsPolling);
+        profileLogsPolling = null;
+      }
+    }
+
+    function toggleProfileLogsLive() {
+      profileLogsLive = !profileLogsLive;
+      const btn = el('btn-profile-logs-live');
+      if (btn) {
+        btn.classList.toggle('active', profileLogsLive);
+        btn.textContent = profileLogsLive ? '▶ Live' : 'Paused';
+      }
+      if (profileLogsLive) {
+        fetchProfileLogs(false);
+        startProfileLogPolling();
+      } else {
+        stopProfileLogPolling();
+      }
+    }
+
+    async function clearProfileLogs() {
+      const result = await apiPost('/api/profile/logs/clear', {});
+      if (!result.ok) {
+        showToast(formatApiError(result.data, 'Could not clear logs.'), true, false);
+        return;
+      }
+      profileLogs = [];
+      profileLogsCursor = 0;
+      renderProfileLogs();
+      const statusNode = el('profile-logs-status');
+      if (statusNode) statusNode.textContent = 'Logs cleared for this browser view.';
     }
 
     function formatApiError(data, fallback) {

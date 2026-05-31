@@ -128,6 +128,18 @@ class PublicMetaDBClientTests(unittest.TestCase):
 
         self.assertEqual(result["tmdb_id"], 65930)
 
+    def test_lookup_normalizes_media_typed_tmdb_id_payload(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+
+        def fake_get(path: str, params: dict | None = None):
+            return {"results": [{"tmdb_id": {"tv": 63926, "movie": 123}, "votes": 1}]}
+
+        client._get = fake_get  # type: ignore[method-assign]
+
+        result = client.lookup_by_external_id_detailed("anilist", "12345", "tv")
+
+        self.assertEqual(result["tmdb_id"], 63926)
+
     def test_lookup_by_external_id_treats_401_as_unavailable(self) -> None:
         client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
 

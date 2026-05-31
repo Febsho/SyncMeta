@@ -22,6 +22,22 @@ class DetailedStubPMDBClient(StubPMDBClient):
 
 
 class ItemMatcherTests(unittest.TestCase):
+    def test_initial_cache_normalizes_media_typed_tmdb_id(self) -> None:
+        item = {
+            "title": "Demo",
+            "year": 2024,
+            "media_type": "tv",
+        }
+        matcher = ItemMatcher(
+            StubPMDBClient(),
+            initial_cache={ItemMatcher._cache_key(item): {"tv": 63926}},
+        )
+
+        result = matcher.resolve_match(item)
+
+        self.assertEqual(result.tmdb_id, 63926)
+        self.assertEqual(result.resolution_kind, "cache")
+
     def test_non_anime_falls_back_to_root_series_ids(self) -> None:
         matcher = ItemMatcher(StubPMDBClient())
 

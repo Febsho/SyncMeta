@@ -46,6 +46,30 @@ _ANILIST_PREWARM_LIMIT = _env_int("SYNCMETA_ANILIST_PREWARM_LIMIT", 50, minimum=
 _FUTURE_POLL_INTERVAL = 0.25
 
 
+def _coerce_tmdb_id(value: object, media_type: str = "") -> int | None:
+    if isinstance(value, dict):
+        media_key = str(media_type or "").strip().lower()
+        candidates: list[str] = []
+        if media_key:
+            candidates.append(media_key)
+        if media_key == "tv":
+            candidates.extend(["show", "series"])
+        elif media_key == "movie":
+            candidates.append("movies")
+        candidates.extend(["tv", "movie", "show", "series"])
+        for key in candidates:
+            if key in value:
+                return _coerce_tmdb_id(value.get(key), media_type)
+        return None
+    try:
+        if value is None or value == "":
+            return None
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 class SyncCancelled(Exception):
     """Raised when a running sync has been asked to stop."""
 
@@ -464,7 +488,9 @@ class SyncService:
             raw = fribb.get("themoviedb")
             if not raw:
                 return None
-            tmdb_id = int(raw)
+            tmdb_id = _coerce_tmdb_id(raw, item.get("media_type") or "") or 0
+            if tmdb_id <= 0:
+                return None
 
             # Validate type consistency before returning the override.
             fribb_type = str(fribb.get("type") or "").strip().lower()
@@ -950,9 +976,14 @@ class SyncService:
         """
         fallback_count = 0
         skipped_has_episodes = 0
+        skipped_without_completed_evidence = 0
         pending_items: list[dict] = []
         for item in completed_anime:
             self._check_cancelled()
+
+            if not self._has_completed_anime_evidence(item):
+                skipped_without_completed_evidence += 1
+                continue
 
             # Skip shows that already have per-episode records from the history
             # pass — adding a season mark on top would double-count in PMDB.
@@ -970,14 +1001,14 @@ class SyncService:
             # Use Fribb + PMDB anime-seasons to find the right TMDB season,
             # same pipeline as episode remapping.
             fribb = self._lookup_fribb_entry(resolved)
-            tmdb_id = int(resolved.get("tmdb_id") or 0)
+            tmdb_id = _coerce_tmdb_id(resolved.get("tmdb_id"), "tv") or 0
             tmdb_season = 1
 
             if fribb is not None:
                 remapped = self._remap_via_fribb(fribb, tmdb_id, 1)
                 if remapped:
                     if remapped.get("tmdb_id"):
-                        tmdb_id = int(remapped["tmdb_id"])
+                        tmdb_id = _coerce_tmdb_id(remapped["tmdb_id"], "tv") or 0
                     tmdb_season = remapped.get("season", 1)
             elif tmdb_id > 0:
                 offset = int(resolved.get("root_episode_offset") or 0)
@@ -1026,11 +1057,28 @@ class SyncService:
                 "  Season fallback skipped %d show(s) that already had episode records",
                 skipped_has_episodes,
             )
+        if skipped_without_completed_evidence:
+            logger.info(
+                "  Season fallback skipped %d show(s) without explicit completed/watched evidence",
+                skipped_without_completed_evidence,
+            )
         if fallback_count:
             logger.info(
                 "  Season fallback marked %d show(s) with no episode history",
                 fallback_count,
             )
+
+    @staticmethod
+    def _has_completed_anime_evidence(item: dict) -> bool:
+        status = str(item.get("status") or "").strip().lower().replace("_", " ")
+        if status in {"completed", "complete"}:
+            return True
+        return bool(
+            item.get("watched_at")
+            or item.get("last_watched_at")
+            or item.get("last_watched")
+            or item.get("completed_at")
+        )
 
     def _expand_simkl_aggregate_history(self, items: list[dict]) -> list[dict]:
         expanded: list[dict] = []
@@ -1080,7 +1128,7 @@ class SyncService:
         if watched_total <= 0:
             return []
 
-        if int(item.get("tmdb_id") or 0) <= 0:
+        if not _coerce_tmdb_id(item.get("tmdb_id"), "tv"):
             return []
         has_root_offset = int(item.get("root_episode_offset") or 0) > 0
         has_anime_ids = any(item.get(key) for key in ("anilist_id", "root_anilist_id", "mal_id", "root_mal_id"))
@@ -1118,7 +1166,7 @@ class SyncService:
 
         try:
             episode = int(item.get("episode") or 0)
-            tmdb_id = int(item.get("tmdb_id") or 0)
+            tmdb_id = _coerce_tmdb_id(item.get("tmdb_id"), "tv") or 0
             offset = int(item.get("root_episode_offset") or 0)
         except (TypeError, ValueError):
             return item
@@ -1202,7 +1250,7 @@ class SyncService:
             """
             target_season = int(remapped.get("season") or 1)
             target_episode = int(remapped.get("episode") or 1)
-            target_tmdb_id = int(remapped.get("tmdb_id") or tmdb_id)
+            target_tmdb_id = _coerce_tmdb_id(remapped.get("tmdb_id"), "tv") or tmdb_id
             plan = season_plan_map if target_tmdb_id == tmdb_id else _build_tmdb_season_map(target_tmdb_id)
             season_ep_count = plan.get(target_season)
             if season_ep_count is None:
@@ -1503,7 +1551,7 @@ class SyncService:
         fribb_tmdb = fribb.get("themoviedb")
         if not tmdb_id and fribb_tmdb:
             try:
-                tmdb_id = int(fribb_tmdb)
+                tmdb_id = _coerce_tmdb_id(fribb_tmdb, "tv") or 0
             except (TypeError, ValueError):
                 pass
 
@@ -1542,7 +1590,7 @@ class SyncService:
         if item.get("media_type") != "tv":
             return item
         try:
-            tmdb_id = int(item.get("tmdb_id") or 0)
+            tmdb_id = _coerce_tmdb_id(item.get("tmdb_id"), "tv") or 0
             tvdb_season = int(item.get("season") or 0)
             tvdb_episode = int(item.get("episode") or 0)
         except (TypeError, ValueError):
@@ -1847,7 +1895,7 @@ class SyncService:
                 completed_items.append(item)
                 continue
             payload = {
-                "tmdb_id": int(item["tmdb_id"]),
+                "tmdb_id": _coerce_tmdb_id(item.get("tmdb_id"), item.get("media_type") or "") or 0,
                 "media_type": item["media_type"],
                 "position_ms": position_ms,
                 "runtime_ms": runtime_ms,
@@ -2416,13 +2464,13 @@ class SyncService:
         if source_items:
             resolve_pool = ThreadPoolExecutor(max_workers=min(_LIST_RESOLVE_WORKERS, len(source_items)))
             resolve_futures = {
-                resolve_pool.submit(self._resolve_match, item): item
-                for item in source_items
+                resolve_pool.submit(self._resolve_match, item): (index, item)
+                for index, item in enumerate(source_items)
             }
             try:
                 for future in self._iter_completed_futures(resolve_futures):
                     self._check_cancelled()
-                    item = resolve_futures[future]
+                    source_index, item = resolve_futures[future]
                     try:
                         match_result = future.result()
                     except SyncCancelled:
@@ -2434,6 +2482,7 @@ class SyncService:
                     if tmdb_id is not None:
                         resolved.append({
                             **item,
+                            "_syncmeta_source_index": source_index,
                             "resolved_tmdb_id": tmdb_id,
                             "match_confidence": match_result.match_confidence,
                             "anime_mapping_source": match_result.anime_mapping_source,
@@ -2468,6 +2517,7 @@ class SyncService:
                 raise
             finally:
                 resolve_pool.shutdown(wait=False)
+        resolved.sort(key=lambda item: int(item.get("_syncmeta_source_index", 0)))
         resolve_elapsed = time.perf_counter() - resolve_started
         matcher_stats_after = (
             stats_snapshot() if callable(stats_snapshot) else {"lookups": 0, "cache_hits": 0, "failed_cache_hits": 0}
@@ -2798,7 +2848,7 @@ class SyncService:
             futures = {
                 pool.submit(
                     self._pmdb.mark_watched,
-                    tmdb_id=int(item["tmdb_id"]),
+                    tmdb_id=_coerce_tmdb_id(item.get("tmdb_id"), item.get("media_type") or "") or 0,
                     media_type=item["media_type"],
                     season=item.get("season"),
                     episode=item.get("episode"),
@@ -3251,13 +3301,14 @@ class SyncService:
                     **item,
                     "tmdb_id": tmdb_id,
                 }
-        if item.get("tmdb_id"):
+        direct_tmdb_id = _coerce_tmdb_id(item.get("tmdb_id"), item.get("media_type") or "")
+        if direct_tmdb_id:
             if self._should_backfill_pmdb_mapping(item):
                 try:
-                    self._contribute_id_mapping(item, int(item["tmdb_id"]), resolution_kind="direct_tmdb")
+                    self._contribute_id_mapping(item, direct_tmdb_id, resolution_kind="direct_tmdb")
                 except (TypeError, ValueError):
                     pass
-            return item
+            return {**item, "tmdb_id": direct_tmdb_id}
         match_result = self._resolve_match(item)
         tmdb_id = match_result.tmdb_id
         if tmdb_id is None:

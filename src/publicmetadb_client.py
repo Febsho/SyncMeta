@@ -21,6 +21,31 @@ RATE_LIMIT_MAX = 280  # Leave some headroom
 RATE_LIMIT_WINDOW = 10.0
 
 
+def _coerce_tmdb_id(value: object, media_type: str = "") -> int | None:
+    """Normalize PMDB mapping IDs that may be returned as int or media dict."""
+    if isinstance(value, dict):
+        media_key = str(media_type or "").strip().lower()
+        candidates: list[str] = []
+        if media_key:
+            candidates.append(media_key)
+        if media_key == "tv":
+            candidates.extend(["show", "series"])
+        elif media_key == "movie":
+            candidates.append("movies")
+        candidates.extend(["tv", "movie", "show", "series"])
+        for key in candidates:
+            if key in value:
+                return _coerce_tmdb_id(value.get(key), media_type)
+        return None
+    try:
+        if value is None or value == "":
+            return None
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class PublicMetaDBStats:
     mapping_lookup_hits: int = 0
@@ -342,7 +367,7 @@ class PublicMetaDBClient:
                 # voted entry avoids landing on the wrong franchise entry.
                 best = max(results, key=lambda r: r.get("votes", 0))
                 return {
-                    "tmdb_id": best.get("tmdb_id"),
+                    "tmdb_id": _coerce_tmdb_id(best.get("tmdb_id"), media_type),
                     "status": "hit",
                     # Expose vote count so callers can apply extra scrutiny on
                     # zero-vote (self-submitted, unconfirmed) mappings.
