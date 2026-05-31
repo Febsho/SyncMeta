@@ -594,11 +594,13 @@ class SyncService:
                     for future in self._iter_completed_futures(futures):
                         source_name = futures[future]
                         try:
-                            all_stats.extend(future.result())
+                            result = future.result()
+                            all_stats.extend(result)
+                            logger.info("%s sync completed: %d list(s)", source_name, len(result))
                         except SyncCancelled:
                             cancelled = True
                         except Exception as exc:
-                            logger.error("%s sync failed: %s", source_name, exc)
+                            logger.error("%s sync failed: %s", source_name, exc, exc_info=True)
                         self._publish_progress(all_stats, force=True)
                 except SyncCancelled:
                     shutdown_wait = False
@@ -2016,7 +2018,7 @@ class SyncService:
             self._config.simkl.selected_statuses.get("anime")
             and "anime" in self._config.sync.media_types
         )
-        if all_anilist_ids and simkl_anime_enabled:
+        if all_anilist_ids:
             prewarm_ids = all_anilist_ids[:_ANILIST_PREWARM_LIMIT]
             self._set_status("Pre-warming anime metadata cache")
             get_ctx = getattr(client, "_get_root_context", None)
@@ -2040,11 +2042,6 @@ class SyncService:
                 len(prewarm_ids),
                 len(all_anilist_ids),
             )
-        elif all_anilist_ids:
-            logger.info(
-                "Skipped AniList pre-warm for %d IDs because SIMKL anime sync is not enabled",
-                len(all_anilist_ids),
-            )
 
         all_anilist_items = [item for _, items in all_items_by_status for item in items]
         if all_anilist_items and hasattr(self._matcher, "preseed_anime_from_fribb"):
@@ -2056,8 +2053,9 @@ class SyncService:
             display_name = _display_status_name("anime", status_key)
             self._publish_pending_list(name, display_name, "AniList")
             description = f"Auto-synced '{_STATUS_LABELS.get(status_key, status_key)}' anime from AniList"
-            stats.append(
-                self._sync_list(
+            logger.info("AniList: syncing '%s' with %d items", display_name, len(items))
+            try:
+                result = self._sync_list(
                     items,
                     name,
                     description,
@@ -2070,7 +2068,16 @@ class SyncService:
                         "status": status_key,
                     },
                 )
-            )
+                stats.append(result)
+                logger.info(
+                    "AniList: '%s' done — fetched=%d resolved=%d added=%d errors=%d",
+                    display_name, result.items_fetched, result.items_resolved,
+                    result.items_added, len(result.errors),
+                )
+            except SyncCancelled:
+                raise
+            except Exception as exc:
+                logger.error("AniList: failed to sync '%s': %s", display_name, exc, exc_info=True)
 
         return stats
 
