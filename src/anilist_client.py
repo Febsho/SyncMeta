@@ -45,6 +45,14 @@ ANILIST_STATUS_COMPLETED = "COMPLETED"
 ANILIST_STATUS_PAUSED = "PAUSED"
 ANILIST_STATUS_DROPPED = "DROPPED"
 
+_USER_QUERY = """
+query ($name: String) {
+  User(name: $name) {
+    name
+  }
+}
+"""
+
 _LIST_QUERY = """
 query ($userName: String, $status: MediaListStatus) {
   MediaListCollection(userName: $userName, type: ANIME, status: $status) {
@@ -270,6 +278,7 @@ class AniListClient:
         self._session = self._build_session()
         self._status_cache: dict[str, list[dict]] = {}
         self._cancel_requested_callback = cancel_requested_callback
+        self._username_resolved = False
         # Point to the module-level shared caches so all instances benefit
         # from chain data already fetched by another user's sync.
         self._root_cache = _SHARED_ROOT_CACHE
@@ -430,7 +439,31 @@ class AniListClient:
             return base_status, fmt
         return status, None
 
+    def _resolve_username(self) -> None:
+        """Resolve the correct case for the AniList username.
+
+        AniList's User query is case-insensitive but MediaListCollection
+        requires the exact canonical casing.  One cheap query at the start
+        of a sync avoids 404s for users who typed their name in the wrong case.
+        """
+        if self._username_resolved or not self._config.username:
+            return
+        self._username_resolved = True
+        try:
+            data = self._query(_USER_QUERY, {"name": self._config.username})
+            if data and isinstance(data.get("User"), dict):
+                canonical = data["User"].get("name") or self._config.username
+                if canonical != self._config.username:
+                    logger.info(
+                        "AniList username corrected: '%s' → '%s'",
+                        self._config.username, canonical,
+                    )
+                    self._config.username = canonical
+        except Exception as exc:
+            logger.debug("AniList username lookup failed: %s", exc)
+
     def _fetch_base_status(self, status: str) -> list[dict]:
+        self._resolve_username()
         cached = self._status_cache.get(status)
         if cached is not None:
             return list(cached)
