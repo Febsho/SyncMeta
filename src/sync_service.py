@@ -560,10 +560,11 @@ class SyncService:
         if self._sync_modes["lists"]:
             logger.info("── List Sync ──────────────────────────────────────────")
             self._prime_pmdb_list_index()
-            anilist_enabled = (
-                self._config.anilist.enabled
-                and bool(self._config.anilist.selected_statuses)
-            )
+            anilist_enabled = self._config.anilist.enabled and bool(self._config.anilist.username)
+            if anilist_enabled and not self._config.anilist.selected_statuses:
+                # User connected AniList but didn't pick statuses — use defaults.
+                self._config.anilist.selected_statuses = ["CURRENT", "PLANNING", "COMPLETED"]
+                logger.info("AniList: no statuses selected, using defaults: %s", self._config.anilist.selected_statuses)
             source_jobs: list[tuple[str, object]] = []
             if not simkl_unchanged:
                 source_jobs.append(("SIMKL", self._sync_simkl))
