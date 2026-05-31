@@ -171,6 +171,46 @@ class ItemMatcher:
         with self._lock:
             return dict(self._stats)
 
+    def preseed_anime_from_fribb(self, items: list[dict]) -> int:
+        from . import fribb_client
+        seeded = 0
+        for item in items:
+            if str(item.get("anime_resolve_mode") or "") != "list_identity":
+                continue
+            cache_key = self._cache_key(item)
+            if cache_key in self._cache:
+                continue
+            ids = item.get("ids", {})
+            entry = None
+            for id_key, lookup_fn in (
+                (item.get("anilist_id") or ids.get("anilist"), fribb_client.lookup_by_anilist),
+                (item.get("mal_id") or ids.get("mal"), fribb_client.lookup_by_mal),
+            ):
+                if not id_key:
+                    continue
+                try:
+                    entry = lookup_fn(int(id_key))
+                except (TypeError, ValueError):
+                    continue
+                if entry is not None:
+                    break
+            if not isinstance(entry, dict):
+                continue
+            tmdb_raw = entry.get("themoviedb_id") or entry.get("themoviedb")
+            try:
+                tmdb_id = int(tmdb_raw) if tmdb_raw else None
+            except (TypeError, ValueError):
+                continue
+            if not tmdb_id or tmdb_id in _BLOCKED_ANIME_PMDB_TMDB_IDS:
+                continue
+            with self._lock:
+                if cache_key not in self._cache:
+                    self._cache[cache_key] = tmdb_id
+                    seeded += 1
+        if seeded:
+            logger.info("Pre-seeded %d anime items from Fribb into resolution cache", seeded)
+        return seeded
+
     def resolve_tmdb_id(self, item: dict) -> int | None:
         return self.resolve_match(item).tmdb_id
 
@@ -286,10 +326,14 @@ class ItemMatcher:
             detailed_lookup = getattr(self._pmdb, "lookup_by_external_id_detailed", None)
             if callable(detailed_lookup):
                 detail = detailed_lookup(id_type, ext_id, media_type) or {}
+                try:
+                    _votes = int(detail.get("votes") or 0)
+                except (TypeError, ValueError):
+                    _votes = 0
                 return (
                     _coerce_tmdb_id(detail.get("tmdb_id"), media_type),
                     str(detail.get("status") or "miss"),
-                    int(detail.get("votes") or 0),
+                    _votes,
                     str(detail.get("title") or ""),
                 )
             tmdb_id = self._pmdb.lookup_by_external_id(id_type, ext_id, media_type)
@@ -552,6 +596,18 @@ class ItemMatcher:
                             _mapped_title, tmdb_id,
                         )
                         continue
+                    if _votes == 0:
+                        fribb_check = self._try_exact_anime_fribb_lookup(item)
+                        if fribb_check.tmdb_id:
+                            logger.info(
+                                "[resolve] anime '%s' (mode=%s) — 0-vote PMDB %s=%s"
+                                " overridden by Fribb → tmdb=%d",
+                                title, anime_resolve_mode, id_type, ext_id,
+                                fribb_check.tmdb_id,
+                            )
+                            with self._lock:
+                                self._record_match_stat(fribb_check)
+                            return fribb_check
                     logger.info(
                         "[resolve] anime '%s' (mode=%s) — fallback: PMDB %s=%s → tmdb=%d"
                         " (votes=%d title=%r) accepted",
@@ -715,7 +771,7 @@ class ItemMatcher:
                 anime_mapping_source="fribb_exact",
             )
 
-        tmdb_id = _coerce_tmdb_id(entry.get("themoviedb"), item.get("media_type") or "")
+        tmdb_id = _coerce_tmdb_id(entry.get("themoviedb_id") or entry.get("themoviedb"), item.get("media_type") or "")
         if not tmdb_id:
             return MatchResult(
                 tmdb_id=None,

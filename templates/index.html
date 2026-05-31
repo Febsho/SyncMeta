@@ -100,16 +100,6 @@
     .next-sync-badge.imminent{border-color:rgba(52,211,153,.45);color:var(--green);background:rgba(20,83,45,.18)}
     .next-sync-badge.off{border-color:var(--z800);color:var(--z600);background:var(--z950)}
     .next-sync-dot{width:6px;height:6px;border-radius:999px;background:currentColor;box-shadow:0 0 8px currentColor}
-    .provider-progress{display:flex;flex-direction:column;gap:8px;padding:14px 18px;border-bottom:1px solid var(--z900)}
-    .provider-progress-title{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--z500);font-weight:700}
-    .provider-progress-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto;align-items:center;gap:10px;font-size:12px}
-    .provider-progress-label{color:var(--z300);font-weight:600;display:flex;align-items:center;gap:8px}
-    .provider-progress-label .dot{width:8px;height:8px;border-radius:999px;background:var(--z700)}
-    .provider-progress-bar{position:relative;height:8px;border-radius:4px;background:var(--z900);overflow:hidden;min-width:0}
-    .provider-progress-bar .fill{position:absolute;inset:0;right:auto;background:var(--accent);border-radius:4px;transition:width .2s linear}
-    .provider-progress-bar .fill.done{background:var(--green)}
-    .provider-progress-stats{color:var(--z500);font-variant-numeric:tabular-nums;white-space:nowrap}
-    .provider-progress-stats .added{color:var(--green)} .provider-progress-stats .skipped{color:var(--z500)}
     .dry-run-preview{padding:14px 18px;border-top:1px dashed var(--z800);background:rgba(124,109,247,.04)}
     .dry-run-preview-header{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--z500);margin-bottom:10px;font-weight:600}
     .dry-run-preview-header .pill{padding:2px 8px;border-radius:999px;background:rgba(124,109,247,.12);color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
@@ -208,6 +198,33 @@
     .lists-inner-tab{flex:1;padding:9px 12px;border:none;border-radius:7px;background:transparent;color:var(--z400);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
     .lists-inner-tab.active{background:var(--z800);color:var(--white)}
     .lists-subtab{display:none}.lists-subtab.active{display:block}
+    .result-list{display:flex;flex-direction:column;gap:1px;background:var(--z900)}
+    .result-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:12px 18px;background:var(--z950);cursor:default;transition:background .15s}
+    .result-row:hover{background:rgba(255,255,255,.02)}
+    .result-row-left{display:flex;flex-direction:column;gap:3px;min-width:0}
+    .result-row-title{font-size:13px;font-weight:600;color:var(--z200);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .result-row-source{font-size:11px;color:var(--z600);font-weight:500}
+    .result-row-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+    .result-stat{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:36px}
+    .result-stat-val{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+    .result-stat-label{font-size:9px;text-transform:uppercase;letter-spacing:.3px;color:var(--z600);font-weight:600}
+    .result-row-actions{display:flex;gap:6px;margin-left:4px}
+    .result-bar{height:3px;border-radius:2px;background:var(--z800);margin-top:4px;overflow:hidden}
+    .result-bar-fill{height:100%;border-radius:2px;transition:width .3s}
+    .log-viewer{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.65;max-height:600px;overflow-y:auto;overflow-x:hidden;background:var(--black);border-top:1px solid var(--z900);scroll-behavior:smooth}
+    .log-empty{padding:32px;text-align:center;color:var(--z600);font-family:inherit}
+    .log-line{display:grid;grid-template-columns:70px 52px 1fr;gap:0 10px;padding:3px 14px;border-bottom:1px solid rgba(255,255,255,.03);align-items:baseline}
+    .log-line:hover{background:rgba(255,255,255,.02)}
+    .log-ts{color:var(--z600);font-size:11px;white-space:nowrap}
+    .log-level{font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase}
+    .log-level.INFO{color:var(--accent)}.log-level.WARNING{color:var(--orange)}.log-level.ERROR{color:var(--red)}.log-level.DEBUG{color:var(--z600)}
+    .log-msg{color:var(--z300);word-break:break-word;min-width:0}
+    .log-msg .log-highlight{color:var(--z100);font-weight:600}
+    .log-filter-pills{display:flex;gap:4px;flex-wrap:wrap}
+    .log-filter-pill{padding:3px 10px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z500);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+    .log-filter-pill.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
+    #btn-log-auto.paused{color:var(--z500);border-color:var(--z800)}
+    #btn-log-auto:not(.paused){color:var(--green);border-color:rgba(52,211,153,.4)}
     @media (max-width:700px){
       .hero h1{font-size:28px}.hero-card{padding:36px 24px 32px}
       .form-grid{grid-template-columns:1fr}.settings-columns{grid-template-columns:1fr}.options-grid{grid-template-columns:1fr}.source-card{min-height:0}
@@ -262,7 +279,6 @@
       .btn{padding:8px 14px;font-size:12px}.btn-sm{padding:5px 10px;font-size:11px}
       .settings-group{padding:14px}
       .settings-page-title{font-size:17px}
-      .provider-progress-row{grid-template-columns:80px minmax(0,1fr) auto;font-size:11px}
       .history-item{flex-direction:column;align-items:flex-start;gap:4px}
       .history-stats{gap:6px}
       .toast{bottom:12px;right:12px;left:12px;max-width:none}
@@ -358,7 +374,6 @@
           <div class="panel-body" style="padding-bottom:0">
             <div id="results-filters" style="display:flex;gap:8px;flex-wrap:wrap"></div>
           </div>
-          <div id="provider-progress" class="hidden"></div>
           <div id="dry-run-preview-container" class="hidden"></div>
           <div id="results-body"><div class="empty">No sync results yet. Save a valid profile and the scheduler will run it automatically.</div></div>
         </div>
@@ -1658,22 +1673,23 @@
         renderProfileLogs();
       }
       try {
-        const result = await apiPost('/api/profile/logs', { after: profileLogsCursor, limit: reset ? 200 : 100 });
-        if (!result.ok) {
-          if (statusNode) statusNode.textContent = result.status === 401 ? 'Sign in to view your profile logs.' : 'Could not load logs.';
+        const profileParam = sessionProfileId ? '&profile=' + encodeURIComponent(sessionProfileId) : '';
+        const resp = await fetch('/api/logs?after=' + profileLogsCursor + '&limit=' + (reset ? 300 : 200) + profileParam);
+        if (!resp.ok) {
+          if (statusNode) statusNode.textContent = resp.status === 401 ? 'Sign in to view your profile logs.' : 'Could not load logs.';
           stopProfileLogPolling();
           return;
         }
-        const entries = Array.isArray(result.data.entries) ? result.data.entries : [];
+        const data = await resp.json();
+        const entries = Array.isArray(data.entries) ? data.entries : [];
         if (entries.length) {
-          profileLogs = profileLogs.concat(entries).slice(-500);
-          profileLogsCursor = Number(entries[entries.length - 1].id || result.data.latest_id || profileLogsCursor);
+          profileLogs = profileLogs.concat(entries).slice(-1500);
+          profileLogsCursor = Number(entries[entries.length - 1].seq || profileLogsCursor);
           renderProfileLogs();
-        } else {
-          profileLogsCursor = Number(result.data.latest_id || profileLogsCursor);
         }
-        if (statusNode) statusNode.textContent = entries.length ? `Last update: ${new Date().toLocaleTimeString()}` : 'Live and waiting for new profile logs.';
-      } catch {
+        if (statusNode) statusNode.textContent = entries.length ? `Last update: ${new Date().toLocaleTimeString()}` : 'Live — waiting for new log entries.';
+      } catch (err) {
+        console.debug('Log fetch error:', err);
         if (statusNode) statusNode.textContent = 'Log connection unavailable.';
       }
     }
@@ -1706,16 +1722,12 @@
     }
 
     async function clearProfileLogs() {
-      const result = await apiPost('/api/profile/logs/clear', {});
-      if (!result.ok) {
-        showToast(formatApiError(result.data, 'Could not clear logs.'), true, false);
-        return;
-      }
+      try { await fetch('/api/logs/clear', { method: 'POST' }); } catch {}
       profileLogs = [];
       profileLogsCursor = 0;
       renderProfileLogs();
       const statusNode = el('profile-logs-status');
-      if (statusNode) statusNode.textContent = 'Logs cleared for this browser view.';
+      if (statusNode) statusNode.textContent = 'Logs cleared.';
     }
 
     function formatApiError(data, fallback) {
@@ -2745,8 +2757,6 @@
       updateClearHistoryButtons(false, false);
       const nextBadge = el('next-sync-badge');
       if (nextBadge) nextBadge.classList.add('hidden');
-      const providerProgress = el('provider-progress');
-      if (providerProgress) { providerProgress.classList.add('hidden'); providerProgress.innerHTML = ''; }
       const dryRunPreview = el('dry-run-preview-container');
       if (dryRunPreview) { dryRunPreview.classList.add('hidden'); dryRunPreview.innerHTML = ''; }
       if (polling) {
@@ -2851,53 +2861,6 @@
         .join('');
       container.innerHTML = `<div class="dry-run-preview"><div class="dry-run-preview-header"><span class="pill">Dry Run</span><span>Would add ${totals.items} item${totals.items === 1 ? '' : 's'} across ${totals.lists} list${totals.lists === 1 ? '' : 's'}</span></div>${groups}</div>`;
       container.classList.remove('hidden');
-    }
-
-    function renderProviderProgress(profile, results) {
-      const node = el('provider-progress');
-      if (!node) return;
-      // Per-provider breakdown only adds value while a sync is running — when idle
-      // the Latest Sync Results table already shows final counts per list.
-      if (!profile || !profile.sync_running || !Array.isArray(results) || !results.length) {
-        node.classList.add('hidden');
-        node.innerHTML = '';
-        return;
-      }
-      const groups = new Map();
-      results.forEach(row => {
-        const key = (row.source_name || 'Other').trim() || 'Other';
-        const agg = groups.get(key) || {
-          name: key,
-          lists: 0,
-          fetched: 0,
-          resolved: 0,
-          added: 0,
-          removed: 0,
-          unresolved: 0,
-          errors: 0,
-        };
-        agg.lists += 1;
-        agg.fetched += row.items_fetched || 0;
-        agg.resolved += row.items_resolved || 0;
-        agg.added += row.items_added || 0;
-        agg.removed += row.items_removed || 0;
-        agg.unresolved += row.items_skipped_unresolved || 0;
-        agg.errors += row.error_count || 0;
-        groups.set(key, agg);
-      });
-      const sorted = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
-      const rowsHtml = sorted.map(group => {
-        const denom = group.fetched || 1;
-        const pct = group.fetched ? Math.min(100, Math.round((group.resolved / denom) * 100)) : 0;
-        const doneClass = group.fetched && group.resolved >= group.fetched ? ' done' : '';
-        return `<div class="provider-progress-row">
-          <div class="provider-progress-label"><span class="dot"></span>${esc(group.name)}<span class="catalog-note" style="margin:0;color:var(--z600)">· ${group.lists} list${group.lists === 1 ? '' : 's'}</span></div>
-          <div class="provider-progress-bar"><div class="fill${doneClass}" style="width:${pct}%"></div></div>
-          <div class="provider-progress-stats"><span>${group.resolved}/${group.fetched}</span> · <span class="added">+${group.added}</span>${group.unresolved > 0 ? ` · <span class="c-orange">${group.unresolved} unres</span>` : ''}${group.errors > 0 ? ` · <span class="c-red">${group.errors} err</span>` : ''}</div>
-        </div>`;
-      }).join('');
-      node.innerHTML = `<div class="provider-progress"><div class="provider-progress-title">Live progress by source</div>${rowsHtml}</div>`;
-      node.classList.remove('hidden');
     }
 
     function renderAnimeHealth(profile) {
@@ -3007,7 +2970,6 @@
 
       renderActivityPanel(profile);
       renderAnimeHealth(profile);
-      renderProviderProgress(profile, results);
       renderDryRunPreview(profile, results);
 
       // Wire Issues card to open the unresolved panel
@@ -3037,41 +2999,41 @@
           ? '<div class="empty">No sync results yet. Save a valid profile and the scheduler will run it automatically.</div>'
           : '<div class="empty">No rows match this filter yet.</div>';
       } else {
-        const formatResultDiagnostics = (row) => {
-          const timings = row.phase_timings || {};
-          const matchBreakdown = row.match_breakdown || {};
-          const unresolvedReasons = row.unresolved_reason_counts || {};
-          const notes = [];
-          if (Object.keys(timings).length) {
-            notes.push(
-              Object.entries(timings)
-                .map(([key, value]) => `${key.replace(/_seconds$/, '').replace(/_/g, ' ')} ${Number(value || 0).toFixed(2)}s`)
-                .join(' · ')
-            );
-          }
-          if (Object.keys(matchBreakdown).length) {
-            notes.push(
-              `matches ${Object.entries(matchBreakdown).map(([key, value]) => `${key}:${value}`).join(', ')}`
-            );
-          }
-          if (Object.keys(unresolvedReasons).length) {
-            notes.push(
-              `unresolved ${Object.entries(unresolvedReasons).map(([key, value]) => `${key}:${value}`).join(', ')}`
-            );
-          }
-          if ((row.items_skipped_fingerprint || 0) > 0) {
-            notes.push(`unchanged ${row.items_skipped_fingerprint}`);
-          }
-          return notes.filter(Boolean).map(note => `<div class="catalog-note">${esc(note)}</div>`).join('');
-        };
         const totalPages = Math.max(1, Math.ceil(filteredResults.length / RESULTS_PAGE_SIZE));
         currentResultsPage = Math.min(Math.max(1, currentResultsPage), totalPages);
         const startIndex = (currentResultsPage - 1) * RESULTS_PAGE_SIZE;
         const pagedResults = filteredResults.slice(startIndex, startIndex + RESULTS_PAGE_SIZE);
         const pagerHtml = totalPages > 1
-          ? `<div class="table-pager"><div class="table-pager-actions"><span>Showing ${startIndex + 1}-${startIndex + pagedResults.length} of ${filteredResults.length}</span><span>·</span><span>Page ${currentResultsPage} of ${totalPages}</span><button class="btn btn-sm" type="button" id="results-prev-page" ${currentResultsPage <= 1 ? 'disabled' : ''}>Previous</button><button class="btn btn-sm" type="button" id="results-next-page" ${currentResultsPage >= totalPages ? 'disabled' : ''}>Next</button></div></div>`
+          ? `<div class="table-pager"><div class="table-pager-actions"><span>${startIndex + 1}–${startIndex + pagedResults.length} of ${filteredResults.length}</span><span>·</span><span>Page ${currentResultsPage}/${totalPages}</span><button class="btn btn-sm" type="button" id="results-prev-page" ${currentResultsPage <= 1 ? 'disabled' : ''}>‹ Prev</button><button class="btn btn-sm" type="button" id="results-next-page" ${currentResultsPage >= totalPages ? 'disabled' : ''}>Next ›</button></div></div>`
           : '';
-        el('results-body').innerHTML = `<div class="table-scroll"><table><thead><tr><th>List</th><th class="num">Fetched</th><th class="num">Resolved</th><th class="num">Added</th><th class="num">Removed</th><th class="num">Dup</th><th class="num">Unresolved</th><th class="num">Errors</th><th class="table-actions">Action</th></tr></thead><tbody>${pagedResults.map(row => `<tr><td>${esc(row.display_name || row.list_name || '')}${row.source_name ? `<div class="catalog-note">${esc(row.source_name)} · ${esc(row.row_type || 'status_list')}</div>` : row.row_type ? `<div class="catalog-note">${esc(row.row_type)}</div>` : ''}${formatResultDiagnostics(row)}</td><td class="num">${row.items_fetched || 0}</td><td class="num">${row.items_resolved || 0}</td><td class="num ${(row.items_added || 0) > 0 ? 'c-green' : 'c-dim'}">${row.items_added || 0}</td><td class="num ${(row.items_removed || 0) > 0 ? 'c-red' : 'c-dim'}">${row.items_removed || 0}</td><td class="num c-dim">${row.items_skipped_duplicate || 0}</td><td class="num ${(row.items_skipped_unresolved || 0) > 0 ? 'c-orange' : 'c-dim'}">${row.items_skipped_unresolved || 0}</td><td class="num ${(row.error_count || 0) > 0 ? 'c-red' : 'c-dim'}">${row.error_count || 0}</td><td class="table-actions">${buildDeleteActions(row)}</td></tr>`).join('')}</tbody></table></div>${pagerHtml}`;
+        const rowsHtml = pagedResults.map(row => {
+          const fetched = row.items_fetched || 0;
+          const resolved = row.items_resolved || 0;
+          const added = row.items_added || 0;
+          const removed = row.items_removed || 0;
+          const unresolved = row.items_skipped_unresolved || 0;
+          const errors = row.error_count || 0;
+          const pct = fetched ? Math.min(100, Math.round((resolved / fetched) * 100)) : 0;
+          const barColor = errors > 0 ? 'var(--red)' : unresolved > 0 ? 'var(--orange)' : 'var(--green)';
+          const sourceBadge = row.source_name ? esc(row.source_name) : '';
+          const title = esc(row.display_name || row.list_name || 'Unknown list');
+          return `<div class="result-row">
+            <div class="result-row-left">
+              <div class="result-row-title">${title}</div>
+              <div class="result-row-source">${sourceBadge}${sourceBadge && fetched ? ' · ' : ''}${fetched} items → ${resolved} resolved</div>
+              <div class="result-bar"><div class="result-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
+            </div>
+            <div class="result-row-right">
+              ${added > 0 ? `<div class="result-stat"><div class="result-stat-val c-green">+${added}</div><div class="result-stat-label">added</div></div>` : ''}
+              ${removed > 0 ? `<div class="result-stat"><div class="result-stat-val c-red">-${removed}</div><div class="result-stat-label">removed</div></div>` : ''}
+              ${unresolved > 0 ? `<div class="result-stat"><div class="result-stat-val c-orange">${unresolved}</div><div class="result-stat-label">unresolved</div></div>` : ''}
+              ${errors > 0 ? `<div class="result-stat"><div class="result-stat-val c-red">${errors}</div><div class="result-stat-label">errors</div></div>` : ''}
+              ${added === 0 && removed === 0 && unresolved === 0 && errors === 0 ? `<div class="result-stat"><div class="result-stat-val c-dim">—</div><div class="result-stat-label">no changes</div></div>` : ''}
+              <div class="result-row-actions">${buildDeleteActions(row)}</div>
+            </div>
+          </div>`;
+        }).join('');
+        el('results-body').innerHTML = `<div class="result-list">${rowsHtml}</div>${pagerHtml}`;
         document.querySelectorAll('[data-delete-list]').forEach(node => {
           node.addEventListener('click', () => armDeleteManagedList(node.dataset.deleteList));
         });

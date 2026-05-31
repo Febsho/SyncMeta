@@ -34,15 +34,15 @@ def _env_int(name: str, default: int, minimum: int = 1, maximum: int | None = No
     return value
 
 
-_LIST_WRITE_WORKERS = _env_int("SYNCMETA_LIST_WRITE_WORKERS", 1, maximum=4)
-_LIST_RESOLVE_WORKERS = _env_int("SYNCMETA_LIST_RESOLVE_WORKERS", 2, maximum=6)
-_ACTIVITY_WRITE_WORKERS = _env_int("SYNCMETA_ACTIVITY_WRITE_WORKERS", 1, maximum=4)
+_LIST_WRITE_WORKERS = _env_int("SYNCMETA_LIST_WRITE_WORKERS", 3, maximum=6)
+_LIST_RESOLVE_WORKERS = _env_int("SYNCMETA_LIST_RESOLVE_WORKERS", 4, maximum=8)
+_ACTIVITY_WRITE_WORKERS = _env_int("SYNCMETA_ACTIVITY_WRITE_WORKERS", 2, maximum=4)
 _MAPPING_WRITE_WORKERS = _env_int("SYNCMETA_MAPPING_WRITE_WORKERS", 1, maximum=4)
-_SOURCE_SYNC_WORKERS = _env_int("SYNCMETA_SOURCE_SYNC_WORKERS", 2, maximum=3)
-_SIMKL_FETCH_WORKERS = _env_int("SYNCMETA_SIMKL_FETCH_WORKERS", 2, maximum=8)
-_ACTIVITY_SOURCE_WORKERS = _env_int("SYNCMETA_ACTIVITY_SOURCE_WORKERS", 2, maximum=3)
-_PREWARM_WORKERS = _env_int("SYNCMETA_PREWARM_WORKERS", 2, maximum=4)
-_ANILIST_PREWARM_LIMIT = _env_int("SYNCMETA_ANILIST_PREWARM_LIMIT", 50, minimum=0, maximum=200)
+_SOURCE_SYNC_WORKERS = _env_int("SYNCMETA_SOURCE_SYNC_WORKERS", 4, maximum=6)
+_SIMKL_FETCH_WORKERS = _env_int("SYNCMETA_SIMKL_FETCH_WORKERS", 4, maximum=8)
+_ACTIVITY_SOURCE_WORKERS = _env_int("SYNCMETA_ACTIVITY_SOURCE_WORKERS", 3, maximum=4)
+_PREWARM_WORKERS = _env_int("SYNCMETA_PREWARM_WORKERS", 3, maximum=6)
+_ANILIST_PREWARM_LIMIT = _env_int("SYNCMETA_ANILIST_PREWARM_LIMIT", 120, minimum=0, maximum=300)
 _FUTURE_POLL_INTERVAL = 0.25
 
 
@@ -269,6 +269,7 @@ class SyncService:
         self._status_callback = status_callback
         self._progress_callback = progress_callback
         self._managed_lists = self._normalize_managed_lists(managed_lists)
+        self._managed_lists_lock = threading.Lock()
         self._cancel_requested_callback = cancel_requested_callback
         self._sync_modes = self._normalize_sync_modes(sync_modes, config)
         self._last_progress_publish = 0.0
@@ -430,6 +431,7 @@ class SyncService:
             str(item.get("simkl_type", "")).strip().lower() == "anime"
             and result.resolution_kind in ("external_mapping", "root_series")
             and result.tmdb_id is not None
+            and result.anime_mapping_source not in ("fribb_exact", "fribb_fallback")
         ):
             fribb_tmdb = self._resolve_tmdb_id_via_fribb(item)
             if fribb_tmdb is None:
@@ -485,7 +487,7 @@ class SyncService:
             fribb = self._lookup_fribb_entry(item, allow_root_fallback=False)
             if not fribb:
                 return None
-            raw = fribb.get("themoviedb")
+            raw = fribb.get("themoviedb_id") or fribb.get("themoviedb")
             if not raw:
                 return None
             tmdb_id = _coerce_tmdb_id(raw, item.get("media_type") or "") or 0
@@ -562,62 +564,48 @@ class SyncService:
                 self._config.anilist.enabled
                 and bool(self._config.anilist.selected_statuses)
             )
+            source_jobs: list[tuple[str, object]] = []
             if not simkl_unchanged:
-                if anilist_enabled:
-                    # Run SIMKL and AniList concurrently — they fetch from independent
-                    # APIs and write to distinct PMDB lists so there is no data race.
-                    # ItemMatcher already uses a threading.Lock for its shared cache.
-                    # NOTE: SyncCancelled must be detected via the future's exception
-                    # and re-raised here, not swallowed by the generic except clause.
-                    cancelled = False
-                    pool = ThreadPoolExecutor(max_workers=min(_SOURCE_SYNC_WORKERS, 2))
-                    shutdown_wait = True
-                    try:
-                        future_simkl = pool.submit(self._sync_simkl)
-                        future_anilist = pool.submit(self._sync_anilist)
-                        for future in self._iter_completed_futures([future_simkl, future_anilist]):
-                            try:
-                                all_stats.extend(future.result())
-                            except SyncCancelled:
-                                cancelled = True
-                            except Exception as exc:
-                                logger.error("Provider sync failed: %s", exc)
-                    except SyncCancelled:
-                        shutdown_wait = False
-                        raise
-                    finally:
-                        pool.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
-                    if cancelled:
-                        raise SyncCancelled("Sync stopped by user")
-                else:
-                    all_stats.extend(self._sync_simkl())
-            elif anilist_enabled:
-                # SIMKL skipped but AniList still needs to run independently
-                try:
-                    all_stats.extend(self._sync_anilist())
-                except SyncCancelled:
-                    raise
-                except Exception as exc:
-                    logger.error("AniList sync failed: %s", exc)
-            self._publish_progress(all_stats, force=True)
-
+                source_jobs.append(("SIMKL", self._sync_simkl))
+            if anilist_enabled:
+                source_jobs.append(("AniList", self._sync_anilist))
             if self._config.trakt.enabled and not trakt_unchanged:
-                try:
-                    all_stats.extend(self._sync_trakt())
-                except SyncCancelled:
-                    raise
-                except Exception as exc:
-                    logger.error("Trakt sync failed: %s", exc)
-                self._publish_progress(all_stats, force=True)
-
+                source_jobs.append(("Trakt", self._sync_trakt))
             if self._config.mdblist.enabled:
+                source_jobs.append(("MDBList", self._sync_mdblist))
+
+            if source_jobs:
+                cancelled = False
+                pool = ThreadPoolExecutor(max_workers=min(_SOURCE_SYNC_WORKERS, len(source_jobs)))
+                shutdown_wait = True
+                from . import log_capture as _lc
+                _parent_profile = _lc.get_profile_context()
+                def _wrap(fn):
+                    def _inner():
+                        _lc.set_profile_context(_parent_profile)
+                        return fn()
+                    return _inner
                 try:
-                    all_stats.extend(self._sync_mdblist())
+                    futures = {
+                        pool.submit(_wrap(fn)): name
+                        for name, fn in source_jobs
+                    }
+                    for future in self._iter_completed_futures(futures):
+                        source_name = futures[future]
+                        try:
+                            all_stats.extend(future.result())
+                        except SyncCancelled:
+                            cancelled = True
+                        except Exception as exc:
+                            logger.error("%s sync failed: %s", source_name, exc)
+                        self._publish_progress(all_stats, force=True)
                 except SyncCancelled:
+                    shutdown_wait = False
                     raise
-                except Exception as exc:
-                    logger.error("MDBList sync failed: %s", exc)
-                self._publish_progress(all_stats, force=True)
+                finally:
+                    pool.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
+                if cancelled:
+                    raise SyncCancelled("Sync stopped by user")
 
         if self._sync_modes["lists"] and any([
             self._config.sync.simkl_sync_to_pmdb_watchlist,
@@ -793,6 +781,15 @@ class SyncService:
         if anime_prewarm_ids:
             self._set_status("Pre-warming SIMKL anime metadata cache")
             self._prewarm_simkl_anime_ids(anime_prewarm_ids[:_ANILIST_PREWARM_LIMIT])
+
+        all_anime_items = [
+            item
+            for simkl_type, _, items in all_items_by_status
+            if simkl_type == "anime"
+            for item in items
+        ]
+        if all_anime_items and hasattr(self._matcher, "preseed_anime_from_fribb"):
+            self._matcher.preseed_anime_from_fribb(all_anime_items)
 
         for simkl_type, status_key, items in all_items_by_status:
             self._check_cancelled()
@@ -1173,19 +1170,6 @@ class SyncService:
         if episode <= 0:
             return item
         simkl_season = int(item.get("season") or 1)
-        if offset > 0 and simkl_season > 1:
-            cache_key = (
-                str(item.get("tmdb_id") or ""),
-                str(item.get("anilist_id") or ""),
-                str(item.get("root_anilist_id") or ""),
-                str(item.get("mal_id") or ""),
-                str(item.get("root_mal_id") or ""),
-                offset,
-                simkl_season,
-                episode,
-            )
-            self._anime_history_remap_cache[cache_key] = {"tmdb_id": None}
-            return {**item, "tmdb_id": None}
 
         cache_key = (
             str(item.get("tmdb_id") or ""),
@@ -1548,7 +1532,7 @@ class SyncService:
         # Prefer the Fribb-provided TMDB ID when the item doesn't have one
         # (Fribb's themoviedb is the TMDB ID for the franchise root).
         tmdb_id = item_tmdb_id
-        fribb_tmdb = fribb.get("themoviedb")
+        fribb_tmdb = fribb.get("themoviedb_id") or fribb.get("themoviedb")
         if not tmdb_id and fribb_tmdb:
             try:
                 tmdb_id = _coerce_tmdb_id(fribb_tmdb, "tv") or 0
@@ -1599,22 +1583,33 @@ class SyncService:
             return item
 
         anime_seasons = self._get_cached_anime_seasons(tmdb_id)
-        if not anime_seasons:
-            return item  # No community mapping → write as-is
+        if anime_seasons:
+            remapped = self._map_episode_via_tvdb_season(anime_seasons, tvdb_season, tvdb_episode)
+            if remapped:
+                if remapped["season"] == tvdb_season and remapped["episode"] == tvdb_episode:
+                    return item  # Numbering already matches — no change
+                logger.info(
+                    "Remapped Trakt anime '%s' (tmdb=%d) via PMDB seasons: S%dE%d → S%dE%d",
+                    item.get("title", "Unknown"), tmdb_id,
+                    tvdb_season, tvdb_episode,
+                    remapped["season"], remapped["episode"],
+                )
+                return {**item, "season": remapped["season"], "episode": remapped["episode"]}
 
-        remapped = self._map_episode_via_tvdb_season(anime_seasons, tvdb_season, tvdb_episode)
-        if not remapped:
-            return item
-        if remapped["season"] == tvdb_season and remapped["episode"] == tvdb_episode:
-            return item  # Numbering already matches — no change
+        fribb = self._lookup_fribb_entry(item, allow_root_fallback=False)
+        if fribb is not None:
+            remapped = self._remap_via_fribb(fribb, tmdb_id, tvdb_episode)
+            if remapped and (remapped.get("season") != tvdb_season or remapped.get("episode") != tvdb_episode):
+                logger.info(
+                    "Remapped Trakt anime '%s' (tmdb=%d) via Fribb: S%dE%d → S%dE%d",
+                    item.get("title", "Unknown"), tmdb_id,
+                    tvdb_season, tvdb_episode,
+                    remapped.get("season", tvdb_season),
+                    remapped.get("episode", tvdb_episode),
+                )
+                return {**item, **remapped}
 
-        logger.info(
-            "Remapped Trakt anime '%s' (tmdb=%d) via PMDB seasons: S%dE%d → S%dE%d",
-            item.get("title", "Unknown"), tmdb_id,
-            tvdb_season, tvdb_episode,
-            remapped["season"], remapped["episode"],
-        )
-        return {**item, "season": remapped["season"], "episode": remapped["episode"]}
+        return item
 
     def _get_cached_anime_seasons(self, tmdb_id: int) -> list[dict]:
         tmdb_id = int(tmdb_id)
@@ -2049,6 +2044,10 @@ class SyncService:
                 "Skipped AniList pre-warm for %d IDs because SIMKL anime sync is not enabled",
                 len(all_anilist_ids),
             )
+
+        all_anilist_items = [item for _, items in all_items_by_status for item in items]
+        if all_anilist_items and hasattr(self._matcher, "preseed_anime_from_fribb"):
+            self._matcher.preseed_anime_from_fribb(all_anilist_items)
 
         for status_key, items in all_items_by_status:
             self._check_cancelled()
@@ -3514,6 +3513,10 @@ class SyncService:
         return source_name or "SyncMeta"
 
     def _resolve_managed_list_name(self, base_name: str, source_name: str, selection: dict | None) -> str:
+        with self._managed_lists_lock:
+            return self._resolve_managed_list_name_locked(base_name, source_name, selection)
+
+    def _resolve_managed_list_name_locked(self, base_name: str, source_name: str, selection: dict | None) -> str:
         identity = self._selection_identity(selection)
         if identity:
             for item in self._managed_lists.values():
@@ -3541,6 +3544,15 @@ class SyncService:
                         conflict = True
 
             if not conflict:
+                # Pre-register a placeholder so concurrent threads see this name
+                # is taken and pick a disambiguated variant.
+                self._managed_lists[candidate] = {
+                    "list_name": candidate,
+                    "list_id": "",
+                    "display_name": base_name,
+                    "source_name": source_name,
+                    "selection": dict(selection or {}),
+                }
                 return candidate
 
             attempt += 1
@@ -3554,13 +3566,14 @@ class SyncService:
         source_name: str,
         selection: dict | None = None,
     ) -> None:
-        self._managed_lists[list_name] = {
-            "list_name": list_name,
-            "list_id": list_id,
-            "display_name": display_name,
-            "source_name": source_name,
-            "selection": dict(selection or {}),
-        }
+        with self._managed_lists_lock:
+            self._managed_lists[list_name] = {
+                "list_name": list_name,
+                "list_id": list_id,
+                "display_name": display_name,
+                "source_name": source_name,
+                "selection": dict(selection or {}),
+            }
 
     def _delete_disabled_lists(self, desired_names: set[str]) -> None:
         stale_names = [list_name for list_name in self._managed_lists if list_name not in desired_names]

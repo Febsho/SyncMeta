@@ -600,6 +600,43 @@ class PublicMetaDBClient:
         self._record_stat("list_write_failures")
         return None
 
+    def add_items_to_list_batch(self, list_id: str, items: list[dict]) -> list[dict]:
+        """Add multiple items to a list via the batch endpoint.
+
+        Falls back to individual adds if the batch endpoint is unavailable.
+        Each item dict must have 'tmdb_id' (int) and 'media_type' (str).
+        Returns a list of result dicts, one per input item.
+        """
+        if not items:
+            return []
+        payload = {
+            "items": [
+                {"tmdb_id": item["tmdb_id"], "media_type": item["media_type"]}
+                for item in items
+            ]
+        }
+        try:
+            resp = self._post(f"/api/external/lists/{list_id}/items/batch", payload)
+            if isinstance(resp, dict) and resp.get("results"):
+                results = resp["results"]
+                for r in results:
+                    if r.get("success"):
+                        self._record_stat("list_write_successes")
+                    else:
+                        self._record_stat("list_write_failures")
+                return results
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                logger.debug("Batch endpoint not available; falling back to individual adds")
+            else:
+                raise
+        # Fallback: add individually
+        results = []
+        for item in items:
+            result = self.add_item_to_list(list_id, item["tmdb_id"], item["media_type"])
+            results.append({"success": result is not None, "item": result})
+        return results
+
     def remove_item_from_list(self, list_id: str, item_id: str) -> None:
         """Remove an item from a list by its list-item ID."""
         try:

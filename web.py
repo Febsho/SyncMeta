@@ -39,6 +39,7 @@ from src.profile_store import ProfileStore, merge_credentials, normalize_credent
 from src.simkl_client import SimklClient
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
 from src.trakt_client import TraktClient
+from src import log_capture
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -48,6 +49,7 @@ LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
+log_capture.install(level=logging.INFO)
 logger = logging.getLogger("web")
 
 PROFILE_STORE_FILE = Path(
@@ -621,6 +623,7 @@ def _clear_access_cookie(response):
 
 def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | None = None) -> None:
     profile_id = profile["profile_id"]
+    log_capture.set_profile_context(profile_id)
     modes = sync_modes or profile.get("pending_sync_modes") or {"lists": True, "history": False, "resume": False}
     log_token = _log_profile_id.set(profile_id)
     try:
@@ -674,10 +677,13 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
         logger.info("Sync stopped for profile %s", profile_id[:8])
         _profile_store.record_sync_cancelled(profile_id, dry_run=dry_run, sync_modes=modes)
     except Exception as exc:  # pragma: no cover - exercised in integration use
+        import traceback as _tb
+        tb_str = _tb.format_exc()
         logger.exception("Sync failed for profile %s", profile_id[:8])
+        error_detail = _sanitize_error_text(f"{exc}\n\nTraceback:\n{tb_str}")
         _profile_store.record_sync_error(
             profile_id,
-            _sanitize_error_text(str(exc)),
+            error_detail,
             dry_run=dry_run,
             sync_modes=modes,
         )
@@ -1734,6 +1740,21 @@ def api_profile_save():
 
     response = {"profile": profile, "created": created}
     return _with_session_cookie(make_response(jsonify(response)), session_token)
+
+
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    after_seq = request.args.get("after", 0, type=int)
+    limit = min(request.args.get("limit", 300, type=int), 500)
+    profile_id = request.args.get("profile", "").strip()
+    entries = log_capture.snapshot(after_seq=after_seq, limit=limit, profile_id=profile_id)
+    return jsonify({"entries": entries})
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def api_logs_clear():
+    log_capture.clear()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/profile/status", methods=["POST"])

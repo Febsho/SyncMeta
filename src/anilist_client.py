@@ -511,6 +511,24 @@ class AniListClient:
         else:
             media_type = "tv"
 
+        root_episode_offset = 0
+        if anilist_id and media_type == "tv":
+            try:
+                aid = int(anilist_id)
+            except (TypeError, ValueError):
+                aid = None
+            if aid is not None:
+                root_context = self._root_context_cache.get(aid)
+                if root_context is None and aid in self._root_cache:
+                    root_context = {"root": self._root_cache[aid], "episode_offset": 0}
+                if isinstance(root_context, dict):
+                    root_media = root_context.get("root")
+                    if isinstance(root_media, dict) and root_media.get("id") != anilist_id:
+                        root_anilist_id = root_media.get("id")
+                        root_mal_id = root_media.get("idMal")
+                        root_title = self._media_title(root_media)
+                        root_episode_offset = root_context.get("episode_offset", 0) or 0
+
         return {
             "title": title,
             "year": media.get("seasonYear"),
@@ -533,9 +551,9 @@ class AniListClient:
                 "anidb_id": str(ids["anidb"]) if ids.get("anidb") else None,
                 "fribb_tmdb_id": str(ids["tmdb"]) if ids.get("tmdb") else None,
                 "fribb_type": str(fribb_entry.get("type") or fmt) if isinstance(fribb_entry, dict) else fmt,
-                "root_anilist_id": None,
-                "root_mal_id": None,
-                "root_episode_offset": 0,
+                "root_anilist_id": str(root_anilist_id) if root_anilist_id else None,
+                "root_mal_id": str(root_mal_id) if root_mal_id else None,
+                "root_episode_offset": root_episode_offset,
                 "title": title,
                 "year": media.get("seasonYear"),
                 "source_status": None,

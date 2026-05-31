@@ -42,6 +42,11 @@ def _safe_int(value: object) -> int | None:
     try:
         if value is None or value == "":
             return None
+        if isinstance(value, dict):
+            extracted = value.get("tv") or value.get("movie") or next(iter(value.values()), None)
+            if extracted is None or isinstance(extracted, dict):
+                return None
+            return int(extracted)
         return int(value)
     except (TypeError, ValueError):
         return None
