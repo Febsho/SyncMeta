@@ -459,6 +459,10 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
                 Lists
               </button>
+              <button class="settings-nav-item" id="snav-pairs" onclick="showSettingsTab('pairs')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 17h6a4 4 0 004-4V7"/><polyline points="11 4 14 7 11 10"/><path d="M20 7h-6a4 4 0 00-4 4v6"/><polyline points="13 20 10 17 13 14"/></svg>
+                Sync Pairs
+              </button>
               <button class="settings-nav-item" id="snav-behavior" onclick="showSettingsTab('behavior')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
                 Behavior
@@ -595,7 +599,8 @@
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
-                  <div class="form-row" style="margin-bottom:0"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="anilist-access-token">Access Token <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="password" id="anilist-access-token" placeholder="Only needed to write to AniList" autocomplete="off"><div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only required to write to AniList &mdash; private lists, or using AniList as a sync-pair target. Stored securely for this profile. Leave blank to keep it. <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">Create a token</a></div></div>
                 </div>
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
@@ -683,6 +688,25 @@
             </div>
 
             <!-- BEHAVIOR TAB -->
+            <div class="settings-tab" id="stab-pairs">
+              <div class="form-section">
+                <div class="form-section-title">Cross-Service Sync Pairs</div>
+                <div class="hint" style="margin-bottom:12px">
+                  A pair copies one kind of list from one service to another, in one
+                  direction. Add a second pair for the reverse direction. Every
+                  service that can be written to may be a target.
+                </div>
+                <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
+                <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
+                <div class="inline-actions" style="justify-content:flex-start;margin-top:12px">
+                  <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
+                  <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
+                  <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
+                  <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
+                </div>
+                <div id="pairs-results" style="margin-top:12px"></div>
+              </div>
+            </div>
             <div class="settings-tab" id="stab-behavior">
               <div class="settings-page-title">Behavior</div>
               <div class="settings-page-desc">Control how and when SyncMeta fetches and pushes data.</div>
@@ -1010,6 +1034,7 @@
     function emptySecretState() {
       return {
         simkl: { client_secret_saved: false, access_token_saved: false },
+        anilist: { access_token_saved: false },
         trakt: { client_secret_saved: false, access_token_saved: false, refresh_token_saved: false },
         mdblist: { api_key_saved: false },
         pmdb: { api_key_saved: false },
@@ -1230,7 +1255,7 @@
         },
         anilist: {
           username: el('anilist-username').value.trim(),
-          access_token: '',
+          access_token: el('anilist-access-token').value.trim(),
           selected_statuses: anilistSelectedStatuses.slice(),
         },
         trakt: {
@@ -1341,6 +1366,9 @@
           client_secret_saved: !!simkl.client_secret_saved,
           access_token_saved: !!simkl.access_token_saved,
         },
+        anilist: {
+          access_token_saved: !!anilist.access_token_saved,
+        },
         trakt: {
           client_secret_saved: !!trakt.client_secret_saved,
           access_token_saved: !!trakt.access_token_saved,
@@ -1362,6 +1390,7 @@
       setSecretInputState('simkl-access-token', 'simkl', 'access_token_saved', 'From PIN auth or OAuth');
       simklSelectedStatuses = normalizeSimklSelectedStatuses(simkl.selected_statuses);
       el('anilist-username').value = anilist.username || '';
+      setSecretInputState('anilist-access-token', 'anilist', 'access_token_saved', 'Only needed to write to AniList');
       anilistSelectedStatuses = normalizeAniListSelectedStatuses(anilist.selected_statuses);
       el('trakt-client-id').value = trakt.client_id || '';
       traktAccessTokenExpiresAt = trakt.access_token_expires_at || '';
@@ -3774,6 +3803,15 @@
     });
     const issuesTabUnresolved = el('issues-tab-unresolved');
     const issuesTabErrors = el('issues-tab-errors');
+    const pairAddBtn = el('btn-pair-add');
+    if (pairAddBtn) pairAddBtn.addEventListener('click', addPair);
+    const pairsSaveBtn = el('btn-pairs-save');
+    if (pairsSaveBtn) pairsSaveBtn.addEventListener('click', savePairs);
+    const pairsRunBtn = el('btn-pairs-run');
+    if (pairsRunBtn) pairsRunBtn.addEventListener('click', () => runPairs('', false));
+    const pairsDryRunBtn = el('btn-pairs-dry-run');
+    if (pairsDryRunBtn) pairsDryRunBtn.addEventListener('click', () => runPairs('', true));
+
     const runDetailClose = el('btn-run-detail-close');
     if (issuesTabUnresolved) issuesTabUnresolved.addEventListener('click', () => switchIssuesTab('unresolved'));
     if (issuesTabErrors) issuesTabErrors.addEventListener('click', async () => {
@@ -4578,11 +4616,270 @@
 
     function showSettingsTab(tab) {
       document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('.settings-nav-item').forEach(n => {
+        n.classList.remove('active');
+        n.removeAttribute('aria-current');
+      });
       const tabEl = document.getElementById('stab-' + tab);
       const navEl = document.getElementById('snav-' + tab);
       if (tabEl) tabEl.classList.add('active');
-      if (navEl) navEl.classList.add('active');
+      if (navEl) { navEl.classList.add('active'); navEl.setAttribute('aria-current', 'true'); }
+      // Pairs depend on live provider capability, so load them on open rather
+      // than caching a stale view from before a service was connected.
+      if (tab === 'pairs') fetchPairs();
+    }
+
+    // ── Cross-service sync pairs ───────────────────────────────────────────
+
+    let pairsState = { pairs: [], providers: [], categories: [], removal_modes: [] };
+
+    function providerLabel(key) {
+      const provider = pairsState.providers.find(p => p.key === key);
+      return provider ? provider.label : key;
+    }
+
+    function renderPairCapabilities() {
+      const node = el('pairs-capabilities');
+      if (!node) return;
+      if (!pairsState.providers.length) { node.textContent = ''; return; }
+      const parts = pairsState.providers.map(provider => {
+        if (!provider.configured) return `${esc(provider.label)}: not connected`;
+        if (provider.write_blocked_reason) {
+          return `${esc(provider.label)}: readable only — ${esc(provider.write_blocked_reason)}`;
+        }
+        return `${esc(provider.label)}: can send and receive`;
+      });
+      node.innerHTML = parts.join('<br>');
+    }
+
+    function renderPairs() {
+      const node = el('pairs-list');
+      if (!node) return;
+      if (!pairsState.pairs.length) {
+        node.innerHTML = '<div class="empty">No sync pairs yet. Add one to copy a list from one service to another.</div>';
+        return;
+      }
+
+      // Only offer providers that can actually read / be written to, so an
+      // impossible pair cannot be built in the first place.
+      const sources = pairsState.providers.filter(p => p.configured && p.reads.length);
+      const targets = pairsState.providers.filter(p => p.configured && p.writes.length);
+
+      node.innerHTML = pairsState.pairs.map((pair, index) => {
+        const sourceOptions = sources.map(p =>
+          `<option value="${escAttr(p.key)}" ${p.key === pair.source ? 'selected' : ''}>${esc(p.label)}</option>`
+        ).join('');
+        const targetOptions = targets.map(p =>
+          `<option value="${escAttr(p.key)}" ${p.key === pair.target ? 'selected' : ''}>${esc(p.label)}</option>`
+        ).join('');
+        const categoryBoxes = pairsState.categories.map(category => `
+          <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
+            <input type="checkbox" data-pair-index="${index}" data-pair-category="${escAttr(category.key)}"
+                   ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
+            ${esc(category.label)}
+          </label>`).join('');
+        const removalOptions = pairsState.removal_modes.map(mode =>
+          `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(mode.label)}</option>`
+        ).join('');
+        const problem = pair.problem
+          ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
+          : '';
+        const destructive = pair.removal_mode && pair.removal_mode !== 'additive'
+          ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> This pair may delete items from ${esc(providerLabel(pair.target))}.</div>`
+          : '';
+
+        return `<div class="guide-box" style="margin-bottom:10px">
+          <div class="form-row" style="margin-bottom:8px">
+            <label for="pair-name-${index}">Name</label>
+            <input type="text" id="pair-name-${index}" data-pair-index="${index}" data-pair-field="name"
+                   value="${escAttr(pair.name || '')}" placeholder="${escAttr(providerLabel(pair.source) + ' to ' + providerLabel(pair.target))}">
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
+              <label for="pair-source-${index}">From</label>
+              <select id="pair-source-${index}" data-pair-index="${index}" data-pair-field="source">${sourceOptions}</select>
+            </div>
+            <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
+              <label for="pair-target-${index}">To</label>
+              <select id="pair-target-${index}" data-pair-index="${index}" data-pair-field="target">${targetOptions}</select>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+            <label id="pair-cats-label-${index}">What to sync</label>
+            <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
+          </div>
+          <div class="form-row" style="margin-bottom:0">
+            <label for="pair-removal-${index}">Removals</label>
+            <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
+          </div>
+          ${destructive}
+          ${problem}
+          <div class="inline-actions" style="justify-content:flex-start;margin-top:10px">
+            <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px">
+              <input type="checkbox" data-pair-index="${index}" data-pair-field="enabled" ${pair.enabled ? 'checked' : ''}>
+              Enabled
+            </label>
+            <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
+            <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
+          </div>
+        </div>`;
+      }).join('');
+
+      node.querySelectorAll('[data-pair-field]').forEach(input => {
+        input.addEventListener('change', () => {
+          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
+          if (!pair) return;
+          const field = input.dataset.pairField;
+          pair[field] = input.type === 'checkbox' ? input.checked : input.value;
+          // Re-render so the destructive-mode warning and names track the change.
+          if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairs();
+        });
+      });
+      node.querySelectorAll('[data-pair-category]').forEach(input => {
+        input.addEventListener('change', () => {
+          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
+          if (!pair) return;
+          const category = input.dataset.pairCategory;
+          const categories = new Set(pair.categories || []);
+          if (input.checked) categories.add(category); else categories.delete(category);
+          pair.categories = Array.from(categories);
+        });
+      });
+      node.querySelectorAll('[data-pair-remove]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          pairsState.pairs.splice(Number(btn.dataset.pairRemove), 1);
+          renderPairs();
+        });
+      });
+      node.querySelectorAll('[data-pair-run]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pair = pairsState.pairs[Number(btn.dataset.pairRun)];
+          if (pair) runPairs(pair.pair_id, false);
+        });
+      });
+    }
+
+    async function fetchPairs() {
+      let result;
+      try {
+        result = await apiPost('/api/profile/pairs', {});
+      } catch {
+        showToast('Could not load sync pairs — connection unavailable.', true);
+        return;
+      }
+      if (!result.ok) {
+        const node = el('pairs-list');
+        if (node) node.innerHTML = '<div class="empty">Sign in to configure sync pairs.</div>';
+        return;
+      }
+      pairsState = {
+        pairs: Array.isArray(result.data.pairs) ? result.data.pairs : [],
+        providers: Array.isArray(result.data.providers) ? result.data.providers : [],
+        categories: Array.isArray(result.data.categories) ? result.data.categories : [],
+        removal_modes: Array.isArray(result.data.removal_modes) ? result.data.removal_modes : [],
+      };
+      renderPairCapabilities();
+      renderPairs();
+    }
+
+    function addPair() {
+      const sources = pairsState.providers.filter(p => p.configured && p.reads.length);
+      const targets = pairsState.providers.filter(p => p.configured && p.writes.length);
+      if (!sources.length || !targets.length) {
+        showToast('Connect at least two services before creating a pair.', true);
+        return;
+      }
+      const source = sources[0].key;
+      const target = (targets.find(p => p.key !== source) || targets[0]).key;
+      pairsState.pairs.push({
+        pair_id: '',
+        name: '',
+        source: source,
+        target: target,
+        categories: ['watchlist'],
+        removal_mode: 'additive',
+        enabled: true,
+      });
+      renderPairs();
+    }
+
+    async function savePairs() {
+      const btn = el('btn-pairs-save');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      try {
+        const payload = pairsState.pairs.map(pair => ({
+          pair_id: pair.pair_id || '',
+          name: pair.name || '',
+          source: pair.source,
+          target: pair.target,
+          categories: pair.categories || [],
+          removal_mode: pair.removal_mode || 'additive',
+          enabled: pair.enabled !== false,
+        }));
+        const result = await apiPost('/api/profile/pairs/save', { pairs: payload });
+        if (!result.ok) {
+          showToast(formatApiError(result.data, 'Could not save sync pairs.'), true, false);
+          return;
+        }
+        showToast('Sync pairs saved.', false, true);
+        await fetchPairs();
+      } catch {
+        showToast('Network error while saving sync pairs.', true);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Pairs'; }
+      }
+    }
+
+    function renderPairResults(results, dryRun) {
+      const node = el('pairs-results');
+      if (!node) return;
+      if (!Array.isArray(results) || !results.length) { node.innerHTML = ''; return; }
+      node.innerHTML = results.map(run => {
+        const errors = (run.errors || []).map(e =>
+          `<div class="catalog-note" style="color:var(--red)">${esc(e)}</div>`).join('');
+        const categories = (run.categories || []).map(cat => {
+          const catErrors = (cat.errors || []).map(e =>
+            `<div class="catalog-note" style="color:var(--red)">${esc(e)}</div>`).join('');
+          return `<div class="catalog-note">${esc(cat.category)}: +${cat.added} added, ${cat.removed} removed,
+            ${cat.skipped_existing} already there${cat.unmapped ? `, ${cat.unmapped} unmatched` : ''}</div>${catErrors}`;
+        }).join('');
+        return `<div class="guide-box" style="margin-bottom:8px">
+          <div style="font-weight:500">${esc(run.name)}${dryRun ? ' <span class="c-dim">(dry run)</span>' : ''}</div>
+          ${categories}
+          ${errors}
+        </div>`;
+      }).join('');
+    }
+
+    async function runPairs(pairId, dryRun) {
+      const buttons = [el('btn-pairs-run'), el('btn-pairs-dry-run')].filter(Boolean);
+      buttons.forEach(b => { b.disabled = true; });
+      const node = el('pairs-results');
+      if (node) node.innerHTML = '<div class="empty">Running...</div>';
+      try {
+        const body = { dry_run: !!dryRun };
+        if (pairId) body.pair_id = pairId;
+        const result = await apiPost('/api/profile/pairs/run', body);
+        if (!result.ok) {
+          if (node) node.innerHTML = '';
+          showToast(formatApiError(result.data, 'Sync pair run failed.'), true, false);
+          return;
+        }
+        renderPairResults(result.data.results, result.data.dry_run);
+        const totalAdded = (result.data.results || []).reduce((sum, r) => sum + (r.added || 0), 0);
+        showToast(
+          dryRun ? `Dry run complete — ${totalAdded} item(s) would be added.`
+                 : `Sync complete — ${totalAdded} item(s) added.`,
+          false, true,
+        );
+        // Ownership records changed, so refresh to pick up any new problems.
+        await fetchPairs();
+      } catch {
+        if (node) node.innerHTML = '';
+        showToast('Network error while running sync pairs.', true);
+      } finally {
+        buttons.forEach(b => { b.disabled = false; });
+      }
     }
 
     function showListsSubTab(tab) {

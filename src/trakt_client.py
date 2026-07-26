@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,8 @@ from .config import TraktConfig
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (5, 6)
+# Trakt accepts large /sync payloads; batch so one failure costs less work.
+TRAKT_SYNC_BATCH_SIZE = 100
 TOKEN_REFRESH_SKEW_SECONDS = 3600
 
 DEFAULT_CATALOGS = {
@@ -257,6 +260,24 @@ class TraktClient:
     def get_watchlist(self) -> list[dict]:
         raw = self._get("/sync/watchlist", params={"extended": "full"}) or []
         return [item for item in (self._normalize_watchlist_entry(entry) for entry in raw) if item]
+
+    def get_collection(self) -> list[dict]:
+        """Return the user's Trakt collection as canonical items.
+
+        Unlike the watchlist, collection entries carry no `type` field — the key
+        present (`movie` or `show`) is what identifies the kind.
+        """
+        items: list[dict] = []
+        for media_kind in ("movies", "shows"):
+            raw = self._get(f"/sync/collection/{media_kind}", params={"extended": "full"}) or []
+            singular = "movie" if media_kind == "movies" else "show"
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                normalized = self._normalize_watchlist_entry({**entry, "type": singular})
+                if normalized:
+                    items.append(normalized)
+        return items
 
     def get_liked_lists(self) -> list[dict]:
         liked_lists = []
@@ -604,3 +625,136 @@ class TraktClient:
             "paused_at": entry.get("paused_at"),
             "title": show.get("title", "Unknown"),
         }
+
+    # ── Write API ──────────────────────────────────────────────────────────
+    #
+    # Trakt's /sync endpoints take items grouped by media kind, each identified
+    # by whatever external ids are known.  The OAuth token obtained by the
+    # existing device flow already carries write scope, so no re-authentication
+    # is needed to use these.
+
+    @staticmethod
+    def _write_ids(item: dict) -> dict:
+        """Build a Trakt `ids` object from a canonical item.
+
+        Trakt matches on any provided id, so send every one we know and let it
+        pick.  Sending an empty object would silently match nothing.
+        """
+        ids: dict = {}
+        source_ids = item.get("ids") or {}
+
+        def _first(*values):
+            for value in values:
+                text = str(value or "").strip()
+                if text:
+                    return text
+            return ""
+
+        trakt_id = _first(item.get("trakt_id"), source_ids.get("trakt"))
+        if trakt_id.isdigit():
+            ids["trakt"] = int(trakt_id)
+        imdb_id = _first(item.get("imdb_id"), source_ids.get("imdb"))
+        if imdb_id:
+            ids["imdb"] = imdb_id
+        tmdb_id = _first(item.get("tmdb_id"), source_ids.get("tmdb"))
+        if tmdb_id.isdigit():
+            ids["tmdb"] = int(tmdb_id)
+        tvdb_id = _first(item.get("tvdb_id"), source_ids.get("tvdb"))
+        if tvdb_id.isdigit():
+            ids["tvdb"] = int(tvdb_id)
+        return ids
+
+    @classmethod
+    def _build_sync_payload(cls, items: list[dict], *, with_watched_at: bool = False) -> dict:
+        """Group canonical items into Trakt's {movies: [...], shows: [...]} shape.
+
+        When an item carries season/episode numbers the show is expressed as a
+        nested seasons/episodes tree, which is how Trakt scopes history to
+        individual episodes rather than a whole show.
+        """
+        movies: list[dict] = []
+        shows_by_key: dict[str, dict] = {}
+
+        for item in items:
+            ids = cls._write_ids(item)
+            if not ids:
+                continue
+            media_type = str(item.get("media_type") or "").strip().lower()
+            watched_at = item.get("watched_at") if with_watched_at else None
+
+            if media_type == "movie":
+                entry: dict = {"ids": ids}
+                if watched_at:
+                    entry["watched_at"] = watched_at
+                movies.append(entry)
+                continue
+
+            # Group episodes of the same show under one show entry.
+            key = json.dumps(ids, sort_keys=True)
+            show = shows_by_key.setdefault(key, {"ids": ids})
+            season_number = item.get("season")
+            episode_number = item.get("episode")
+            if season_number is None or episode_number is None:
+                continue
+            try:
+                season_number = int(season_number)
+                episode_number = int(episode_number)
+            except (TypeError, ValueError):
+                continue
+
+            seasons = show.setdefault("seasons", [])
+            season = next((s for s in seasons if s.get("number") == season_number), None)
+            if season is None:
+                season = {"number": season_number, "episodes": []}
+                seasons.append(season)
+            episode: dict = {"number": episode_number}
+            if watched_at:
+                episode["watched_at"] = watched_at
+            season["episodes"].append(episode)
+
+        payload: dict = {}
+        if movies:
+            payload["movies"] = movies
+        if shows_by_key:
+            payload["shows"] = list(shows_by_key.values())
+        return payload
+
+    def _sync_write(self, path: str, items: list[dict], *, with_watched_at: bool = False) -> dict:
+        """POST canonical items to a Trakt /sync endpoint in batches."""
+        totals: dict = {"added": 0, "deleted": 0, "not_found": 0, "batches": 0}
+        for start in range(0, len(items), TRAKT_SYNC_BATCH_SIZE):
+            chunk = items[start:start + TRAKT_SYNC_BATCH_SIZE]
+            payload = self._build_sync_payload(chunk, with_watched_at=with_watched_at)
+            if not payload:
+                continue
+            response = self._post(path, payload) or {}
+            totals["batches"] += 1
+            for bucket in ("added", "deleted", "existing", "updated"):
+                counts = response.get(bucket)
+                if isinstance(counts, dict):
+                    key = "deleted" if bucket == "deleted" else "added"
+                    totals[key] += sum(int(v or 0) for v in counts.values() if isinstance(v, (int, float)))
+            not_found = response.get("not_found")
+            if isinstance(not_found, dict):
+                totals["not_found"] += sum(
+                    len(v) for v in not_found.values() if isinstance(v, list)
+                )
+        return totals
+
+    def add_to_watchlist(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/watchlist", items)
+
+    def remove_from_watchlist(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/watchlist/remove", items)
+
+    def add_to_collection(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/collection", items)
+
+    def remove_from_collection(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/collection/remove", items)
+
+    def add_to_history(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/history", items, with_watched_at=True)
+
+    def remove_from_history(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/history/remove", items)

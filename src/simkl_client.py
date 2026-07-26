@@ -1,5 +1,6 @@
 """SIMKL API client for fetching user watchlists."""
 
+import json
 import logging
 import re
 import time
@@ -17,6 +18,8 @@ from . import anime_mapping_store as _anime_maps
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (5, 6)
+# Batch /sync writes so one failure costs less work.
+SIMKL_SYNC_BATCH_SIZE = 100
 
 # Status codes from SIMKL that map to our list names
 SIMKL_STATUS_WATCHING = "watching"
@@ -127,6 +130,171 @@ class SimklClient:
         if resp.status_code == 204 or not resp.text:
             return None
         return resp.json()
+
+    def _post(self, path: str, data: dict) -> dict | list | None:
+        url = f"{self._config.base_url}{path}"
+        logger.debug("POST %s", url)
+        self._check_cancelled()
+        resp = self._session.post(url, json=data, timeout=REQUEST_TIMEOUT)
+        self._check_cancelled()
+        resp.raise_for_status()
+        if resp.status_code == 204 or not resp.text:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+    # ── Write API ──────────────────────────────────────────────────
+    #
+    # The access token from the existing PIN flow already permits /sync writes,
+    # so no re-authentication is needed.
+
+    # SIMKL list names, keyed by the neutral category names used by sync pairs.
+    _LIST_FOR_CATEGORY = {
+        "watchlist": "plantowatch",
+        "collection": "completed",
+    }
+
+    @staticmethod
+    def _write_ids(item: dict) -> dict:
+        """Build a SIMKL `ids` object from a canonical item."""
+        ids: dict = {}
+        source_ids = item.get("ids") or {}
+
+        def _first(*values):
+            for value in values:
+                text = str(value or "").strip()
+                if text:
+                    return text
+            return ""
+
+        simkl_id = _first(item.get("simkl_id"), source_ids.get("simkl"))
+        if simkl_id.isdigit():
+            ids["simkl"] = int(simkl_id)
+        imdb_id = _first(item.get("imdb_id"), source_ids.get("imdb"))
+        if imdb_id:
+            ids["imdb"] = imdb_id
+        tmdb_id = _first(item.get("tmdb_id"), source_ids.get("tmdb"))
+        if tmdb_id:
+            ids["tmdb"] = tmdb_id
+        tvdb_id = _first(item.get("tvdb_id"), source_ids.get("tvdb"))
+        if tvdb_id:
+            ids["tvdb"] = tvdb_id
+        mal_id = _first(item.get("mal_id"), source_ids.get("mal"))
+        if mal_id:
+            ids["mal"] = mal_id
+        anidb_id = _first(item.get("anidb_id"), source_ids.get("anidb"))
+        if anidb_id:
+            ids["anidb"] = anidb_id
+        return ids
+
+    @classmethod
+    def _build_sync_payload(
+        cls,
+        items: list[dict],
+        *,
+        to_list: str = "",
+        with_watched_at: bool = False,
+    ) -> dict:
+        """Group canonical items into SIMKL's {movies, shows} payload shape.
+
+        SIMKL groups by movies/shows like Trakt, but anime lives under `shows`
+        unless it is a film, and the target list is named per item via `to`.
+        """
+        movies: list[dict] = []
+        shows_by_key: dict[str, dict] = {}
+
+        for item in items:
+            ids = cls._write_ids(item)
+            if not ids:
+                continue
+            media_type = str(item.get("media_type") or "").strip().lower()
+            entry: dict = {"ids": ids}
+            if to_list:
+                entry["to"] = to_list
+            if item.get("title"):
+                entry["title"] = item["title"]
+            if item.get("year"):
+                entry["year"] = item["year"]
+            watched_at = item.get("watched_at") if with_watched_at else None
+            if watched_at:
+                entry["watched_at"] = watched_at
+
+            if media_type == "movie":
+                movies.append(entry)
+                continue
+
+            key = json.dumps(ids, sort_keys=True)
+            show = shows_by_key.get(key)
+            if show is None:
+                show = entry
+                shows_by_key[key] = show
+            season_number = item.get("season")
+            episode_number = item.get("episode")
+            if season_number is None or episode_number is None:
+                continue
+            try:
+                season_number = int(season_number)
+                episode_number = int(episode_number)
+            except (TypeError, ValueError):
+                continue
+            seasons = show.setdefault("seasons", [])
+            season = next((s for s in seasons if s.get("number") == season_number), None)
+            if season is None:
+                season = {"number": season_number, "episodes": []}
+                seasons.append(season)
+            season["episodes"].append({"number": episode_number})
+
+        payload: dict = {}
+        if movies:
+            payload["movies"] = movies
+        if shows_by_key:
+            payload["shows"] = list(shows_by_key.values())
+        return payload
+
+    def _sync_write(
+        self,
+        path: str,
+        items: list[dict],
+        *,
+        to_list: str = "",
+        with_watched_at: bool = False,
+    ) -> dict:
+        totals = {"added": 0, "not_found": 0, "batches": 0}
+        for start in range(0, len(items), SIMKL_SYNC_BATCH_SIZE):
+            chunk = items[start:start + SIMKL_SYNC_BATCH_SIZE]
+            payload = self._build_sync_payload(chunk, to_list=to_list, with_watched_at=with_watched_at)
+            if not payload:
+                continue
+            response = self._post(path, payload) or {}
+            totals["batches"] += 1
+            # SIMKL echoes back what it could not match; everything else is done.
+            not_found = response.get("not_found") if isinstance(response, dict) else None
+            missed = 0
+            if isinstance(not_found, dict):
+                missed = sum(len(v) for v in not_found.values() if isinstance(v, list))
+            totals["not_found"] += missed
+            totals["added"] += max(0, len(chunk) - missed)
+        return totals
+
+    def add_to_list(self, items: list[dict], category: str) -> dict:
+        to_list = self._LIST_FOR_CATEGORY.get(category)
+        if not to_list:
+            raise ValueError(f"SIMKL has no list mapping for category {category!r}")
+        return self._sync_write("/sync/add-to-list", items, to_list=to_list)
+
+    def remove_from_list(self, items: list[dict], category: str) -> dict:
+        to_list = self._LIST_FOR_CATEGORY.get(category)
+        if not to_list:
+            raise ValueError(f"SIMKL has no list mapping for category {category!r}")
+        return self._sync_write("/sync/remove-from-list", items, to_list=to_list)
+
+    def add_to_history(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/history", items, with_watched_at=True)
+
+    def remove_from_history(self, items: list[dict]) -> dict:
+        return self._sync_write("/sync/history/remove", items)
 
     # ── Authentication (PIN flow) ──────────────────────────────────
 

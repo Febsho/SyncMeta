@@ -595,6 +595,174 @@ class WebTests(unittest.TestCase):
         seq_after = log_capture.snapshot(limit=500)[-1]["seq"]
         self.assertGreater(seq_after, seq_before)
 
+    def test_pairs_require_a_session(self) -> None:
+        self.assertEqual(self.client.post("/api/profile/pairs", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/profile/pairs/save", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/profile/pairs/run", json={}).status_code, 401)
+
+    def test_pairs_reports_provider_capabilities(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        data = self.client.post("/api/profile/pairs", json={}).get_json()
+
+        self.assertEqual(data["pairs"], [])
+        by_key = {p["key"]: p for p in data["providers"]}
+        self.assertEqual(set(by_key), {"trakt", "simkl", "anilist", "mdblist", "pmdb"})
+        # This profile only has a PMDB key, so PMDB is configured and the rest
+        # are reported as unconfigured rather than omitted.
+        self.assertTrue(by_key["pmdb"]["configured"])
+        self.assertFalse(by_key["trakt"]["configured"])
+        self.assertIn("watchlist", by_key["pmdb"]["writes"])
+        self.assertEqual([c["key"] for c in data["categories"]], ["watchlist", "history", "collection"])
+        self.assertEqual(data["removal_modes"][0]["key"], "additive")
+
+    def test_saving_a_pair_round_trips(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        save = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "name": "Trakt to SIMKL",
+            "source": "trakt",
+            "target": "simkl",
+            "categories": ["watchlist"],
+        }]})
+        self.assertEqual(save.status_code, 200)
+
+        listed = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["source"], "trakt")
+        self.assertEqual(listed[0]["removal_mode"], "additive", "must default to the safe mode")
+        self.assertTrue(listed[0]["pair_id"])
+        # Trakt is not configured on this profile, so the pair explains itself.
+        self.assertIn("not configured", listed[0]["problem"])
+
+    def test_saving_an_invalid_pair_is_rejected_with_a_reason(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "trakt", "categories": ["watchlist"],
+        }]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("must differ", response.get_json()["error"])
+
+    def test_saving_pairs_rejects_a_non_list(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": "nope"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_running_an_unknown_pair_is_a_404(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/pairs/run", json={"pair_id": "nope"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_running_with_no_pairs_configured_is_rejected(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/pairs/run", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_running_a_pair_reports_why_it_could_not_run(self) -> None:
+        # An unconfigured provider must surface as a per-pair error, not a crash.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "pmdb", "categories": ["watchlist"],
+        }]})
+
+        response = self.client.post("/api/profile/pairs/run", json={"dry_run": True})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertIn("not configured", data["results"][0]["errors"][0])
+
+    def test_pair_managed_keys_persist_across_runs(self) -> None:
+        profile = self._make_bare_profile()
+        web._profile_store.update_pair_managed_keys(
+            profile["profile_id"], {"p1": {"watchlist": ["movie:tmdb:1"]}},
+        )
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        self.assertEqual(
+            stored["activity_state"]["pair_managed_keys"], {"p1": {"watchlist": ["movie:tmdb:1"]}},
+        )
+        # A second pair's keys must merge, not replace.
+        web._profile_store.update_pair_managed_keys(
+            profile["profile_id"], {"p2": {"watchlist": ["movie:tmdb:2"]}},
+        )
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        self.assertEqual(set(stored["activity_state"]["pair_managed_keys"]), {"p1", "p2"})
+
+    def _make_anilist_profile(self, access_token: str) -> dict:
+        return web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "someone", "access_token": access_token, "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["anime"]})
+
+    def test_anilist_is_a_source_but_not_a_target_without_a_token(self) -> None:
+        # The existing-user shape: a username and no token. AniList must stay
+        # readable rather than being dropped or forcing a re-login.
+        profile = self._make_anilist_profile("")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertTrue(providers["anilist"]["configured"])
+        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection"])
+        self.assertEqual(providers["anilist"]["writes"], [])
+        self.assertIn("access token", providers["anilist"]["write_blocked_reason"])
+
+    def test_adding_an_anilist_token_makes_it_a_target(self) -> None:
+        profile = self._make_anilist_profile("anilist-token")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+        self.assertEqual(providers["anilist"]["write_blocked_reason"], "")
+
+    def test_a_blank_anilist_token_keeps_the_saved_one(self) -> None:
+        # "Leave blank to keep it" must not silently revoke write access.
+        profile = self._make_anilist_profile("anilist-token")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        merged = web.merge_credentials(
+            web._profile_store.get_private_profile_by_id(profile["profile_id"])["credentials"],
+            web.normalize_credentials({
+                "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+                "anilist": {"username": "someone", "access_token": "", "selected_statuses": []},
+                "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+                "mdblist": {"api_key": "", "selected_lists": []},
+                "pmdb": {"api_key": "pmdb-secret"},
+            }),
+        )
+
+        self.assertEqual(merged["anilist"]["access_token"], "anilist-token")
+
+    def test_mdblist_is_offered_as_a_source_only(self) -> None:
+        profile = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "mdb-key", "selected_lists": [{"id": 10, "name": "Picks", "mediatype": "movie"}]},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["movies"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertTrue(providers["mdblist"]["configured"])
+        self.assertTrue(providers["mdblist"]["reads"], "MDBList must be usable as a source")
+        self.assertEqual(providers["mdblist"]["writes"], [], "MDBList has no write path")
+        self.assertIn("only be read from", providers["mdblist"]["write_blocked_reason"])
+
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {
