@@ -1744,16 +1744,26 @@ def api_profile_save():
 
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
+    # The profile filter is taken from the session, never from the query string.
+    # log_capture.snapshot() only filters when given a non-empty profile id, so a
+    # caller-supplied (or missing) value would return every profile's logs.
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
     after_seq = request.args.get("after", 0, type=int)
     limit = min(request.args.get("limit", 300, type=int), 500)
-    profile_id = request.args.get("profile", "").strip()
     entries = log_capture.snapshot(after_seq=after_seq, limit=limit, profile_id=profile_id)
     return jsonify({"entries": entries})
 
 
 @app.route("/api/logs/clear", methods=["POST"])
 def api_logs_clear():
-    log_capture.clear()
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    # Scoped to the caller: an unfiltered clear would destroy every other user's
+    # buffered logs and reset the shared sequence counter under their cursors.
+    log_capture.clear(profile_id)
     return jsonify({"ok": True})
 
 

@@ -94,8 +94,25 @@ def snapshot(after_seq: int = 0, limit: int = 300, profile_id: str = "") -> list
     return items[-limit:]
 
 
-def clear() -> None:
+def clear(profile_id: str = "") -> None:
+    """Drop buffered entries.
+
+    With a ``profile_id`` only that profile's entries are removed, which is what
+    a signed-in user clearing their own log view should do.  The sequence counter
+    is deliberately left alone in that case: resetting it would strand every
+    other connected client's cursor above all future sequence numbers, silencing
+    their log view until the counter climbed back past it.
+
+    The unfiltered form wipes everything and resets the counter, and so is only
+    appropriate for process-wide teardown such as tests.
+    """
     global _seq
     with _lock:
+        if profile_id:
+            pid_prefix = profile_id[:16]
+            kept = [e for e in _entries if e.get("profile_id") != pid_prefix]
+            _entries.clear()
+            _entries.extend(kept)
+            return
         _entries.clear()
         _seq = 0

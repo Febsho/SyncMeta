@@ -1653,7 +1653,10 @@
         return;
       }
       body.innerHTML = profileLogs.map(entry => {
-        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+        // /api/logs reports `ts` as epoch seconds; tolerate an ISO `timestamp`
+        // too so either log store's shape renders a time instead of a blank.
+        const when = entry.timestamp || (entry.ts ? entry.ts * 1000 : null);
+        const stamp = when ? new Date(when).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
         const level = String(entry.level || 'INFO').toUpperCase();
         return `<div class="log-row">
           <div class="log-time">${esc(stamp)}</div>
@@ -1673,8 +1676,9 @@
         renderProfileLogs();
       }
       try {
-        const profileParam = sessionProfileId ? '&profile=' + encodeURIComponent(sessionProfileId) : '';
-        const resp = await fetch('/api/logs?after=' + profileLogsCursor + '&limit=' + (reset ? 300 : 200) + profileParam);
+        // No profile parameter: the server scopes logs to the session. Sending a
+        // client-side id was how an empty value silently disabled the filter.
+        const resp = await fetch('/api/logs?after=' + profileLogsCursor + '&limit=' + (reset ? 300 : 200));
         if (!resp.ok) {
           if (statusNode) statusNode.textContent = resp.status === 401 ? 'Sign in to view your profile logs.' : 'Could not load logs.';
           stopProfileLogPolling();
@@ -1722,11 +1726,26 @@
     }
 
     async function clearProfileLogs() {
-      try { await fetch('/api/logs/clear', { method: 'POST' }); } catch {}
+      const statusNode = el('profile-logs-status');
+      let resp;
+      try {
+        resp = await fetch('/api/logs/clear', { method: 'POST' });
+      } catch (err) {
+        console.debug('Log clear error:', err);
+        if (statusNode) statusNode.textContent = 'Could not clear logs — connection unavailable.';
+        return;
+      }
+      if (!resp.ok) {
+        if (statusNode) {
+          statusNode.textContent = resp.status === 401
+            ? 'Sign in to clear your profile logs.'
+            : 'Could not clear logs.';
+        }
+        return;
+      }
       profileLogs = [];
       profileLogsCursor = 0;
       renderProfileLogs();
-      const statusNode = el('profile-logs-status');
       if (statusNode) statusNode.textContent = 'Logs cleared.';
     }
 
