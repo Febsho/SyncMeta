@@ -48,7 +48,9 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Config:** `src/config.py` — dataclass hierarchy: `AppConfig` contains `SimklConfig`, `TraktConfig`, `AniListConfig`, `MdbListConfig`, `PublicMetaDBConfig`, `SyncConfig`. `SyncConfig.pmdb_watchlist_managed_keys: list[str]` is the persisted set of watchlist keys written by SyncMeta.
 
-**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider.
+**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider. Trakt/SIMKL/AniList carry both read *and* write APIs; MDBList is read-only.
+
+**Cross-service sync:** `src/providers.py` + `src/cross_sync.py`. The main pipeline only writes to PMDB; a *sync pair* copies one category from any provider to any other. `providers.py` wraps each client in a `ProviderAdapter` declaring the categories it can read/write; `cross_sync.CrossSyncService.run_pair()` fetches both sides, diffs on `providers.item_key`, and adds/removes on the target. Pairs live in `options.sync_pairs` (see `SyncPair` in `config.py`), and per-pair ownership in `activity_state.pair_managed_keys`. Endpoints: `/api/profile/pairs`, `/pairs/save`, `/pairs/run`.
 
 **Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS. Key patterns:
 - `fetchStatus(force)` polls `/status` every 2s during sync; has `_statusGeneration` counter to discard stale renders
@@ -59,6 +61,37 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 ## Key Invariants
 
 **PMDB Watchlist managed-keys filter:** `_remove_stale` in `sync_service.py` accepts `managed_keys: frozenset[str] | None`. If `managed_keys` is truthy (non-empty), only items whose key is in `managed_keys` are eligible for removal — this preserves manually-added PMDB entries. An empty frozenset (bootstrap/first-sync) is falsy and falls back to full-removal behavior. Keys are persisted in `activity_state.pmdb_watchlist_managed_keys` by `_merge_activity_results` in `profile_store.py` after each sync.
+
+**Sync pairs are one-way and additive by default.** A pair is `source → target`;
+both directions means two pairs. `removal_mode` is `additive` (never deletes),
+`managed` (deletes only keys this pair previously wrote, so manual additions on
+the target survive — the same invariant as `pmdb_watchlist_managed_keys`), or
+`mirror` (deletes anything the source lacks). An unrecognised mode must refuse to
+delete rather than fall through to a destructive default. Managed keys are scoped
+per pair id, so duplicate ids would let two pairs delete each other's items —
+`_normalize_sync_pairs` assigns and de-duplicates them.
+
+**Cross-provider identity must be normalized before diffing.** Keys come from
+`providers.item_key` and are TMDB-based, but AniList reports only AniList/MAL
+ids. Keyed naively the same show yields two different keys, nothing ever matches,
+and a pair re-adds its whole source list every run. `providers.enrich_identity()`
+maps anime-native ids to TMDB through the offline anime data first, and refuses a
+mapping whose namespace disagrees with the item's `media_type`. There is a
+regression test asserting a second run writes nothing.
+
+**A failed read of the *target* must abort that category.** Without the target's
+current contents every source item looks new and the pair would duplicate the
+entire list.
+
+**AniList has no watch-history mapping.** It tracks progress per series, not
+individual episode plays, so `AniListAdapter` advertises no history support at
+either end. Do not add one — it would silently write wrong data.
+
+**Writing needs no re-authentication, except AniList.** Trakt's device-flow token
+and SIMKL's PIN token already permit `/sync` writes. AniList mutations require an
+access token that existing username-only profiles do not have, so
+`can_write()` / `write_blocked_reason()` report it and the UI offers AniList as a
+source but not a target until a token is added.
 
 **Fribb feed shapes — do not assume scalars.** Verified against the live
 `Fribb/anime-lists` feed (42,868 entries). Reading these as plain values is what
