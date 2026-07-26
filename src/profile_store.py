@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import threading
 import uuid
@@ -15,6 +16,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import ANILIST_DEFAULT_SELECTED_STATUSES, SIMKL_DEFAULT_SELECTED_STATUSES
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_MEDIA_TYPES = {"shows", "movies", "anime"}
 DEFAULT_MEDIA_TYPES = ["shows", "movies", "anime"]
@@ -101,6 +104,31 @@ def _normalize_sync_job_snapshot(raw_snapshot: dict | None) -> dict:
     }
 
 
+def _normalize_pair_managed_keys(raw: object) -> dict:
+    """Normalize {pair_id: {category: [key, ...]}} written by cross-service pairs.
+
+    These are the keys a pair has previously written to its target, and they are
+    what the "managed" removal mode is allowed to delete, so a malformed entry
+    must normalize to empty rather than to something deletable.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for pair_id, categories in raw.items():
+        if not isinstance(categories, dict):
+            continue
+        per_category: dict = {}
+        for category, keys in categories.items():
+            if not isinstance(keys, list):
+                continue
+            cleaned = sorted({str(key) for key in keys if key})
+            if cleaned:
+                per_category[str(category)] = cleaned
+        if per_category:
+            out[str(pair_id)] = per_category
+    return out
+
+
 def _normalize_activity_state(raw_state: dict | None) -> dict:
     if not isinstance(raw_state, dict):
         return {
@@ -109,6 +137,7 @@ def _normalize_activity_state(raw_state: dict | None) -> dict:
             "simkl_activities_ts": "",
             "trakt_activities_ts": "",
             "pmdb_watchlist_managed_keys": [],
+            "pair_managed_keys": {},
         }
     raw_keys = raw_state.get("pmdb_watchlist_managed_keys")
     return {
@@ -117,6 +146,7 @@ def _normalize_activity_state(raw_state: dict | None) -> dict:
         "simkl_activities_ts": str(raw_state.get("simkl_activities_ts", "") or "").strip(),
         "trakt_activities_ts": str(raw_state.get("trakt_activities_ts", "") or "").strip(),
         "pmdb_watchlist_managed_keys": sorted({str(k) for k in raw_keys if k}) if isinstance(raw_keys, list) else [],
+        "pair_managed_keys": _normalize_pair_managed_keys(raw_state.get("pair_managed_keys")),
     }
 
 
@@ -551,6 +581,36 @@ def _normalize_resume_source(value: object, trakt_enabled: bool) -> str:
     return "off"
 
 
+def _normalize_sync_pairs(raw: object) -> list[dict]:
+    """Validate and normalize cross-service sync pair definitions.
+
+    Invalid pairs are dropped rather than raising, so one malformed entry cannot
+    make a profile unloadable. Pair ids are assigned when missing because the
+    managed-key store is keyed on them.
+    """
+    from .config import SyncPair
+
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(raw):
+        try:
+            pair = SyncPair.from_dict(entry)
+        except (ValueError, TypeError) as exc:
+            logger.warning("Dropping invalid sync pair at index %d: %s", index, exc)
+            continue
+        pair_id = pair.pair_id or f"{pair.source}-{pair.target}-{index + 1}"
+        # Duplicate ids would let two pairs share managed keys and delete each
+        # other's items.
+        while pair_id in seen_ids:
+            pair_id = f"{pair_id}-{index + 1}"
+        seen_ids.add(pair_id)
+        pair.pair_id = pair_id
+        out.append(pair.to_dict())
+    return out
+
+
 def normalize_profile_options(options: dict | None) -> dict:
     raw = options or {}
     interval_raw = raw.get("interval_seconds", DEFAULT_SYNC_INTERVAL_SECONDS)
@@ -631,6 +691,7 @@ def normalize_profile_options(options: dict | None) -> dict:
         "simkl_sync_to_pmdb_watchlist": bool(raw.get("simkl_sync_to_pmdb_watchlist", False)),
         "trakt_sync_to_pmdb_watchlist": bool(raw.get("trakt_sync_to_pmdb_watchlist", False)),
         "anilist_sync_to_pmdb_watchlist": bool(raw.get("anilist_sync_to_pmdb_watchlist", False)),
+        "sync_pairs": _normalize_sync_pairs(raw.get("sync_pairs")),
     }
 
 
@@ -1775,6 +1836,40 @@ class ProfileStore:
             self._apply_next_run_schedule(profile, normalized_modes, dry_run)
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
+
+    def update_sync_pairs(self, profile_id: str, pairs: list[dict]) -> dict:
+        """Replace just the cross-service sync pairs.
+
+        Deliberately narrower than update_profile_by_id, which rewrites every
+        option and resets sync state — saving a pair should not disturb either.
+        """
+        normalized = _normalize_sync_pairs(pairs)
+        with self._lock:
+            normalized_id = self._normalize_profile_id(profile_id)
+            profile = self._profiles[normalized_id]
+            options = dict(profile.get("options") or {})
+            options["sync_pairs"] = normalized
+            profile["options"] = options
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
+    def update_pair_managed_keys(self, profile_id: str, managed_keys: dict) -> None:
+        """Persist which target keys each pair owns, for the managed removal mode.
+
+        Merged rather than replaced so running a single pair does not discard
+        another pair's ownership record.
+        """
+        cleaned = _normalize_pair_managed_keys(managed_keys)
+        with self._lock:
+            normalized_id = self._normalize_profile_id(profile_id)
+            profile = self._profiles[normalized_id]
+            state = _normalize_activity_state(profile.get("activity_state"))
+            merged = dict(state.get("pair_managed_keys") or {})
+            merged.update(cleaned)
+            state["pair_managed_keys"] = merged
+            profile["activity_state"] = state
+            self._save_locked()
 
     def update_sync_status(self, profile_id: str, status: str) -> dict:
         with self._lock:

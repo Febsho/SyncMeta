@@ -28,6 +28,7 @@ from src.config import (
     PublicMetaDBConfig,
     SimklConfig,
     SyncConfig,
+    SyncPair,
     TraktConfig,
     validate_config,
 )
@@ -39,6 +40,18 @@ from src.profile_store import ProfileStore, merge_credentials, normalize_credent
 from src.simkl_client import SimklClient
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
 from src.trakt_client import TraktClient
+from src.cross_sync import CrossSyncService
+from src.providers import (
+    ALL_CATEGORIES,
+    ALL_REMOVAL_MODES,
+    CATEGORY_LABELS,
+    PROVIDER_ORDER,
+    REMOVAL_MODE_LABELS,
+    AniListAdapter,
+    PmdbAdapter,
+    SimklAdapter,
+    TraktAdapter,
+)
 from src import log_capture
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -413,6 +426,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
             trakt_sync_to_pmdb_watchlist=options["trakt_sync_to_pmdb_watchlist"],
             anilist_sync_to_pmdb_watchlist=options["anilist_sync_to_pmdb_watchlist"],
             pmdb_watchlist_managed_keys=list(activity_state.get("pmdb_watchlist_managed_keys") or []),
+            sync_pairs=list(options.get("sync_pairs") or []),
         ),
     )
 
@@ -809,6 +823,77 @@ def _make_anime_root_resolver(config: AppConfig):
         return None
 
     return resolver
+
+
+def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) -> dict:
+    """Build the provider adapters available for cross-service sync pairs.
+
+    Only services with usable credentials are included, so a pair referencing an
+    unconfigured provider reports that rather than failing mid-run. Whether a
+    provider may be *written* to is a separate question the adapter answers.
+    """
+    adapters: dict = {}
+
+    if config.simkl.client_id and config.simkl.access_token:
+        adapters["simkl"] = SimklAdapter(
+            SimklClient(config.simkl, cancel_requested_callback=cancel_requested_callback),
+            media_types=list(config.sync.media_types),
+        )
+    if config.trakt.enabled and config.trakt.client_id and config.trakt.access_token:
+        adapters["trakt"] = TraktAdapter(
+            TraktClient(config.trakt, cancel_requested_callback=cancel_requested_callback),
+        )
+    if config.anilist.username:
+        # Readable with just a username; the adapter reports that writing needs a
+        # token, so existing profiles keep working without re-authenticating.
+        adapters["anilist"] = AniListAdapter(
+            AniListClient(config.anilist, cancel_requested_callback=cancel_requested_callback),
+        )
+    if config.pmdb.api_key:
+        adapters["pmdb"] = PmdbAdapter(
+            PublicMetaDBClient(config.pmdb, cancel_requested_callback=cancel_requested_callback),
+        )
+    return adapters
+
+
+def _sync_pairs_from_config(config: AppConfig) -> list:
+    pairs = []
+    for raw in config.sync.sync_pairs or []:
+        try:
+            pairs.append(SyncPair.from_dict(raw))
+        except (ValueError, TypeError) as exc:
+            logger.warning("Ignoring invalid sync pair %r: %s", raw, exc)
+    return pairs
+
+
+def _pair_capabilities(config: AppConfig) -> dict:
+    """Provider capability report for the pair editor."""
+    adapters = _build_provider_adapters(config)
+    providers = []
+    for key in PROVIDER_ORDER:
+        adapter = adapters.get(key)
+        if adapter is None:
+            providers.append({
+                "key": key,
+                "label": key,
+                "configured": False,
+                "reads": [],
+                "writes": [],
+                "write_blocked_reason": "",
+            })
+            continue
+        described = adapter.describe()
+        described["configured"] = True
+        providers.append(described)
+    return {
+        "providers": providers,
+        "categories": [
+            {"key": key, "label": CATEGORY_LABELS[key]} for key in ALL_CATEGORIES
+        ],
+        "removal_modes": [
+            {"key": key, "label": REMOVAL_MODE_LABELS[key]} for key in ALL_REMOVAL_MODES
+        ],
+    }
 
 
 def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) -> int | None:
@@ -2006,6 +2091,125 @@ def api_profile_sync_stop():
         return _json_error(str(exc), 409)
 
     return jsonify({"status": "stopping", "profile": profile})
+
+
+@app.route("/api/profile/pairs", methods=["POST"])
+def api_profile_pairs():
+    """Return the profile's sync pairs plus what each provider can actually do."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    config = _config_from_profile(private_profile)
+    pairs = []
+    adapters = _build_provider_adapters(config)
+    service = CrossSyncService(adapters)
+    for pair in _sync_pairs_from_config(config):
+        entry = pair.to_dict()
+        # Surface why a pair cannot run so the editor can explain it in place
+        # rather than only failing at run time.
+        entry["problem"] = service.validate_pair(pair)
+        pairs.append(entry)
+
+    return jsonify({"pairs": pairs, **_pair_capabilities(config)})
+
+
+@app.route("/api/profile/pairs/save", methods=["POST"])
+def api_profile_pairs_save():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    raw_pairs = body.get("pairs")
+    if not isinstance(raw_pairs, list):
+        return _json_error("pairs must be a list", 400)
+
+    # Validate strictly here (unlike profile load, which drops bad entries) so
+    # the user gets told what is wrong instead of silently losing a pair.
+    normalized: list[dict] = []
+    for index, raw in enumerate(raw_pairs):
+        try:
+            pair = SyncPair.from_dict(raw)
+        except (ValueError, TypeError) as exc:
+            return _json_error(f"Pair {index + 1}: {exc}", 400)
+        pair.pair_id = pair.pair_id or f"{pair.source}-{pair.target}-{index + 1}"
+        normalized.append(pair.to_dict())
+
+    seen = set()
+    for pair in normalized:
+        if pair["pair_id"] in seen:
+            return _json_error(f"Duplicate pair id {pair['pair_id']!r}", 400)
+        seen.add(pair["pair_id"])
+
+    try:
+        profile = _profile_store.update_sync_pairs(profile_id, normalized)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    return jsonify({"status": "saved", "profile": profile})
+
+
+@app.route("/api/profile/pairs/run", methods=["POST"])
+def api_profile_pairs_run():
+    """Run one pair, or every enabled pair when no pair_id is given."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    pair_id = str(body.get("pair_id", "") or "").strip()
+    dry_run = bool(body.get("dry_run", False))
+
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    config = _config_from_profile(private_profile)
+    pairs = _sync_pairs_from_config(config)
+    if pair_id:
+        pairs = [p for p in pairs if p.pair_id == pair_id]
+        if not pairs:
+            return _json_error("Sync pair not found", 404)
+
+    if not pairs:
+        return _json_error("No sync pairs configured", 400)
+
+    activity_state = private_profile.get("activity_state") or {}
+    service = CrossSyncService(
+        _build_provider_adapters(config),
+        dry_run=dry_run,
+        managed_keys=activity_state.get("pair_managed_keys") or {},
+    )
+
+    log_token = _log_profile_id.set(profile_id)
+    try:
+        results = service.run_pairs(pairs)
+    except SyncCancelled:
+        return _json_error("Sync stopped", 409)
+    except Exception as exc:
+        logger.exception("Cross-service sync failed")
+        return _json_error(f"Sync failed: {exc}", 500)
+    finally:
+        _log_profile_id.reset(log_token)
+
+    if not dry_run:
+        # Persist which keys each pair now owns so the managed removal mode has
+        # something to reason about on the next run.
+        try:
+            _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
+        except KeyError:
+            pass
+
+    return jsonify({
+        "status": "completed",
+        "dry_run": dry_run,
+        "results": [r.to_dict() for r in results],
+    })
 
 
 @app.route("/api/profile/unresolved", methods=["POST"])
