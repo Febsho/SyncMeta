@@ -58,6 +58,7 @@ query ($userName: String, $status: MediaListStatus) {
   MediaListCollection(userName: $userName, type: ANIME, status: $status) {
     lists {
       entries {
+        id
         media {
           id
           idMal
@@ -115,6 +116,24 @@ query ($id: Int) {
         }
       }
     }
+  }
+}
+"""
+
+_SAVE_ENTRY_MUTATION = """
+mutation ($mediaId: Int, $status: MediaListStatus, $progress: Int) {
+  SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress) {
+    id
+    status
+    progress
+  }
+}
+"""
+
+_DELETE_ENTRY_MUTATION = """
+mutation ($id: Int) {
+  DeleteMediaListEntry(id: $id) {
+    deleted
   }
 }
 """
@@ -489,6 +508,10 @@ class AniListClient:
                 media = entry.get("media", {})
                 normalized = self._normalize(media)
                 if normalized:
+                    # Carry the media-list entry id: AniList deletions are by
+                    # entry, not by media, so removal is impossible without it.
+                    if entry.get("id"):
+                        normalized["anilist_entry_id"] = entry["id"]
                     items.append(normalized)
 
         self._status_cache[status] = list(items)
@@ -773,3 +796,162 @@ class AniListClient:
             seen.add(key)
             variants.append(text)
         return variants
+
+    # ── Write API ──────────────────────────────────────────────────────────
+    #
+    # AniList mutations require an OAuth access token.  Reading a public list
+    # only needs a username, so existing profiles may have no token at all —
+    # `can_write()` reports that instead of failing mid-sync, and no existing
+    # setup is disturbed.
+
+    def can_write(self) -> bool:
+        return bool(str(self._config.access_token or "").strip())
+
+    def write_blocked_reason(self) -> str:
+        if self.can_write():
+            return ""
+        return (
+            "AniList needs an access token to be written to. Reading a public "
+            "list only requires a username, so add a token in Connections to "
+            "use AniList as a sync target."
+        )
+
+    # Neutral sync-pair categories mapped onto AniList list statuses.
+    _STATUS_FOR_CATEGORY = {
+        "watchlist": ANILIST_STATUS_PLAN_TO_WATCH,
+        "collection": ANILIST_STATUS_COMPLETED,
+    }
+
+    def _resolve_media_id(self, item: dict) -> int | None:
+        """Find the AniList media id for a canonical item.
+
+        Items originating from AniList already carry one.  Anything else is
+        mapped through the offline anime data: TMDB -> Fribb entry -> AniList id,
+        with MAL as a fallback hop for entries that carry no AniList id.
+        """
+        ids = item.get("ids") or {}
+        for value in (item.get("anilist_id"), ids.get("anilist")):
+            try:
+                if value and int(value) > 0:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+
+        entry = None
+        try:
+            tmdb_id, _media_type = fribb_client.extract_tmdb(item.get("tmdb_id"))
+            if tmdb_id:
+                entry = fribb_client.lookup_by_tmdb(int(tmdb_id))
+            if entry is None:
+                imdb_id = fribb_client.single_imdb_id(item.get("imdb_id") or ids.get("imdb"))
+                if imdb_id:
+                    entry = fribb_client.lookup_by_imdb(imdb_id)
+        except Exception:
+            logger.debug("AniList media-id lookup failed for %r", item.get("title"), exc_info=True)
+            entry = None
+
+        if isinstance(entry, dict):
+            anilist_id = entry.get("anilist_id")
+            if anilist_id:
+                try:
+                    return int(anilist_id)
+                except (TypeError, ValueError):
+                    pass
+            mal_id = entry.get("mal_id")
+            if mal_id:
+                try:
+                    resolved = self.get_anilist_id_by_mal(int(mal_id))
+                except (TypeError, ValueError):
+                    resolved = None
+                if resolved:
+                    return resolved
+
+        mal_id = item.get("mal_id") or ids.get("mal")
+        if mal_id:
+            try:
+                return self.get_anilist_id_by_mal(int(mal_id))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def save_entry(self, media_id: int, status: str, progress: int | None = None) -> dict | None:
+        variables: dict = {"mediaId": int(media_id), "status": status}
+        if progress is not None:
+            variables["progress"] = int(progress)
+        data = self._query(_SAVE_ENTRY_MUTATION, variables)
+        if isinstance(data, dict):
+            return data.get("SaveMediaListEntry")
+        return None
+
+    def delete_entry(self, entry_id: int) -> bool:
+        data = self._query(_DELETE_ENTRY_MUTATION, {"id": int(entry_id)})
+        if isinstance(data, dict):
+            result = data.get("DeleteMediaListEntry") or {}
+            return bool(result.get("deleted"))
+        return False
+
+    def add_to_list(self, items: list[dict], category: str) -> dict:
+        """Set the list status for each item, adding it to the user's list."""
+        status = self._STATUS_FOR_CATEGORY.get(category)
+        if not status:
+            raise ValueError(f"AniList has no status mapping for category {category!r}")
+        totals = {"added": 0, "not_found": 0, "batches": 0}
+        for item in items:
+            media_id = self._resolve_media_id(item)
+            if not media_id:
+                totals["not_found"] += 1
+                logger.info(
+                    "AniList: no media id for %r (tmdb=%s) — cannot add",
+                    item.get("title"), item.get("tmdb_id"),
+                )
+                continue
+            # COMPLETED entries are given full progress so AniList does not show
+            # them as completed-at-episode-0.
+            progress = None
+            if status == ANILIST_STATUS_COMPLETED:
+                try:
+                    episodes = int(item.get("total_episodes_count") or 0)
+                except (TypeError, ValueError):
+                    episodes = 0
+                if episodes > 0:
+                    progress = episodes
+            if self.save_entry(media_id, status, progress) is not None:
+                totals["added"] += 1
+            else:
+                totals["not_found"] += 1
+        totals["batches"] = 1 if items else 0
+        return totals
+
+    def remove_from_list(self, items: list[dict], category: str) -> dict:
+        """Delete media-list entries.
+
+        AniList deletes by entry id.  Items that came from an AniList read carry
+        one; anything else has to be located in the user's current list first.
+        """
+        status = self._STATUS_FOR_CATEGORY.get(category)
+        if not status:
+            raise ValueError(f"AniList has no status mapping for category {category!r}")
+        entry_ids_by_media: dict[int, int] = {}
+        for existing in self.get_status(status) or []:
+            media_id = existing.get("anilist_id")
+            entry_id = existing.get("anilist_entry_id")
+            if media_id and entry_id:
+                try:
+                    entry_ids_by_media[int(media_id)] = int(entry_id)
+                except (TypeError, ValueError):
+                    continue
+
+        totals = {"deleted": 0, "not_found": 0, "batches": 1 if items else 0}
+        for item in items:
+            entry_id = item.get("anilist_entry_id")
+            if not entry_id:
+                media_id = self._resolve_media_id(item)
+                entry_id = entry_ids_by_media.get(int(media_id)) if media_id else None
+            if not entry_id:
+                totals["not_found"] += 1
+                continue
+            if self.delete_entry(int(entry_id)):
+                totals["deleted"] += 1
+            else:
+                totals["not_found"] += 1
+        return totals
