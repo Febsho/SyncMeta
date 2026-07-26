@@ -916,8 +916,13 @@
     let profileDraftDirty = false;
     let pollingIntervalMs = 0;
     let statusFetchInFlight = null;
+    let statusFetchToken = null;
     const POLL_RUNNING_MS = 2000;
     const POLL_IDLE_MS = 30000;
+    // How long to keep polling fast while waiting for a just-triggered sync to
+    // be picked up by a worker and reported as running.
+    const FAST_POLL_HOLD_MS = 20000;
+    let fastPollHoldUntil = 0;
 
     function el(id) { return document.getElementById(id); }
 
@@ -940,8 +945,33 @@
       }
     }
 
+    // A just-triggered sync is queued before it starts running, so the next
+    // status response can still report sync_running=false. Without a hold the
+    // interval would drop straight back to the 30s idle tick and the dashboard
+    // would appear frozen for up to half a minute after the user clicked Sync.
+    function holdFastPolling(ms) {
+      fastPollHoldUntil = Date.now() + Number(ms || FAST_POLL_HOLD_MS);
+      setPollingInterval(POLL_RUNNING_MS);
+    }
+
+    function releaseFastPollingHold() {
+      fastPollHoldUntil = 0;
+    }
+
     function refreshPollingForProfile(profile) {
-      setPollingInterval(profile && profile.sync_running ? POLL_RUNNING_MS : POLL_IDLE_MS);
+      const queue = (profile && profile.queue_status) || {};
+      const queuedOrRunning = Number(queue.profile_queue_position || 0) > 0 || !!queue.profile_running;
+      if ((profile && profile.sync_running) || queuedOrRunning) {
+        // The backend has acknowledged the run; normal rules take over.
+        releaseFastPollingHold();
+        setPollingInterval(POLL_RUNNING_MS);
+        return;
+      }
+      if (Date.now() < fastPollHoldUntil) {
+        setPollingInterval(POLL_RUNNING_MS);
+        return;
+      }
+      setPollingInterval(POLL_IDLE_MS);
     }
 
     function refreshRedirectUrlHints() {
@@ -957,11 +987,11 @@
       if (!input || !input.value) return;
       try {
         await navigator.clipboard.writeText(input.value);
-        showToast('Copied redirect URL', true);
+        showToast('Copied redirect URL', false, true);
       } catch {
         input.select();
         document.execCommand('copy');
-        showToast('Copied redirect URL', true);
+        showToast('Copied redirect URL', false, true);
       }
     }
 
@@ -1492,7 +1522,7 @@
         const buttons = SIMKL_STATUS_OPTIONS[mediaType].map((item, index, items) => {
           const active = simklSelectedStatuses[mediaType].indexOf(item.value) !== -1;
           const wide = items.length % 2 === 1 && index === items.length - 1 ? ' wide' : '';
-          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" data-simkl-media="${esc(mediaType)}" data-simkl-status="${esc(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
+          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" data-simkl-media="${escAttr(mediaType)}" data-simkl-status="${escAttr(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
         }).join('');
         const title = mediaType.charAt(0).toUpperCase() + mediaType.slice(1);
         return `<div class="status-group"><div class="status-group-title">${esc(title)}</div><div class="status-grid">${buttons}</div></div>`;
@@ -1520,7 +1550,7 @@
       const buttons = [`<button type="button" class="status-list-btn ${allActive ? 'active' : ''}" id="anilist-select-all"><span>All</span><span>${allActive ? 'On' : 'Off'}</span></button>`]
         .concat(ANILIST_STATUS_OPTIONS.map(item => {
           const active = anilistSelectedStatuses.indexOf(item.value) !== -1;
-          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" data-anilist-status="${esc(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
+          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" data-anilist-status="${escAttr(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
         }))
         .join('');
 
@@ -1570,6 +1600,9 @@
         siteStatsPolling = null;
       }
       stopProfileLogPolling();
+      // This 1s countdown timer had no stop path and kept ticking on the landing
+      // page and after logout.
+      stopNextSyncTicker();
     }
 
     function switchView(name) {
@@ -1801,10 +1834,24 @@
       return 'in ' + Math.floor(delta / 86400) + 'd';
     }
 
+    // Safe for element *text* only. Serializing a text node escapes &, < and >
+    // but leaves quotes alone, so this must never be used inside an attribute.
     function esc(value) {
       const node = document.createElement('div');
       node.textContent = value;
       return node.innerHTML;
+    }
+
+    // Safe for quoted attribute values. Provider IDs and list names come from
+    // third-party APIs, and a value containing a quote would otherwise close the
+    // attribute early and inject markup.
+    function escAttr(value) {
+      return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function renderSiteStats(stats) {
@@ -2154,7 +2201,7 @@
         rows = defaultItems.map(item => {
           const isWatchlist = item.source === 'watchlist';
           const selected = isWatchlist ? isTraktWatchlistEnabled(item.watchlistMediaType) : isTraktListSelected(traktListKey(item));
-          const attrs = isWatchlist ? `data-trakt-watchlist="${esc(item.watchlistMediaType)}"` : `data-trakt-key="${esc(traktListKey(item))}"`;
+          const attrs = isWatchlist ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : `data-trakt-key="${escAttr(traktListKey(item))}"`;
           const meta = isWatchlist ? 'Trakt' : traktCatalogMeta(item);
           return `
             <div class="catalog-row ${selected ? 'selected' : ''}" ${attrs}>
@@ -2188,7 +2235,7 @@
         }
         rows = enabledItems.length
           ? enabledItems.map(item => `
-            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${esc(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${esc(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''}>
+            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${escAttr(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''}>
               <div class="catalog-check">&#10003;</div>
               <div class="catalog-body">
                 <div class="catalog-title">${esc(item.name)}</div>
@@ -2211,7 +2258,7 @@
             const key = traktListKey(item);
             const selected = traktSyncAllLikedLists && item.source === 'liked' ? true : isTraktListSelected(key);
             return `
-              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${esc(key)}">
+              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${escAttr(key)}">
                 <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
                 <div class="catalog-body">
                   <div class="catalog-title">${esc(item.name)}</div>
@@ -2387,7 +2434,7 @@
           item.likes ? `${item.likes} likes` : '',
         ].filter(Boolean).join(' · ');
         return `
-          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${esc(key)}">
+          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${escAttr(key)}">
             <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
             <div class="catalog-body">
               <div class="catalog-title">${esc(item.name)}</div>
@@ -2748,7 +2795,7 @@
       scheduleTraktDeviceCheck(1000);
     }
 
-    function renderEmptyDashboard(message) {
+    function renderEmptyDashboard(message, keepPolling) {
       lastDashboardProfile = null;
       currentResultsPage = 1;
       pendingDeleteListName = '';
@@ -2778,13 +2825,27 @@
       if (nextBadge) nextBadge.classList.add('hidden');
       const dryRunPreview = el('dry-run-preview-container');
       if (dryRunPreview) { dryRunPreview.classList.add('hidden'); dryRunPreview.innerHTML = ''; }
+      // This state disables the action buttons, so the next successful status
+      // must always re-render to restore them. Clearing the fingerprint stops
+      // renderDashboard being skipped as "unchanged" and leaving them stuck.
+      lastStatusRenderKey = '';
+      if (keepPolling) {
+        // Transient transport failure: keep checking at the idle rate so the page
+        // recovers on its own. Stopping the timer here previously left a single
+        // failed poll on first load looking like a permanently dead page.
+        setPollingInterval(POLL_IDLE_MS);
+        return;
+      }
+      // No profile to poll for — stop until one is saved or loaded.
       if (polling) {
         clearInterval(polling);
         polling = null;
       }
+      stopNextSyncTicker();
     }
 
     let nextSyncTicker = null;
+    const HISTORY_PAGE_SIZE = 25;
     function formatCountdown(seconds) {
       seconds = Math.max(0, Math.floor(seconds));
       if (seconds < 60) return seconds + 's';
@@ -2844,6 +2905,13 @@
     function ensureNextSyncTicker() {
       if (nextSyncTicker) return;
       nextSyncTicker = setInterval(updateNextSyncBadge, 1000);
+    }
+
+    function stopNextSyncTicker() {
+      if (nextSyncTicker) {
+        clearInterval(nextSyncTicker);
+        nextSyncTicker = null;
+      }
     }
 
     function renderDryRunPreview(profile, results) {
@@ -2928,7 +2996,7 @@
         unresolved: rows.filter(row => Number(row.items_skipped_unresolved || 0) > 0).length,
         ambiguous: rows.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0).length,
       };
-      node.innerHTML = filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${key}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
+      node.innerHTML = filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${escAttr(key)}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
       node.querySelectorAll('[data-results-filter]').forEach(btn => {
         btn.addEventListener('click', () => {
           currentResultsFilter = btn.dataset.resultsFilter || 'all';
@@ -3093,8 +3161,8 @@
           const statsHtml = entryStatus === 'failed' && !summary.added && !summary.removed && !summary.errors
             ? `${errorDetail}`
             : `<span class="c-green">+${summary.added}</span><span class="c-red">-${summary.removed}</span>${summary.errors > 0 ? `<span class="c-red">${summary.errors} err</span>` : errorDetail}`;
-          const detailAction = entry.run_id ? `<button class="btn btn-sm" type="button" data-history-run="${esc(entry.run_id)}">Details</button>` : '';
-          return `<div class="history-item"><span class="history-time">${new Date(entry.timestamp).toLocaleString()}${mode}${statusBadge}</span><div class="history-stats">${statsHtml}${detailAction}</div></div>`;
+          const detailAction = entry.run_id ? `<button class="btn btn-sm" type="button" data-history-run="${escAttr(entry.run_id)}">Details</button>` : '';
+          return `<div class="history-item"><span class="history-time">${esc(new Date(entry.timestamp).toLocaleString())}${mode}${statusBadge}</span><div class="history-stats">${statsHtml}${detailAction}</div></div>`;
         }).join('');
         const historyNote = history.length > visibleHistory.length
           ? `<div class="panel-body" style="padding-top:12px;padding-bottom:0;color:var(--z500);font-size:12px">Showing the newest ${visibleHistory.length} of ${history.length} sync runs.</div>`
@@ -3106,8 +3174,11 @@
       }
 
       switchIssuesTab(currentIssueTab);
-      if (profile.latest_run_id && !runDetailsCache[profile.latest_run_id]) {
-        fetchRunDetail(profile.latest_run_id).then(() => renderErrorsPanel(profile));
+      // While the run is still going its detail keeps changing, so bypass the
+      // cache; otherwise the Errors panel shows the first snapshot all run long.
+      const runStillGoing = !!profile.sync_running;
+      if (profile.latest_run_id && (runStillGoing || !runDetailsCache[profile.latest_run_id])) {
+        fetchRunDetail(profile.latest_run_id, runStillGoing).then(() => renderErrorsPanel(profile));
       } else {
         renderErrorsPanel(profile);
       }
@@ -3135,17 +3206,37 @@
       el('issues-tab-errors').classList.toggle('btn-primary', currentIssueTab === 'errors');
     }
 
-    async function fetchSyncRuns() {
-      const result = await apiPost('/api/profile/sync/runs', { page: 1, page_size: 25 });
-      if (!result.ok) return [];
+    async function fetchSyncRuns(page, pageSize) {
+      let result;
+      try {
+        result = await apiPost('/api/profile/sync/runs', {
+          page: Number(page) > 0 ? Number(page) : 1,
+          page_size: Number(pageSize) > 0 ? Number(pageSize) : HISTORY_PAGE_SIZE,
+        });
+      } catch {
+        showToast('Network error while loading sync history.', true);
+        return null;
+      }
+      if (!result.ok) {
+        showToast(result.data?.message || result.data?.error || 'Could not load sync history.', true);
+        return null;
+      }
       latestDetailedRuns = Array.isArray(result.data.items) ? result.data.items : [];
-      return latestDetailedRuns;
+      return result.data;
     }
 
-    async function fetchRunDetail(runId) {
+    // `skipCache` is required while a run is still in progress: its detail keeps
+    // changing, and a cached copy froze the Errors panel at the first snapshot
+    // taken for the whole remainder of the run.
+    async function fetchRunDetail(runId, skipCache) {
       if (!runId) return null;
-      if (runDetailsCache[runId]) return runDetailsCache[runId];
-      const result = await apiPost('/api/profile/sync/run-details', { run_id: runId });
+      if (!skipCache && runDetailsCache[runId]) return runDetailsCache[runId];
+      let result;
+      try {
+        result = await apiPost('/api/profile/sync/run-details', { run_id: runId });
+      } catch {
+        return null;
+      }
       if (!result.ok) return null;
       runDetailsCache[runId] = result.data.run || null;
       return runDetailsCache[runId];
@@ -3262,7 +3353,7 @@
         // For collision items the candidate is the *colliding* ID — don't pre-fill
         // it (user must enter the correct distinct ID). For other reasons it's a
         // genuine suggestion so pre-fill it to save the user a lookup.
-        const suggestedValue = (!isCollision && item.candidate_tmdb_id) ? esc(item.candidate_tmdb_id) : '';
+        const suggestedValue = (!isCollision && item.candidate_tmdb_id) ? escAttr(item.candidate_tmdb_id) : '';
         const suggestedBadge = (!isCollision && item.candidate_tmdb_id)
           ? `<div class="catalog-note" style="margin-top:2px;color:var(--green)">suggested TMDB: ${esc(item.candidate_tmdb_id)}</div>`
           : '';
@@ -3271,13 +3362,13 @@
         const searchQuery = encodeURIComponent(title || displayTitle);
         const tmdbSearchUrl = `https://www.themoviedb.org/search?query=${searchQuery}`;
         const idLinks = [
-          item.imdb_id ? `<a href="https://www.imdb.com/title/${esc(item.imdb_id)}" target="_blank" rel="noopener" style="color:var(--z400)">IMDb</a>` : '',
-          item.mal_id ? `<a href="https://myanimelist.net/anime/${esc(item.mal_id)}" target="_blank" rel="noopener" style="color:var(--z400)">MAL</a>` : '',
-          item.anilist_id ? `<a href="https://anilist.co/anime/${esc(item.anilist_id)}" target="_blank" rel="noopener" style="color:var(--z400)">AniList</a>` : '',
+          item.imdb_id ? `<a href="https://www.imdb.com/title/${escAttr(item.imdb_id)}" target="_blank" rel="noopener" style="color:var(--z400)">IMDb</a>` : '',
+          item.mal_id ? `<a href="https://myanimelist.net/anime/${escAttr(item.mal_id)}" target="_blank" rel="noopener" style="color:var(--z400)">MAL</a>` : '',
+          item.anilist_id ? `<a href="https://anilist.co/anime/${escAttr(item.anilist_id)}" target="_blank" rel="noopener" style="color:var(--z400)">AniList</a>` : '',
           `<a href="${tmdbSearchUrl}" target="_blank" rel="noopener" style="color:var(--orange)">Search TMDB ↗</a>`,
         ].filter(Boolean).join(' · ');
 
-        const cacheKey = esc(item.cache_key || '');
+        const cacheKey = escAttr(item.cache_key || '');
         const typeLabel = item.media_type === 'tv' ? (item.simkl_type === 'anime' ? 'Anime' : 'TV') : item.media_type === 'movie' ? 'Movie' : esc(item.media_type || '—');
         return `<tr data-cache-key="${cacheKey}">
           <td>
@@ -3337,7 +3428,15 @@
       input.style.borderColor = '';
       if (autoBtn) autoBtn.disabled = true;
       if (mapBtn) { mapBtn.disabled = true; mapBtn.textContent = 'Saving…'; }
-      const result = await apiPost('/api/profile/unresolved/resolve', {cache_key: cacheKey, tmdb_id: tmdbId});
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/resolve', {cache_key: cacheKey, tmdb_id: tmdbId});
+      } catch {
+        if (autoBtn) autoBtn.disabled = false;
+        if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
+        showToast('Network error while saving mapping.', true);
+        return;
+      }
       if (result.ok) {
         const added = result.data.pmdb_added;
         const skipReason = result.data.pmdb_skip_reason;
@@ -3355,7 +3454,7 @@
       } else {
         if (autoBtn) autoBtn.disabled = false;
         if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
-        showToast(result.data?.error || 'Failed to save mapping', true);
+        showToast(result.data?.message || result.data?.error || 'Failed to save mapping', true);
       }
     }
 
@@ -3369,7 +3468,16 @@
       if (autoBtn) { autoBtn.disabled = true; autoBtn.textContent = 'Trying…'; }
       if (mapBtn) mapBtn.disabled = true;
       if (input) input.disabled = true;
-      const result = await apiPost('/api/profile/unresolved/auto-resolve', {cache_key: cacheKey});
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/auto-resolve', {cache_key: cacheKey});
+      } catch {
+        if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = 'Auto Map'; }
+        if (mapBtn) mapBtn.disabled = false;
+        if (input) input.disabled = false;
+        showToast('Network error while auto-mapping.', true);
+        return;
+      }
       if (result.ok) {
         if (autoBtn) { autoBtn.textContent = result.data.pmdb_added ? '✓ Added to list' : '✓ Auto mapped'; autoBtn.style.color = 'var(--green)'; }
         if (result.data.profile) { lastDashboardProfile = result.data.profile; renderDashboard(result.data.profile); }
@@ -3379,15 +3487,28 @@
       if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = 'Auto Map'; }
       if (mapBtn) mapBtn.disabled = false;
       if (input) input.disabled = false;
-      showToast(result.data?.error || 'Auto-resolve failed', true);
+      // The backend explains *why* via `message` (e.g. "No automatic mapping
+      // found yet."); without reading it the user only ever saw the generic text.
+      showToast(result.data?.message || result.data?.error || 'Auto-resolve failed', true);
     }
 
     async function dismissUnresolvedItem(row) {
       if (!row) return;
       const cacheKey = row.dataset.cacheKey;
       if (!cacheKey) return;
-      const result = await apiPost('/api/profile/unresolved/dismiss', {cache_key: cacheKey});
-      if (result.ok) renderUnresolvedPanel(result.data.items || []);
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/dismiss', {cache_key: cacheKey});
+      } catch {
+        showToast('Network error while dismissing item.', true);
+        return;
+      }
+      if (result.ok) {
+        renderUnresolvedPanel(result.data.items || []);
+        return;
+      }
+      // Without this the click looked like a no-op on failure.
+      showToast(result.data?.message || result.data?.error || 'Could not dismiss item.', true);
     }
 
     const refreshBtn = el('btn-unresolved-refresh');
@@ -3566,15 +3687,15 @@
       const runId = row.run_id || '';
       const rowKey = row.row_key || '';
       const detailBtn = row.has_details && runId
-        ? `<button class="btn btn-sm" type="button" data-row-detail="${esc(runId)}" data-row-key="${esc(rowKey)}">Details</button>`
+        ? `<button class="btn btn-sm" type="button" data-row-detail="${escAttr(runId)}" data-row-key="${escAttr(rowKey)}">Details</button>`
         : '';
       if (!listName) return detailBtn ? `<div class="inline-actions">${detailBtn}</div>` : '';
       const label = row.display_name || row.list_name || '';
       const busy = deletingManagedListName === listName;
       if (pendingDeleteListName === listName) {
-        return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm btn-danger" type="button" data-delete-confirm="${esc(listName)}" data-delete-label="${esc(label)}" ${busy ? 'disabled' : ''}>${busy ? 'Deleting...' : 'Confirm'}</button><button class="btn btn-sm btn-ghost" type="button" data-delete-cancel="${esc(listName)}" ${busy ? 'disabled' : ''}>Cancel</button></div>`;
+        return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm btn-danger" type="button" data-delete-confirm="${escAttr(listName)}" data-delete-label="${escAttr(label)}" ${busy ? 'disabled' : ''}>${busy ? 'Deleting...' : 'Confirm'}</button><button class="btn btn-sm btn-ghost" type="button" data-delete-cancel="${escAttr(listName)}" ${busy ? 'disabled' : ''}>Cancel</button></div>`;
       }
-      return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm" type="button" data-delete-list="${esc(listName)}" data-delete-label="${esc(label)}" ${busy ? 'disabled' : ''}>Delete</button></div>`;
+      return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm" type="button" data-delete-list="${escAttr(listName)}" data-delete-label="${escAttr(label)}" ${busy ? 'disabled' : ''}>Delete</button></div>`;
     }
 
     function armDeleteManagedList(listName) {
@@ -3693,6 +3814,15 @@
         }
       }
 
+      // Identity for this call, claimed before the request starts so the finally
+      // block can tell whether it still owns the in-flight handle without
+      // touching `request` (which is still in its temporal dead zone while the
+      // body runs synchronously).
+      const myToken = {};
+      if (!wantsCredentials) {
+        statusFetchToken = myToken;
+      }
+
       const request = (async () => {
       try {
         const fallbackProfileId = sessionProfileId || el('profile-id').value.trim() || localStorage.getItem(PROFILE_KEY) || '';
@@ -3708,15 +3838,17 @@
           return;
         }
         const profile = result.data.profile;
+        // Discard a stale response before it can touch anything. This check has
+        // to come before the profile-identity writes below: a superseded response
+        // must not rewrite sessionProfileId or localStorage just because its
+        // render is skipped.
+        if (!wantsCredentials && myGen !== _statusGeneration) {
+          return profile;
+        }
         if (profile && profile.profile_id) {
           sessionProfileId = profile.profile_id;
           el('profile-id').value = profile.profile_id;
           localStorage.setItem(PROFILE_KEY, profile.profile_id);
-        }
-        // Discard render if a newer forced refresh has been issued (e.g. post-sync).
-        // This prevents a stale poll from overwriting the "Syncing..." state.
-        if (!wantsCredentials && myGen !== _statusGeneration) {
-          return profile;
         }
         refreshPollingForProfile(profile);
         if (wantsCredentials) {
@@ -3753,11 +3885,20 @@
         if (!wantsCredentials && lastDashboardProfile) {
           return lastDashboardProfile;
         }
-        if (!wantsCredentials) renderEmptyDashboard('Status is temporarily unavailable.');
+        if (!wantsCredentials) {
+          // A transport failure is temporary. renderEmptyDashboard stops polling,
+          // so restart it at the idle rate — otherwise a single blip on first
+          // load leaves the page dead until a manual reload.
+          renderEmptyDashboard('Status is temporarily unavailable. Retrying...', true);
+        }
         return null;
       } finally {
-        if (!wantsCredentials) {
+        if (!wantsCredentials && statusFetchToken === myToken) {
+          // Only clear our own handle. _forceStatusRefresh may already have
+          // installed a newer one, and clearing that would reopen the dedupe
+          // window and allow two concurrent polls.
           statusFetchInFlight = null;
+          statusFetchToken = null;
         }
       }
       })();
@@ -3772,6 +3913,9 @@
       // Bump generation so any in-flight poll response is discarded, then fetch fresh.
       _statusGeneration++;
       statusFetchInFlight = null;
+      // Drop ownership too, so the superseded request's finally block leaves the
+      // handle installed by the fresh fetch below alone.
+      statusFetchToken = null;
       fetchStatus(false);
     }
 
@@ -3802,7 +3946,7 @@
           if (result.status === 409) {
             showToast('A sync is already in progress — opening dashboard.', false, true);
             switchView('dashboard');
-            setPollingInterval(POLL_RUNNING_MS);
+            holdFastPolling();
             _forceStatusRefresh();
           } else {
             showToast(formatApiError(result.data, 'Unable to start sync.'), true, false);
@@ -3812,7 +3956,7 @@
 
         showToast(dryRun ? 'List dry run started.' : 'List sync started.', false, true);
         switchView('dashboard');
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         if (syncBtn) syncBtn.disabled = false;
@@ -3849,7 +3993,7 @@
           if (result.status === 409) {
             showToast('A sync is already in progress — opening dashboard.', false, true);
             switchView('dashboard');
-            setPollingInterval(POLL_RUNNING_MS);
+            holdFastPolling();
             _forceStatusRefresh();
           } else {
             showToast(formatApiError(result.data, 'Unable to start activity sync.'), true, false);
@@ -3862,7 +4006,7 @@
         switchView('dashboard');
         pendingClearWatchHistory = false;
         clearingWatchHistory = false;
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         if (histBtn) histBtn.disabled = false;
@@ -3952,7 +4096,7 @@
         // Re-render with the server-returned profile so sync_cancel_requested is reflected,
         // then ensure polling is running so we catch the moment sync_running flips to false.
         if (result.data.profile) renderDashboard(result.data.profile);
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         el('btn-stop').disabled = false;
