@@ -364,5 +364,85 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(target.added, [])
 
 
+class MdbListSourceTests(unittest.TestCase):
+    """MDBList feeds other services but can never receive."""
+
+    class FakeMdbClient:
+        def __init__(self, items_by_list=None, failing=()):
+            self._items = items_by_list or {}
+            self._failing = set(failing)
+            self.calls: list[int] = []
+
+        def get_list_items(self, list_id: int):
+            self.calls.append(list_id)
+            if list_id in self._failing:
+                raise RuntimeError("mdblist 500")
+            return list(self._items.get(list_id, []))
+
+    def _adapter(self, **kwargs):
+        from src.providers import MdbListAdapter
+        return MdbListAdapter(**kwargs)
+
+    def test_never_writable_and_says_why(self) -> None:
+        adapter = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+        self.assertFalse(adapter.can_write())
+        self.assertEqual(adapter.writable_categories(), ())
+        self.assertIn("only be read from", adapter.write_blocked_reason())
+
+    def test_writing_is_refused_outright(self) -> None:
+        adapter = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+        with self.assertRaises(ValueError):
+            adapter.add(CATEGORY_WATCHLIST, [_movie("1")])
+        with self.assertRaises(ValueError):
+            adapter.remove(CATEGORY_WATCHLIST, [_movie("1")])
+
+    def test_selected_lists_are_combined_and_deduplicated(self) -> None:
+        client = self.FakeMdbClient({
+            10: [_movie("1"), _movie("2")],
+            11: [_movie("2"), _movie("3")],
+        })
+        adapter = self._adapter(
+            client=client, selected_lists=[{"id": 10, "name": "A"}, {"id": 11, "name": "B"}],
+        )
+        items = adapter.fetch(CATEGORY_WATCHLIST)
+        self.assertEqual(sorted(i["tmdb_id"] for i in items), ["1", "2", "3"])
+
+    def test_items_are_fetched_once_and_reused_across_categories(self) -> None:
+        client = self.FakeMdbClient({10: [_movie("1")]})
+        adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+        adapter.fetch(CATEGORY_WATCHLIST)
+        adapter.fetch(CATEGORY_COLLECTION)
+        self.assertEqual(client.calls, [10], "the same items answer both categories")
+
+    def test_one_failing_list_does_not_lose_the_others(self) -> None:
+        client = self.FakeMdbClient({10: [_movie("1")], 11: [_movie("2")]}, failing=(10,))
+        adapter = self._adapter(
+            client=client, selected_lists=[{"id": 10, "name": "A"}, {"id": 11, "name": "B"}],
+        )
+        items = adapter.fetch(CATEGORY_WATCHLIST)
+        self.assertEqual([i["tmdb_id"] for i in items], ["2"])
+
+    def test_mdblist_can_feed_another_service(self) -> None:
+        client = self.FakeMdbClient({10: [_movie("1"), _movie("2")]})
+        source = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"mdblist": source, "simkl": target})
+
+        stats = service.run_pair(_pair(source="mdblist", target="simkl"))
+
+        self.assertEqual(stats.added, 1)
+        self.assertEqual([i["tmdb_id"] for i in target.added[0][1]], ["2"])
+
+    def test_mdblist_as_a_target_is_rejected_before_anything_runs(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+        service = CrossSyncService({"trakt": source, "mdblist": target})
+
+        stats = service.run_pair(_pair(target="mdblist"))
+
+        self.assertIn("only be read from", stats.errors[0])
+        self.assertEqual(stats.added, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

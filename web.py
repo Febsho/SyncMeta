@@ -48,6 +48,7 @@ from src.providers import (
     PROVIDER_ORDER,
     REMOVAL_MODE_LABELS,
     AniListAdapter,
+    MdbListAdapter,
     PmdbAdapter,
     SimklAdapter,
     TraktAdapter,
@@ -848,6 +849,12 @@ def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) 
         # token, so existing profiles keep working without re-authenticating.
         adapters["anilist"] = AniListAdapter(
             AniListClient(config.anilist, cancel_requested_callback=cancel_requested_callback),
+        )
+    if config.mdblist.enabled and config.mdblist.api_key:
+        # Source only: MDBList has no write path here.
+        adapters["mdblist"] = MdbListAdapter(
+            MdbListClient(config.mdblist),
+            selected_lists=list(config.mdblist.selected_lists or []),
         )
     if config.pmdb.api_key:
         adapters["pmdb"] = PmdbAdapter(

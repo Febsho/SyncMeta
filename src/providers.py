@@ -458,5 +458,75 @@ class PmdbAdapter(ProviderAdapter):
         return self._unsupported(category, "remove from")
 
 
+class MdbListAdapter(ProviderAdapter):
+    """Source-only adapter over the user's selected MDBList lists.
+
+    MDBList exposes list *reading* only — this app has no write path, and
+    MDBList's own watch-status sync is handled by its Trakt/Plex integrations.
+    So it can feed other services but can never be a target, which
+    ``writes = ()`` reports rather than failing at run time.
+
+    An MDBList list is a curated collection with no watched/unwatched semantics,
+    so the same combined items answer both the watchlist and collection
+    categories, letting a user push a curation into either.
+    """
+
+    key = "mdblist"
+    label = "MDBList"
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+    writes = ()
+
+    def __init__(self, client, selected_lists: list[dict] | None = None):
+        self._client = client
+        self._selected_lists = list(selected_lists or [])
+        self._cache: list[dict] | None = None
+
+    def can_write(self) -> bool:
+        return False
+
+    def write_blocked_reason(self) -> str:
+        return (
+            "MDBList can only be read from. It exposes no write API here, so it "
+            "can feed other services but cannot be a sync target."
+        )
+
+    def _selected_items(self) -> list[dict]:
+        if self._cache is not None:
+            return self._cache
+        items: list[dict] = []
+        seen: set[str] = set()
+        for entry in self._selected_lists:
+            list_id = entry.get("id")
+            if not list_id:
+                continue
+            try:
+                fetched = self._client.get_list_items(int(list_id)) or []
+            except Exception:
+                logger.warning(
+                    "MDBList: could not read list %s (%s)",
+                    list_id, entry.get("name") or "unnamed", exc_info=True,
+                )
+                continue
+            for item in fetched:
+                key = item_key(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(item)
+        self._cache = items
+        return items
+
+    def fetch(self, category: str) -> list[dict]:
+        if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
+            return list(self._selected_items())
+        return self._unsupported(category, "read")
+
+    def add(self, category: str, items: list[dict]) -> dict:
+        raise ValueError(self.write_blocked_reason())
+
+    def remove(self, category: str, items: list[dict]) -> dict:
+        raise ValueError(self.write_blocked_reason())
+
+
 #: Stable provider ordering for UI listings.
-PROVIDER_ORDER = ("trakt", "simkl", "anilist", "pmdb")
+PROVIDER_ORDER = ("trakt", "simkl", "anilist", "mdblist", "pmdb")

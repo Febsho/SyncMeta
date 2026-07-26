@@ -608,7 +608,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(data["pairs"], [])
         by_key = {p["key"]: p for p in data["providers"]}
-        self.assertEqual(set(by_key), {"trakt", "simkl", "anilist", "pmdb"})
+        self.assertEqual(set(by_key), {"trakt", "simkl", "anilist", "mdblist", "pmdb"})
         # This profile only has a PMDB key, so PMDB is configured and the rest
         # are reported as unconfigured rather than omitted.
         self.assertTrue(by_key["pmdb"]["configured"])
@@ -696,6 +696,72 @@ class WebTests(unittest.TestCase):
         )
         stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])
         self.assertEqual(set(stored["activity_state"]["pair_managed_keys"]), {"p1", "p2"})
+
+    def _make_anilist_profile(self, access_token: str) -> dict:
+        return web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "someone", "access_token": access_token, "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["anime"]})
+
+    def test_anilist_is_a_source_but_not_a_target_without_a_token(self) -> None:
+        # The existing-user shape: a username and no token. AniList must stay
+        # readable rather than being dropped or forcing a re-login.
+        profile = self._make_anilist_profile("")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertTrue(providers["anilist"]["configured"])
+        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection"])
+        self.assertEqual(providers["anilist"]["writes"], [])
+        self.assertIn("access token", providers["anilist"]["write_blocked_reason"])
+
+    def test_adding_an_anilist_token_makes_it_a_target(self) -> None:
+        profile = self._make_anilist_profile("anilist-token")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+        self.assertEqual(providers["anilist"]["write_blocked_reason"], "")
+
+    def test_a_blank_anilist_token_keeps_the_saved_one(self) -> None:
+        # "Leave blank to keep it" must not silently revoke write access.
+        profile = self._make_anilist_profile("anilist-token")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        merged = web.merge_credentials(
+            web._profile_store.get_private_profile_by_id(profile["profile_id"])["credentials"],
+            web.normalize_credentials({
+                "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+                "anilist": {"username": "someone", "access_token": "", "selected_statuses": []},
+                "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+                "mdblist": {"api_key": "", "selected_lists": []},
+                "pmdb": {"api_key": "pmdb-secret"},
+            }),
+        )
+
+        self.assertEqual(merged["anilist"]["access_token"], "anilist-token")
+
+    def test_mdblist_is_offered_as_a_source_only(self) -> None:
+        profile = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "mdb-key", "selected_lists": [{"id": 10, "name": "Picks", "mediatype": "movie"}]},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["movies"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertTrue(providers["mdblist"]["configured"])
+        self.assertTrue(providers["mdblist"]["reads"], "MDBList must be usable as a source")
+        self.assertEqual(providers["mdblist"]["writes"], [], "MDBList has no write path")
+        self.assertIn("only be read from", providers["mdblist"]["write_blocked_reason"])
 
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {

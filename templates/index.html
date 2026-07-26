@@ -599,7 +599,8 @@
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
-                  <div class="form-row" style="margin-bottom:0"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="anilist-access-token">Access Token <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="password" id="anilist-access-token" placeholder="Only needed to write to AniList" autocomplete="off"><div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only required to write to AniList &mdash; private lists, or using AniList as a sync-pair target. Stored securely for this profile. Leave blank to keep it. <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">Create a token</a></div></div>
                 </div>
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
@@ -1033,6 +1034,7 @@
     function emptySecretState() {
       return {
         simkl: { client_secret_saved: false, access_token_saved: false },
+        anilist: { access_token_saved: false },
         trakt: { client_secret_saved: false, access_token_saved: false, refresh_token_saved: false },
         mdblist: { api_key_saved: false },
         pmdb: { api_key_saved: false },
@@ -1253,7 +1255,7 @@
         },
         anilist: {
           username: el('anilist-username').value.trim(),
-          access_token: '',
+          access_token: el('anilist-access-token').value.trim(),
           selected_statuses: anilistSelectedStatuses.slice(),
         },
         trakt: {
@@ -1364,6 +1366,9 @@
           client_secret_saved: !!simkl.client_secret_saved,
           access_token_saved: !!simkl.access_token_saved,
         },
+        anilist: {
+          access_token_saved: !!anilist.access_token_saved,
+        },
         trakt: {
           client_secret_saved: !!trakt.client_secret_saved,
           access_token_saved: !!trakt.access_token_saved,
@@ -1385,6 +1390,7 @@
       setSecretInputState('simkl-access-token', 'simkl', 'access_token_saved', 'From PIN auth or OAuth');
       simklSelectedStatuses = normalizeSimklSelectedStatuses(simkl.selected_statuses);
       el('anilist-username').value = anilist.username || '';
+      setSecretInputState('anilist-access-token', 'anilist', 'access_token_saved', 'Only needed to write to AniList');
       anilistSelectedStatuses = normalizeAniListSelectedStatuses(anilist.selected_statuses);
       el('trakt-client-id').value = trakt.client_id || '';
       traktAccessTokenExpiresAt = trakt.access_token_expires_at || '';
