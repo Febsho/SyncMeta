@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SyncMeta</title>
   <style>
-    :root{--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24}
+    :root{color-scheme:dark;--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24}
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--black);color:var(--z300);min-height:100vh;-webkit-font-smoothing:antialiased}
     nav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,.8);backdrop-filter:blur(24px);border-bottom:1px solid rgba(255,255,255,.1);padding:0 24px}
@@ -54,7 +54,13 @@
     .options-col .form-row{margin-bottom:0}
     .form-row{margin-bottom:14px}.form-row:last-child{margin-bottom:0}.form-row label{display:block;font-size:11px;font-weight:600;color:var(--z500);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px}
     .form-row input[type=text],.form-row input[type=password],.form-row input[type=number],.form-row select{width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:13px;font-family:inherit}
-    .form-row input:focus,.form-row select:focus{outline:none;border-color:var(--z600)} .form-row input::placeholder{color:var(--z600)}
+    .form-row input:focus,.form-row select:focus{border-color:var(--accent)} .form-row input::placeholder{color:var(--z600)}
+    /* A visible focus ring for every keyboard-reachable control. The previous
+       rule removed the outline and replaced it with a z700->z600 border shift of
+       roughly 1.2:1 contrast, well under the 3:1 WCAG 2.4.11 minimum, and buttons
+       had no focus style at all. */
+    :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+    .btn:focus-visible,.catalog-row:focus-visible,.status-card:focus-visible,.status-list-btn:focus-visible,.settings-nav-item:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .hint{font-size:11px;color:var(--z600);margin-top:4px}.hint a{color:var(--z400);text-decoration:none}.hint a:hover{color:var(--white)}
     .guide-box{padding:16px 18px;border:1px solid var(--z800);border-radius:10px;background:linear-gradient(180deg,rgba(39,39,46,.38),rgba(10,10,11,.88));margin-bottom:16px}
     .guide-title{font-size:13px;font-weight:800;color:var(--white);margin-bottom:8px}
@@ -480,16 +486,16 @@
                   <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists in <strong>Lists</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
                 </div>
                 <div class="form-row">
-                  <label>Profile UUID</label>
+                  <label for="profile-id">Profile UUID</label>
                   <input type="text" id="profile-id" class="mono" placeholder="Leave blank to create a new profile" autocomplete="off">
                   <div class="hint">Use this UUID + password to reopen the same profile in another browser or server.</div>
                 </div>
                 <div class="form-row">
-                  <label>Profile Password</label>
+                  <label for="profile-password">Profile Password</label>
                   <input type="password" id="profile-password" placeholder="Required to save, load, and sync this profile" autocomplete="off">
                 </div>
                 <div class="form-row">
-                  <label>New Profile Password</label>
+                  <label for="profile-new-password">New Profile Password</label>
                   <input type="password" id="profile-new-password" placeholder="Only fill this to reset your profile password" autocomplete="off">
                   <div class="hint">Use your profile UUID plus a new password to reset access.</div>
                 </div>
@@ -514,7 +520,7 @@
                     <div class="conn-card-desc" style="margin-bottom:0">Destination. All synced lists and activity go here.</div>
                   </div>
                   <div class="conn-card-pmdb-field">
-                    <div class="form-row" style="margin-bottom:0"><label>API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
+                    <div class="form-row" style="margin-bottom:0"><label for="pmdb-api-key">API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
                   </div>
                 </div>
               </div>
@@ -524,15 +530,15 @@
                   <div class="conn-card-desc">Movies, shows, anime, watch history, and PIN auth.</div>
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
                   <div class="form-row">
-                    <label>Redirect URL</label>
+                    <label for="simkl-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="simkl-redirect-url" readonly value="">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('simkl-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label>Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
-                  <div class="form-row"><label>Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
-                  <div class="form-row"><label>Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-client-id">Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-client-secret">Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-access-token">Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-simkl-auth" onclick="startSimklAuth()">Get SIMKL Token</button>
                     <span class="actions-meta" id="simkl-auth-status">Start PIN auth here if no token yet.</span>
@@ -557,16 +563,16 @@
                   <input type="checkbox" id="trakt-watchlist-shows-toggle" checked class="hidden">
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>, then paste the credentials below. Use the redirect URI if asked.</div>
                   <div class="form-row">
-                    <label>Redirect URI</label>
+                    <label for="trakt-redirect-url">Redirect URI</label>
                     <div class="copy-row">
                       <input type="text" id="trakt-redirect-url" readonly value="">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('trakt-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label>Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
-                  <div class="form-row"><label>Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
-                  <div class="form-row"><label>Access Token</label><input type="password" id="trakt-access-token" placeholder="Filled after Trakt auth" autocomplete="off"></div>
-                  <div class="form-row"><label>Refresh Token</label><input type="password" id="trakt-refresh-token" placeholder="Saved for future refresh support" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-client-id">Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-client-secret">Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-access-token">Access Token</label><input type="password" id="trakt-access-token" placeholder="Filled after Trakt auth" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-refresh-token">Refresh Token</label><input type="password" id="trakt-refresh-token" placeholder="Saved for future refresh support" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-trakt-auth" onclick="startTraktAuth()">Connect Trakt</button>
                     <span class="actions-meta" id="trakt-auth-status">Start device auth here if no token yet.</span>
@@ -589,12 +595,12 @@
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
-                  <div class="form-row" style="margin-bottom:0"><label>Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
                 </div>
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Selected MDBList catalog lists. MDBList watch status sync is handled by MDBList's own Trakt/Plex integrations.</div>
-                  <div class="form-row" style="margin-bottom:0"><label>API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
                 </div>
               </div>
             </div>
@@ -648,7 +654,7 @@
                     <input type="text" id="trakt-discover-query" placeholder="Search public Trakt lists..." autocomplete="off">
                     <button class="btn btn-sm" type="button" onclick="searchTraktLists()">Search</button>
                   </div>
-                  <div class="catalog-list" id="trakt-catalog-list"></div>
+                  <div class="catalog-list" id="trakt-catalog-list" role="listbox" aria-multiselectable="true" aria-label="Trakt lists to sync"></div>
                 </div>
               </div>
               <div class="lists-subtab" id="lsub-mdblist">
@@ -671,7 +677,7 @@
                     <input type="text" id="mdblist-discover-query" placeholder="Search public MDBList lists..." autocomplete="off">
                     <button class="btn btn-sm" type="button" onclick="searchMdbListLists()">Search</button>
                   </div>
-                  <div class="catalog-list" id="mdblist-list"></div>
+                  <div class="catalog-list" id="mdblist-list" role="listbox" aria-multiselectable="true" aria-label="MDBList lists to sync"></div>
                 </div>
               </div>
             </div>
@@ -683,54 +689,54 @@
               <div class="settings-group form-section">
                 <div class="settings-group-title">List Sync</div>
                 <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label>Sync lists automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
                 <div class="form-row" style="margin-top:12px">
-                  <label>Update Every (Seconds)</label>
+                  <label for="opt-interval-seconds">Update Every (Seconds)</label>
                   <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
                   <div class="hint">Minimum 21600 s (6 h). Default 43200 s (12 h). Scheduled from end of last successful run.</div>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label>Remove items no longer in source</label></div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label>Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                <div class="toggle-row"><label for="opt-remove-missing" class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label for="opt-remove-missing">Remove items no longer in source</label></div>
+                <div class="toggle-row"><label for="opt-delete-disabled-lists" class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label for="opt-delete-disabled-lists">Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">PMDB Native Watchlist</div>
                 <div class="settings-group-desc">Select which services contribute their "plan to watch" items to your PublicMetaDB native Watchlist. Arrows show the sync direction.</div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label>SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label>Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label>AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row"><label for="opt-simkl-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label for="opt-simkl-pmdb-watchlist">SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row"><label for="opt-trakt-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label for="opt-trakt-pmdb-watchlist">Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row" style="margin-bottom:0"><label for="opt-anilist-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label for="opt-anilist-pmdb-watchlist">AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">Watch History</div>
                 <div class="settings-group-desc">Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.</div>
                 <div class="form-row">
-                  <label>Source</label>
+                  <label for="opt-activity-history-source">Source</label>
                   <select id="opt-activity-history-source">
                     <option value="off">Off</option>
                     <option value="simkl">SIMKL</option>
                     <option value="trakt">Trakt</option>
                   </select>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label>Sync watch history automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
                 <div class="form-row" style="margin-top:12px">
-                  <label>Auto-Sync Every (Seconds)</label>
+                  <label for="opt-history-interval-seconds">Auto-Sync Every (Seconds)</label>
                   <input type="number" id="opt-history-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
                   <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
                 </div>
-                <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label>Only import SIMKL anime watch history</label></div>
+                <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">Resume Progress</div>
                 <div class="settings-group-desc">Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.</div>
                 <div class="form-row">
-                  <label>Source</label>
+                  <label for="opt-activity-resume-source">Source</label>
                   <select id="opt-activity-resume-source">
                     <option value="off">Off</option>
                     <option value="trakt">Trakt</option>
                   </select>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label>Sync resume progress automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-resume-sync" class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label for="opt-auto-resume-sync">Sync resume progress automatically in the background</label></div>
                 <div class="form-row" style="margin-bottom:0">
-                  <label>Auto-Sync Every (Seconds)</label>
+                  <label for="opt-resume-interval-seconds">Auto-Sync Every (Seconds)</label>
                   <input type="number" id="opt-resume-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
                   <div class="hint">Minimum 86400 s (24 h). Only affects automatic resume sync.</div>
                 </div>
@@ -739,7 +745,7 @@
                 <div class="settings-group-title">List Visibility</div>
                 <div class="settings-group-desc">Control the default visibility of synced lists in PublicMetaDB for each source.</div>
                 <div class="form-row">
-                  <label>SIMKL Lists</label>
+                  <label for="opt-simkl-visibility">SIMKL Lists</label>
                   <select id="opt-simkl-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -747,7 +753,7 @@
                   <div class="hint">Recommended: private — these are your personal SIMKL status lists.</div>
                 </div>
                 <div class="form-row">
-                  <label>AniList Lists</label>
+                  <label for="opt-anilist-visibility">AniList Lists</label>
                   <select id="opt-anilist-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -755,7 +761,7 @@
                   <div class="hint">Recommended: private — these reflect your personal AniList activity.</div>
                 </div>
                 <div class="form-row">
-                  <label>Trakt Personal Lists</label>
+                  <label for="opt-trakt-personal-visibility">Trakt Personal Lists</label>
                   <select id="opt-trakt-personal-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -763,7 +769,7 @@
                   <div class="hint">Applies to your Trakt watchlist and personal-style catalogs.</div>
                 </div>
                 <div class="form-row">
-                  <label>Trakt Public Lists</label>
+                  <label for="opt-trakt-public-visibility">Trakt Public Lists</label>
                   <select id="opt-trakt-public-visibility">
                     <option value="public">Public</option>
                     <option value="private">Private</option>
@@ -771,7 +777,7 @@
                   <div class="hint">Applies to liked Trakt lists and Discover/public Trakt lists.</div>
                 </div>
                 <div class="form-row" style="margin-bottom:0">
-                  <label>MDBList Lists</label>
+                  <label for="opt-mdblist-visibility">MDBList Lists</label>
                   <select id="opt-mdblist-visibility">
                     <option value="public">Public</option>
                     <option value="private">Private</option>
@@ -804,11 +810,15 @@
     </div>
   </footer>
 
-  <div class="toast" id="toast">
+  <!-- role=status + aria-live so every success and error is announced. Without
+       these the toast was the app's only feedback channel and was invisible to
+       assistive technology. -->
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
     <div class="toast-message" id="toast-message"></div>
     <div class="toast-hint hidden" id="toast-hint"></div>
     <div class="toast-actions hidden" id="toast-actions">
       <button type="button" class="toast-action" id="toast-copy">Copy details</button>
+      <button type="button" class="toast-action" id="toast-dismiss" aria-label="Dismiss notification">Dismiss</button>
     </div>
   </div>
 
@@ -1411,8 +1421,24 @@
       }
       if (!loadTraktDeviceState()) {
         setTraktAuthCode('');
-        setTraktAuthStatus(hasSavedSecret('trakt', 'access_token_saved') ? 'Trakt access token is stored securely for this profile.' : 'Start Trakt device auth here if you do not have a token yet.', false);
+        setTraktAuthStatus(hasSavedSecret('trakt', 'access_token_saved') ? traktTokenStatusText() : 'Start Trakt device auth here if you do not have a token yet.', false);
       }
+    }
+
+    // The token expiry was stored and never shown, so a lapsing Trakt connection
+    // gave no warning until a sync failed.
+    function traktTokenStatusText() {
+      const base = 'Trakt access token is stored securely for this profile.';
+      if (!traktAccessTokenExpiresAt) return base;
+      const expiresAt = new Date(traktAccessTokenExpiresAt).getTime();
+      if (!Number.isFinite(expiresAt)) return base;
+      const msLeft = expiresAt - Date.now();
+      if (msLeft <= 0) return 'Trakt access token has expired — reconnect Trakt.';
+      const daysLeft = Math.floor(msLeft / 86400000);
+      if (daysLeft <= 7) {
+        return `Trakt access token expires ${daysLeft <= 0 ? 'today' : `in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`} — it refreshes automatically, but reconnect if syncs start failing.`;
+      }
+      return `${base} Expires ${new Date(traktAccessTokenExpiresAt).toLocaleDateString()}.`;
     }
 
     function flashSaved() {
@@ -1444,13 +1470,22 @@
     }
 
     // 'state' is 'ok' | 'off' | 'err'
+    const DOT_STATE_TEXT = { ok: 'Connected', off: 'Not connected', err: 'Connection error' };
+
     function setDot(id, okOrState, errorMsg) {
       const node = el(id);
       if (!node) return;
       let state = okOrState;
       if (typeof okOrState === 'boolean') state = okOrState ? 'ok' : 'off';
       node.className = 'dot dot-' + state;
-      node.title = state === 'err' ? (errorMsg || 'Token error — reconnect this service') : '';
+      const label = state === 'err'
+        ? (errorMsg || 'Token error — reconnect this service')
+        : (DOT_STATE_TEXT[state] || '');
+      node.title = state === 'err' ? label : '';
+      // The dot conveys connection state by colour alone, which is invisible to
+      // screen readers and to anyone who cannot distinguish the hues.
+      node.setAttribute('role', 'img');
+      node.setAttribute('aria-label', DOT_STATE_TEXT[state] || '');
     }
 
     // Parse sync_error text to figure out which provider is broken and show
@@ -1524,7 +1559,7 @@
         const buttons = SIMKL_STATUS_OPTIONS[mediaType].map((item, index, items) => {
           const active = simklSelectedStatuses[mediaType].indexOf(item.value) !== -1;
           const wide = items.length % 2 === 1 && index === items.length - 1 ? ' wide' : '';
-          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" data-simkl-media="${escAttr(mediaType)}" data-simkl-status="${escAttr(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
+          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" aria-pressed="${active ? 'true' : 'false'}" data-simkl-media="${escAttr(mediaType)}" data-simkl-status="${escAttr(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
         }).join('');
         const title = mediaType.charAt(0).toUpperCase() + mediaType.slice(1);
         return `<div class="status-group"><div class="status-group-title">${esc(title)}</div><div class="status-grid">${buttons}</div></div>`;
@@ -1552,7 +1587,7 @@
       const buttons = [`<button type="button" class="status-list-btn ${allActive ? 'active' : ''}" id="anilist-select-all"><span>All</span><span>${allActive ? 'On' : 'Off'}</span></button>`]
         .concat(ANILIST_STATUS_OPTIONS.map(item => {
           const active = anilistSelectedStatuses.indexOf(item.value) !== -1;
-          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" data-anilist-status="${escAttr(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
+          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" aria-pressed="${active ? 'true' : 'false'}" data-anilist-status="${escAttr(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
         }))
         .join('');
 
@@ -1615,7 +1650,11 @@
         name = 'dashboard';
       }
       document.querySelectorAll('.nav-link').forEach(link => {
-        link.classList.toggle('active', link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard' && !['logs'].includes(navTarget)));
+        const isActive = link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard' && !['logs'].includes(navTarget));
+        link.classList.toggle('active', isActive);
+        // Which view you are on was signalled by a CSS class only.
+        if (isActive) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
       });
       el('view-dashboard').style.display = name === 'dashboard' ? 'block' : 'none';
       el('view-logs').style.display = name === 'logs' ? 'block' : 'none';
@@ -1844,6 +1883,18 @@
       return node.innerHTML;
     }
 
+    // The list pickers are div-based rows, so they need explicit keyboard
+    // activation — without this the app's core function (choosing which lists
+    // sync) was reachable by mouse only.
+    function onActivate(node, handler) {
+      node.addEventListener('click', handler);
+      node.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        event.preventDefault(); // Space would otherwise scroll the page
+        handler(event);
+      });
+    }
+
     // Safe for quoted attribute values. Provider IDs and list names come from
     // third-party APIs, and a value containing a quote would otherwise close the
     // attribute early and inject markup.
@@ -1888,13 +1939,21 @@
         ['Trakt', sourceUsage.trakt || 0],
         ['MDBList', sourceUsage.mdblist || 0],
       ].map(([label, count]) => `<tr><td>${label}</td><td class="num">${count}</td><td class="num">${(totals.profiles || 0) ? Math.round((count / totals.profiles) * 100) : 0}%</td></tr>`).join('')}</tbody></table></div>`;
-      el('site-stats-window').innerHTML = `<div class="table-scroll"><table><thead><tr><th>Metric</th><th class="num">Last 24h</th></tr></thead><tbody>
+      // The backend already computes a run-outcome breakdown and a duplicate
+      // count; both were dropped, leaving a bare "sync runs" number with no
+      // indication of how many of those runs actually succeeded.
+      el('site-stats-window').innerHTML = `<div class="table-scroll"><table><thead><tr><th scope="col">Metric</th><th scope="col" class="num">Last 24h</th></tr></thead><tbody>
         <tr><td>Sync runs</td><td class="num">${last24h.sync_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Completed</td><td class="num c-green">${last24h.completed_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Failed</td><td class="num ${(last24h.failed_runs || 0) > 0 ? 'c-red' : 'c-dim'}">${last24h.failed_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Stopped</td><td class="num ${(last24h.stopped_runs || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.stopped_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Dry runs</td><td class="num c-dim">${last24h.dry_runs || 0}</td></tr>
         <tr><td>Lists processed</td><td class="num">${last24h.lists || 0}</td></tr>
         <tr><td>Items fetched</td><td class="num">${last24h.fetched || 0}</td></tr>
         <tr><td>Items resolved</td><td class="num">${last24h.resolved || 0}</td></tr>
         <tr><td>Items added</td><td class="num c-green">${last24h.added || 0}</td></tr>
         <tr><td>Items removed</td><td class="num c-red">${last24h.removed || 0}</td></tr>
+        <tr><td>Duplicates</td><td class="num ${(last24h.duplicates || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.duplicates || 0}</td></tr>
         <tr><td>Unresolved</td><td class="num ${(last24h.unresolved || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.unresolved || 0}</td></tr>
         <tr><td>Errors</td><td class="num ${(last24h.errors || 0) > 0 ? 'c-red' : 'c-dim'}">${last24h.errors || 0}</td></tr>
       </tbody></table></div>`;
@@ -1943,6 +2002,12 @@
         hintNode.classList.add('hidden');
       }
 
+      // The actions row is shown whenever there is anything to act on. Errors
+      // additionally get a copy button; every toast gets a manual dismiss, since
+      // auto-hide used to be the only way to clear one.
+      const dismissBtn = el('toast-dismiss');
+      if (dismissBtn) dismissBtn.onclick = () => hideToast();
+
       const showCopy = isError && (provider || status);
       if (showCopy) {
         const details = [
@@ -1963,8 +2028,9 @@
         actionsNode.classList.remove('hidden');
       } else {
         copyBtn.onclick = null;
-        actionsNode.classList.add('hidden');
       }
+      copyBtn.classList.toggle('hidden', !showCopy);
+      actionsNode.classList.remove('hidden');
 
       toast.className = 'toast show' + (isError ? ' error' : '') + (isSuccess ? ' success' : '');
       if (toastHideTimer) clearTimeout(toastHideTimer);
@@ -1973,6 +2039,15 @@
         toast.className = 'toast';
         toastHideTimer = null;
       }, duration);
+    }
+
+    function hideToast() {
+      const toast = el('toast');
+      if (toast) toast.className = 'toast';
+      if (toastHideTimer) {
+        clearTimeout(toastHideTimer);
+        toastHideTimer = null;
+      }
     }
 
     function flattenStatusMessage(message) {
@@ -2206,8 +2281,8 @@
           const attrs = isWatchlist ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : `data-trakt-key="${escAttr(traktListKey(item))}"`;
           const meta = isWatchlist ? 'Trakt' : traktCatalogMeta(item);
           return `
-            <div class="catalog-row ${selected ? 'selected' : ''}" ${attrs}>
-              <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+            <div class="catalog-row ${selected ? 'selected' : ''}" ${attrs} role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+              <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
               <div class="catalog-body">
                 <div class="catalog-title">${esc(item.name)}</div>
                 <div class="catalog-meta">${esc(meta)}</div>
@@ -2237,8 +2312,8 @@
         }
         rows = enabledItems.length
           ? enabledItems.map(item => `
-            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${escAttr(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''}>
-              <div class="catalog-check">&#10003;</div>
+            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${escAttr(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''} role="option" tabindex="0" aria-selected="true">
+              <div class="catalog-check" aria-hidden="true">&#10003;</div>
               <div class="catalog-body">
                 <div class="catalog-title">${esc(item.name)}</div>
                 <div class="catalog-meta">${esc(item.meta)}</div>
@@ -2260,8 +2335,8 @@
             const key = traktListKey(item);
             const selected = traktSyncAllLikedLists && item.source === 'liked' ? true : isTraktListSelected(key);
             return `
-              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${escAttr(key)}">
-                <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${escAttr(key)}" role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+                <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
                 <div class="catalog-body">
                   <div class="catalog-title">${esc(item.name)}</div>
                   <div class="catalog-meta">${esc(traktCatalogMeta(item))}</div>
@@ -2275,7 +2350,7 @@
 
       el('trakt-catalog-list').innerHTML = rows;
       document.querySelectorAll('#trakt-catalog-list [data-trakt-watchlist]').forEach(node => {
-        node.addEventListener('click', () => toggleTraktWatchlist(node.dataset.traktWatchlist));
+        onActivate(node, () => toggleTraktWatchlist(node.dataset.traktWatchlist));
       });
       document.querySelectorAll('#trakt-catalog-list [data-trakt-liked-all="1"]').forEach(node => {
         node.addEventListener('click', () => {
@@ -2286,7 +2361,7 @@
         });
       });
       document.querySelectorAll('#trakt-catalog-list [data-trakt-key]').forEach(node => {
-        node.addEventListener('click', () => toggleTraktListSelection(node.dataset.traktKey));
+        onActivate(node, () => toggleTraktListSelection(node.dataset.traktKey));
       });
     }
 
@@ -2436,8 +2511,8 @@
           item.likes ? `${item.likes} likes` : '',
         ].filter(Boolean).join(' · ');
         return `
-          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${escAttr(key)}">
-            <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${escAttr(key)}" role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+            <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
             <div class="catalog-body">
               <div class="catalog-title">${esc(item.name)}</div>
               <div class="catalog-meta">${esc(meta)}</div>
@@ -2448,7 +2523,7 @@
       }).join('');
 
       document.querySelectorAll('[data-mdblist-key]').forEach(node => {
-        node.addEventListener('click', () => toggleMdbListSelection(node.dataset.mdblistKey));
+        onActivate(node, () => toggleMdbListSelection(node.dataset.mdblistKey));
       });
     }
 
@@ -2848,6 +2923,39 @@
 
     let nextSyncTicker = null;
     const HISTORY_PAGE_SIZE = 25;
+    let historyPage = 1;
+    let historyPageItems = [];
+
+    async function goToHistoryPage(page) {
+      const target = Math.max(1, Number(page) || 1);
+      if (target === 1) {
+        historyPage = 1;
+        historyPageItems = [];
+        if (lastDashboardProfile) renderDashboard(lastDashboardProfile);
+        return;
+      }
+      const data = await fetchSyncRuns(target, HISTORY_PAGE_SIZE);
+      if (!data) return;
+      historyPage = target;
+      // The runs endpoint reports per-run `totals`; the history rows are built
+      // from a `results` array, so adapt one to the other.
+      historyPageItems = (Array.isArray(data.items) ? data.items : []).map(run => {
+        const totals = run.totals || {};
+        return {
+          run_id: run.run_id,
+          timestamp: run.timestamp,
+          status: run.status,
+          dry_run: run.dry_run,
+          error_message: run.error_message,
+          results: [{
+            items_added: totals.added || 0,
+            items_removed: totals.removed || 0,
+            error_count: totals.errors || 0,
+          }],
+        };
+      });
+      if (lastDashboardProfile) renderDashboard(lastDashboardProfile);
+    }
     function formatCountdown(seconds) {
       seconds = Math.max(0, Math.floor(seconds));
       if (seconds < 60) return seconds + 's';
@@ -3030,7 +3138,12 @@
         ? profile.sync_live_results
         : (profile.last_results || []);
       const history = profile.history || [];
-      const visibleHistory = history.slice(0, 25);
+      // Page 1 comes free in the status payload; later pages are fetched from
+      // /api/profile/sync/runs, which supports server-side pagination and was
+      // previously unreachable from the UI.
+      const visibleHistory = historyPage > 1 && historyPageItems.length
+        ? historyPageItems
+        : history.slice(0, HISTORY_PAGE_SIZE);
       const options = profile.options || {};
       const totals = results.reduce((acc, row) => {
         acc.fetched += row.items_fetched || 0;
@@ -3166,13 +3279,25 @@
           const detailAction = entry.run_id ? `<button class="btn btn-sm" type="button" data-history-run="${escAttr(entry.run_id)}">Details</button>` : '';
           return `<div class="history-item"><span class="history-time">${esc(new Date(entry.timestamp).toLocaleString())}${mode}${statusBadge}</span><div class="history-stats">${statsHtml}${detailAction}</div></div>`;
         }).join('');
-        const historyNote = history.length > visibleHistory.length
-          ? `<div class="panel-body" style="padding-top:12px;padding-bottom:0;color:var(--z500);font-size:12px">Showing the newest ${visibleHistory.length} of ${history.length} sync runs.</div>`
+        const totalRuns = history.length;
+        const totalPages = Math.max(1, Math.ceil(totalRuns / HISTORY_PAGE_SIZE));
+        const firstIndex = (historyPage - 1) * HISTORY_PAGE_SIZE + 1;
+        const lastIndex = firstIndex + visibleHistory.length - 1;
+        const historyNote = totalRuns > visibleHistory.length || historyPage > 1
+          ? `<div class="panel-body" style="padding-top:12px;padding-bottom:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--z500);font-size:12px">
+              <span>Runs ${firstIndex}–${lastIndex} of ${totalRuns}</span>
+              <button class="btn btn-sm" type="button" id="history-prev-page" ${historyPage <= 1 ? 'disabled' : ''}>Newer</button>
+              <button class="btn btn-sm" type="button" id="history-next-page" ${historyPage >= totalPages ? 'disabled' : ''}>Older</button>
+            </div>`
           : '';
         el('history-body').innerHTML = `${historyHtml}${historyNote}`;
         document.querySelectorAll('[data-history-run]').forEach(node => {
           node.addEventListener('click', () => openRunDetails(node.dataset.historyRun, ''));
         });
+        const historyPrev = el('history-prev-page');
+        const historyNext = el('history-next-page');
+        if (historyPrev) historyPrev.addEventListener('click', () => goToHistoryPage(historyPage - 1));
+        if (historyNext) historyNext.addEventListener('click', () => goToHistoryPage(historyPage + 1));
       }
 
       switchIssuesTab(currentIssueTab);
@@ -3268,7 +3393,7 @@
       body.innerHTML = `<div class="table-scroll"><table><thead><tr><th>Row</th><th>Stage</th><th>Errors</th><th>Failed Items</th></tr></thead><tbody>${fatalRow}${filtered.map(row => `
         <tr>
           <td>${esc(row.display_name || row.list_name || '')}<div class="catalog-note">${esc(row.source_name || row.row_type || '')}</div></td>
-          <td>${esc(Object.entries(row.error_stage_counts || {}).map(([key, value]) => `${key}:${value}`).join(', ') || 'general')}</td>
+          <td>${esc(Object.entries(row.error_stage_counts || {}).map(([key, value]) => `${key.replace(/_/g, ' ')} (${value})`).join(', ') || 'general')}</td>
           <td>${(row.errors || []).map(err => `<div class="catalog-note" style="color:var(--red)">${esc(err)}</div>`).join('')}</td>
           <td>${esc((row.sample_failed_titles || []).join(', ') || '-')}</td>
         </tr>`).join('')}</tbody></table></div>`;
@@ -3382,7 +3507,7 @@
         const title = item.title && item.title !== 'Unknown' ? item.title : null;
         const displayTitle = title || (item.simkl_id ? `SIMKL #${item.simkl_id}` : item.mal_id ? `MAL #${item.mal_id}` : item.anilist_id ? `AniList #${item.anilist_id}` : 'Unknown');
         const year = item.year ? ` (${item.year})` : '';
-        const listBadge = item.list_name ? `<div class="catalog-note" style="margin-top:2px;font-size:11px">📋 ${esc(item.list_name)}</div>` : '';
+        const listBadge = item.list_name ? `<div class="catalog-note" style="margin-top:2px;font-size:11px"><span aria-hidden="true">📋</span> <span class="sr-only">List:</span> ${esc(item.list_name)}</div>` : '';
         const isCollision = item.unresolved_reason === 'tmdb_collision' || item.anime_conflict_reason === 'tmdb_collision';
         const reasonText = unresolvedReasonText(item);
         const conflictNote = item.anime_conflict_reason
@@ -3439,6 +3564,19 @@
       const summaryHtml = animeItems.length
         ? `<div class="panel-body" style="padding-top:0;color:var(--z500);font-size:12px">Anime review queue: ${animeItems.length} item${animeItems.length === 1 ? '' : 's'} need franchise-safe review.${regularItems.length ? ` ${regularItems.length} other unresolved item${regularItems.length === 1 ? '' : 's'} too.` : ''}</div>`
         : '';
+      // A breakdown by cause, so it's clear at a glance whether the queue is one
+      // systemic problem or many unrelated ones.
+      const reasonCounts = items.reduce((acc, item) => {
+        const key = String(item.unresolved_reason || 'unknown').trim() || 'unknown';
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {});
+      const reasonEntries = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1]);
+      const histogramHtml = reasonEntries.length > 1
+        ? `<div class="panel-body" style="padding-top:0;color:var(--z500);font-size:12px">By cause: ${reasonEntries
+            .map(([key, count]) => `${esc(key.replace(/_/g, ' '))} <strong>${count}</strong>`)
+            .join(' · ')}</div>`
+        : '';
       // Bulk actions: this queue routinely holds hundreds of rows, so dismissing
       // them one at a time is impractical.
       const bulkHtml = `<div class="panel-body" style="padding-top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -3447,7 +3585,7 @@
         <button class="btn btn-sm btn-danger" type="button" id="unresolved-dismiss-selected" disabled>Dismiss selected</button>
         <span class="catalog-note" id="unresolved-selection-count" aria-live="polite"></span>
       </div>`;
-      body.innerHTML = `${summaryHtml}${bulkHtml}<div class="table-scroll"><table><thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Title</th><th scope="col">Type</th><th scope="col" style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      body.innerHTML = `${summaryHtml}${histogramHtml}${bulkHtml}<div class="table-scroll"><table><thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Title</th><th scope="col">Type</th><th scope="col" style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
       body.querySelectorAll('.unresolved-auto-btn').forEach(btn => {
         btn.addEventListener('click', () => autoResolveUnresolvedItem(btn.closest('tr')));
       });
@@ -3646,6 +3784,18 @@
       if (lastDashboardProfile) renderErrorsPanel(lastDashboardProfile);
     });
     if (runDetailClose) runDetailClose.addEventListener('click', () => el('run-detail-panel').classList.add('hidden'));
+
+    // Escape closes the run-details panel and dismisses a toast; neither could be
+    // dismissed from the keyboard before.
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const runDetail = el('run-detail-panel');
+      if (runDetail && !runDetail.classList.contains('hidden')) {
+        runDetail.classList.add('hidden');
+        return;
+      }
+      hideToast();
+    });
 
     // ──────────────────────────────────────────────────────────────────────────
 
