@@ -87,11 +87,21 @@ entire list.
 individual episode plays, so `AniListAdapter` advertises no history support at
 either end. Do not add one — it would silently write wrong data.
 
+**MDBList is source-only.** `MdbListAdapter` declares `writes = ()` — the client
+has no write path and MDBList's own watch-status sync is handled by its Trakt/Plex
+integrations. It reads the union of `mdblist.selected_lists`, and since an MDBList
+list has no watched/unwatched semantics the same items answer both the watchlist
+and collection categories. Do not add write methods without checking the API
+actually supports them.
+
 **Writing needs no re-authentication, except AniList.** Trakt's device-flow token
 and SIMKL's PIN token already permit `/sync` writes. AniList mutations require an
 access token that existing username-only profiles do not have, so
 `can_write()` / `write_blocked_reason()` report it and the UI offers AniList as a
-source but not a target until a token is added.
+source but not a target until a token is added via the optional Access Token field
+in Connections. That field is optional by design: a username alone still reads a
+public list, and `merge_credentials` preserves a blank submission so leaving it
+empty keeps the stored token rather than revoking write access.
 
 **Fribb feed shapes — do not assume scalars.** Verified against the live
 `Fribb/anime-lists` feed (42,868 entries). Reading these as plain values is what
