@@ -137,23 +137,35 @@ class ItemMatcher:
         # Failed resolutions keyed by cache_key → unix timestamp of failure.
         # Items in here are skipped until the TTL expires, avoiding redundant
         # AniList chain-walks and PMDB lookups for permanently unresolvable entries.
-        self._failed_cache: dict[str, float] = self._load_failed_cache(initial_failed_cache)
+        # Populated by _load_failed_cache below, which restores the reason a
+        # resolution failed alongside its timestamp.  Without it, every cached
+        # failure reported the generic "cached_miss" after a restart and the
+        # Issues panel lost the real explanation for the whole TTL.
         self._failed_reason_cache: dict[str, str] = {}
+        self._failed_cache: dict[str, float] = self._load_failed_cache(initial_failed_cache)
 
-    @staticmethod
-    def _load_failed_cache(raw: dict[str, str] | None) -> dict[str, float]:
-        """Convert persisted ISO-timestamp failed cache to float unix timestamps."""
+    def _load_failed_cache(self, raw: dict[str, str] | None) -> dict[str, float]:
+        """Convert the persisted failed cache to float unix timestamps.
+
+        Values are ``"<iso-timestamp>|<reason>"``.  The reason is carried in the
+        same string so the store's schema stays an opaque ``dict[str, str]``;
+        entries written before the reason was persisted have no separator and
+        simply load without one.
+        """
         if not raw:
             return {}
         result: dict[str, float] = {}
         now = time.time()
         cutoff = now - _FAILED_CACHE_TTL_SECONDS
-        for key, iso in raw.items():
+        for key, value in raw.items():
             try:
                 import datetime
+                iso, _, reason = str(value).partition("|")
                 ts = datetime.datetime.fromisoformat(iso).timestamp()
                 if ts > cutoff:
                     result[key] = ts
+                    if reason:
+                        self._failed_reason_cache[key] = reason
             except Exception:
                 pass
         return result
@@ -165,15 +177,23 @@ class ItemMatcher:
 
     @property
     def failed_resolution_cache(self) -> dict[str, str]:
-        """Return recent failed resolutions as {cache_key: iso_timestamp} for persistence."""
+        """Recent failures as {cache_key: "iso_timestamp|reason"} for persistence.
+
+        The reason rides along in the value so a restart keeps the real
+        explanation ("unconfirmed_mapping", "missing_anime_mapping", ...) instead
+        of degrading every entry to "cached_miss" until the TTL expires.
+        """
         import datetime
         now = time.time()
         cutoff = now - _FAILED_CACHE_TTL_SECONDS
-        return {
-            key: datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
-            for key, ts in self._failed_cache.items()
-            if ts > cutoff
-        }
+        out: dict[str, str] = {}
+        for key, ts in self._failed_cache.items():
+            if ts <= cutoff:
+                continue
+            iso = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
+            reason = self._failed_reason_cache.get(key, "")
+            out[key] = f"{iso}|{reason}" if reason else iso
+        return out
 
     def stats_snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -640,7 +660,7 @@ class ItemMatcher:
                 # Surface the blocked ID (if any) as the candidate hint so the
                 # unresolved panel shows what was rejected and why.
                 candidate = fribb_result.candidate_tmdb_id or blocked_candidate
-                return MatchResult(
+                result = MatchResult(
                     tmdb_id=None,
                     resolution_kind="unresolved",
                     unresolved_reason=unresolved_reason,
@@ -648,6 +668,11 @@ class ItemMatcher:
                     anime_mapping_source=fribb_result.anime_mapping_source or "fribb_exact",
                     candidate_tmdb_id=candidate,
                 )
+                # This is the most common anime failure mode, and it was the one
+                # terminal return that skipped the stat, under-counting it.
+                with self._lock:
+                    self._record_match_stat(result)
+                return result
 
             # Fribb exact lookup — primary for non-list_identity modes.
             fribb_result = self._try_exact_anime_fribb_lookup(item)

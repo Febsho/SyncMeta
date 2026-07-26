@@ -644,6 +644,72 @@ class ItemMatcherTests(unittest.TestCase):
 
         self.assertEqual(result.tmdb_id, 95479)
 
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_failure_reason_survives_a_restart(self, lookup_by_anilist) -> None:
+        # The reason a resolution failed was held only in memory, so after a
+        # restart the Issues panel reported the generic "cached_miss" for the
+        # whole 7-day TTL instead of the real explanation.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            return {"tmdb_id": 68028, "status": "hit", "votes": 0, "title": "Some Anime"}
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        item = {
+            "title": "Some Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "555001",
+            "ids": {"anilist": "555001"},
+            "anime_resolve_mode": "list_identity",
+        }
+        first = matcher.resolve_match(item)
+        self.assertEqual(first.unresolved_reason, "unconfirmed_mapping")
+
+        persisted = matcher.failed_resolution_cache
+        self.assertTrue(persisted)
+        self.assertIn("|unconfirmed_mapping", next(iter(persisted.values())))
+
+        # A fresh matcher seeded from the persisted cache keeps the reason.
+        restarted = ItemMatcher(StubPMDBClient(), initial_failed_cache=persisted)
+        again = restarted.resolve_match(item)
+        self.assertIsNone(again.tmdb_id)
+        self.assertEqual(again.unresolved_reason, "unconfirmed_mapping")
+
+    def test_legacy_failed_cache_without_a_reason_still_loads(self) -> None:
+        # Entries written before the reason was persisted have no separator.
+        import datetime
+        iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        matcher = ItemMatcher(StubPMDBClient(), initial_failed_cache={"legacy-key": iso})
+        self.assertIn("legacy-key", matcher.failed_resolution_cache)
+        self.assertEqual(matcher.failed_resolution_cache["legacy-key"], iso)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_list_identity_miss_is_counted_in_stats(self, lookup_by_anilist) -> None:
+        # The most common anime failure mode was the one terminal return that
+        # skipped _record_match_stat, so it never appeared in the counters.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = (  # type: ignore[method-assign]
+            lambda id_type, id_value, media_type: {"tmdb_id": None, "status": "miss"}
+        )
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Totally Unmapped Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "555002",
+            "ids": {"anilist": "555002"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.unresolved_reason, "missing_anime_mapping")
+        self.assertEqual(matcher.stats_snapshot()["not_found_failures"], 1)
+
     def test_cache_key_includes_anilist_id_so_stale_entries_are_invalidated(self) -> None:
         # Two items that differ only in anilist_id must produce different cache keys
         # so that a stale wrong resolution for one (e.g. Boruto cached as Naruto)
