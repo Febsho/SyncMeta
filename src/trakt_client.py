@@ -261,6 +261,24 @@ class TraktClient:
         raw = self._get("/sync/watchlist", params={"extended": "full"}) or []
         return [item for item in (self._normalize_watchlist_entry(entry) for entry in raw) if item]
 
+    def get_collection(self) -> list[dict]:
+        """Return the user's Trakt collection as canonical items.
+
+        Unlike the watchlist, collection entries carry no `type` field — the key
+        present (`movie` or `show`) is what identifies the kind.
+        """
+        items: list[dict] = []
+        for media_kind in ("movies", "shows"):
+            raw = self._get(f"/sync/collection/{media_kind}", params={"extended": "full"}) or []
+            singular = "movie" if media_kind == "movies" else "show"
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                normalized = self._normalize_watchlist_entry({**entry, "type": singular})
+                if normalized:
+                    items.append(normalized)
+        return items
+
     def get_liked_lists(self) -> list[dict]:
         liked_lists = []
         for meta in self.get_liked_lists_metadata():

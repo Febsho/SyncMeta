@@ -110,6 +110,79 @@ class SyncConfig:
     trakt_sync_to_pmdb_watchlist: bool = False
     anilist_sync_to_pmdb_watchlist: bool = False
     pmdb_watchlist_managed_keys: list[str] = field(default_factory=list)
+    # Cross-service sync pairs (source -> target). Empty by default so existing
+    # profiles are untouched until a pair is created.
+    sync_pairs: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class SyncPair:
+    """One directional cross-service sync: read `source`, write `target`.
+
+    Pairs are one-way by design; define two pairs if both directions are wanted.
+    `removal_mode` defaults to additive so a new pair can never delete anything.
+    """
+
+    pair_id: str = ""
+    name: str = ""
+    source: str = ""
+    target: str = ""
+    categories: list[str] = field(default_factory=list)
+    removal_mode: str = "additive"
+    enabled: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "pair_id": self.pair_id,
+            "name": self.name,
+            "source": self.source,
+            "target": self.target,
+            "categories": list(self.categories),
+            "removal_mode": self.removal_mode,
+            "enabled": bool(self.enabled),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "SyncPair":
+        from .providers import ALL_CATEGORIES, ALL_REMOVAL_MODES, REMOVAL_ADDITIVE
+
+        if not isinstance(raw, dict):
+            raise ValueError("Sync pair must be an object")
+        source = str(raw.get("source", "") or "").strip().lower()
+        target = str(raw.get("target", "") or "").strip().lower()
+        if not source or not target:
+            raise ValueError("Sync pair needs both a source and a target")
+        if source == target:
+            raise ValueError("A sync pair's source and target must differ")
+
+        categories = [
+            str(value).strip().lower()
+            for value in (raw.get("categories") or [])
+            if str(value).strip().lower() in ALL_CATEGORIES
+        ]
+        # Preserve canonical category order regardless of input order.
+        categories = [c for c in ALL_CATEGORIES if c in categories]
+        if not categories:
+            raise ValueError("Sync pair needs at least one category")
+
+        removal_mode = str(raw.get("removal_mode", "") or "").strip().lower()
+        if removal_mode not in ALL_REMOVAL_MODES:
+            # Unknown or absent modes fall back to the safe default rather than
+            # inheriting a destructive one.
+            removal_mode = REMOVAL_ADDITIVE
+
+        return cls(
+            pair_id=str(raw.get("pair_id", "") or "").strip(),
+            name=str(raw.get("name", "") or "").strip(),
+            source=source,
+            target=target,
+            categories=categories,
+            removal_mode=removal_mode,
+            enabled=bool(raw.get("enabled", True)),
+        )
+
+    def display_name(self) -> str:
+        return self.name or f"{self.source} → {self.target}"
 
 
 @dataclass
