@@ -139,5 +139,63 @@ class FribbIndexTests(unittest.TestCase):
         self.assertFalse(store.validate_tmdb(entry, 129))
 
 
+class XmlTmdbCoordinateTests(unittest.TestCase):
+    """The XML carries TMDB coordinates directly; they used to be ignored.
+
+    ``tmdbtv`` and ``tmdbseason`` co-occur on every entry that has either, so a
+    TVDB season no longer has to be translated through PMDB anime-seasons.
+    """
+
+    XML = """<?xml version="1.0" encoding="UTF-8"?>
+    <anime-list>
+      <anime anidbid="100" tvdbid="70000" defaulttvdbseason="2"
+             episodeoffset="12" tmdbtv="55555" tmdbseason="3" tmdboffset="5" />
+      <anime anidbid="200" tvdbid="70001" defaulttvdbseason="1" />
+      <anime anidbid="300" tvdbid="70002" defaulttvdbseason="0"
+             episodeoffset="2" tmdbtv="55557" tmdbseason="0" tmdboffset="2" />
+      <anime anidbid="400" tmdbid="128" tvdbid="70003" defaulttvdbseason="1" />
+    </anime-list>
+    """
+
+    def _loaded_store(self) -> AnimeMappingStore:
+        store = AnimeMappingStore()
+
+        def fake_load(url, cache_path, meta_path):
+            return True, self.XML
+
+        store._load_or_download_text_with_change = fake_load  # type: ignore[method-assign]
+        store._ensure_xml_loaded()
+        return store
+
+    def test_tmdb_coordinates_are_returned_when_present(self) -> None:
+        store = self._loaded_store()
+        result = store.resolve_tvdb_episode_from_anidb_episode(100, 3)
+        self.assertIsNotNone(result)
+        # TVDB coordinates stay available for the fallback path...
+        self.assertEqual(result["tvdb_season"], 2)
+        self.assertEqual(result["tvdb_episode"], 15)  # 3 + episodeoffset 12
+        # ...alongside the direct TMDB answer.
+        self.assertEqual(result["tmdb_season"], 3)
+        self.assertEqual(result["tmdb_episode"], 8)  # 3 + tmdboffset 5
+        self.assertEqual(result["tmdb_id"], 55555)
+
+    def test_entries_without_tmdb_attributes_are_unchanged(self) -> None:
+        store = self._loaded_store()
+        result = store.resolve_tvdb_episode_from_anidb_episode(200, 4)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["tvdb_season"], 1)
+        self.assertNotIn("tmdb_season", result)
+
+    def test_specials_are_left_untouched(self) -> None:
+        store = self._loaded_store()
+        self.assertIsNone(store.resolve_tvdb_episode_from_anidb_episode(300, 1))
+
+    def test_movie_entries_are_indexed_by_tmdbid(self) -> None:
+        store = self._loaded_store()
+        entries = store.get_xml_entries_by_tmdb(128)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].attrib["anidbid"], "400")
+
+
 if __name__ == "__main__":
     unittest.main()

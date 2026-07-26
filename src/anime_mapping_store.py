@@ -182,6 +182,50 @@ class AnimeMappingStore:
         anidb_episode: int,
         anidb_season: int = 1,
     ) -> dict | None:
+        """Resolve an AniDB episode to TVDB — and to TMDB when the feed says so.
+
+        The result always carries ``tvdb_*`` keys.  It additionally carries
+        ``tmdb_season`` / ``tmdb_episode`` / ``tmdb_id`` when the entry records
+        TMDB coordinates, letting callers skip translating the TVDB season
+        through PMDB entirely.
+        """
+        result = self._resolve_tvdb_episode(anidb_id, anidb_episode, anidb_season)
+        if not result:
+            return result
+        return self._with_tmdb_coordinates(result, anidb_id, anidb_episode)
+
+    def _with_tmdb_coordinates(self, result: dict, anidb_id: int, anidb_episode: int) -> dict:
+        """Attach TMDB coordinates to a TVDB resolution when the feed has them.
+
+        Only applied when the entry-level ``episodeoffset`` produced the result.
+        Per-range ``mapping-list`` offsets and absolute numbering are TVDB-specific
+        and have no TMDB counterpart upstream, so those keep the TVDB path.
+        """
+        anime_entry = self._xml_by_anidb.get(int(anidb_id))
+        if anime_entry is None:
+            return result
+        attrs = anime_entry.attrib
+        tmdb_season = _safe_int(attrs.get("tmdbseason"))
+        if tmdb_season is None:
+            return result
+        entry_offset = _safe_int(attrs.get("episodeoffset")) or 0
+        if _safe_int(result.get("tvdb_episode")) != int(anidb_episode) + entry_offset:
+            return result
+
+        enriched = dict(result)
+        enriched["tmdb_season"] = tmdb_season
+        enriched["tmdb_episode"] = int(anidb_episode) + (_safe_int(attrs.get("tmdboffset")) or 0)
+        tmdb_id = _safe_int(attrs.get("tmdbtv")) or _safe_int(attrs.get("tmdbid"))
+        if tmdb_id:
+            enriched["tmdb_id"] = tmdb_id
+        return enriched
+
+    def _resolve_tvdb_episode(
+        self,
+        anidb_id: int,
+        anidb_episode: int,
+        anidb_season: int = 1,
+    ) -> dict | None:
         self._ensure_xml_loaded()
         anime_entry = self._xml_by_anidb.get(int(anidb_id))
         if anime_entry is None or anidb_episode <= 0:
@@ -450,9 +494,12 @@ class AnimeMappingStore:
                 tvdb_id = _safe_int(attrs.get("tvdbid"))
                 if tvdb_id:
                     self._xml_by_tvdb.setdefault(tvdb_id, []).append(anime)
-                tmdb_id = _safe_int(attrs.get("tmdbtv"))
-                if tmdb_id:
-                    self._xml_by_tmdb.setdefault(tmdb_id, []).append(anime)
+                # tmdbtv is the series id; tmdbid is the movie id.  Index both so
+                # anime films are reachable, not just series.
+                for tmdb_attr in ("tmdbtv", "tmdbid"):
+                    tmdb_id = _safe_int(attrs.get(tmdb_attr))
+                    if tmdb_id:
+                        self._xml_by_tmdb.setdefault(tmdb_id, []).append(anime)
                 imdb_ids = str(attrs.get("imdbid") or "").strip()
                 if imdb_ids:
                     for imdb_id in [part.strip() for part in imdb_ids.split(",") if part.strip() and part.strip() != "unknown"]:
