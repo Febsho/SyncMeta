@@ -258,6 +258,10 @@ class SimklClient:
         # cartoons, live-action shows) will have an unrecognised or absent type.
         _VALID_ANIME_TYPES = {"tv", "movie", "ova", "ona", "special", "music", "unknown"}
 
+        # Only bound for anime entries below, but read unconditionally when
+        # collecting title variants.
+        fribb_entry: dict | None = None
+
         # Determine the PublicMetaDB-compatible media type
         if media_type == "movies":
             pmdb_type = "movie"
@@ -328,6 +332,7 @@ class SimklClient:
 
         return {
             "title": media.get("title", "Unknown"),
+            "title_variants": self._title_variants(media, fribb_entry),
             "year": media.get("year"),
             "media_type": pmdb_type,
             "simkl_type": media_type,
@@ -366,6 +371,38 @@ class SimklClient:
                 or media.get("episodes")
             ) or 0,
         }
+
+    @staticmethod
+    def _title_variants(media: dict, fribb_entry: dict | None = None) -> list[str]:
+        """Alternate titles for an item, used to widen mapping title checks.
+
+        SIMKL reports a single localized title per item, which frequently differs
+        in language from the title PMDB holds.  Any alternate SIMKL supplies —
+        plus the slug-derived hint from the Fribb entry — gives the matcher more
+        than one chance to recognise a correct mapping.
+        """
+        candidates = [
+            media.get("title"),
+            media.get("en_title"),
+            media.get("original_title"),
+        ]
+        alt = media.get("alt_titles")
+        if isinstance(alt, (list, tuple)):
+            candidates.extend(alt)
+        candidates.extend(_fribb.title_hints(fribb_entry))
+
+        variants: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append(text)
+        return variants
 
     @staticmethod
     def _enrich_ids_from_fribb(ids: dict, fribb_entry: dict | None) -> None:

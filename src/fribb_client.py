@@ -38,6 +38,22 @@ def extract_tmdb(value: object) -> tuple[int | None, str | None]:
     return _store.extract_tmdb(value)
 
 
+def title_hints(entry: dict | None) -> list[str]:
+    """Derive usable title strings from a Fribb entry.
+
+    Fribb carries no title field, but ``anime-planet_id`` is a slug of the title
+    (e.g. ``"princess-mononoke"``), which tokenizes to the same words as the
+    title itself and so works as an extra variant for compatibility checks.
+    """
+    if not isinstance(entry, dict):
+        return []
+    hints: list[str] = []
+    slug = str(entry.get("anime-planet_id") or "").strip()
+    if slug:
+        hints.append(slug.replace("-", " ").replace("_", " "))
+    return hints
+
+
 def imdb_ids(value: object) -> list[str]:
     """Normalize a Fribb ``imdb_id`` (a list upstream) to clean id strings."""
     return _store._iter_imdb_ids(value)

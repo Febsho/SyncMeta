@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 
 import requests
@@ -326,11 +327,24 @@ class ItemMatcher:
         else:
             self._stats["not_found_failures"] += 1
 
-    def _lookup_external_mapping(self, id_type: str, ext_id: str, media_type: str) -> tuple[int | None, str, int, str]:
+    def _lookup_external_mapping(
+        self,
+        id_type: str,
+        ext_id: str,
+        media_type: str,
+        title_variants=None,
+    ) -> tuple[int | None, str, int, str]:
         """Return (tmdb_id, status, votes, title) from PMDB external-ID mapping lookup.
 
-        ``votes`` is the community vote count on the best matching entry.
-        Zero means the mapping was submitted but never independently verified.
+        ``votes`` is the community vote count on the chosen entry.  Zero means
+        the mapping was submitted but never independently verified.
+
+        PMDB can return several candidate mappings for one external ID.  When
+        ``title_variants`` is supplied, the highest-voted candidate whose title is
+        compatible with one of them is chosen instead of simply the highest-voted
+        one — otherwise a wrong top-voted mapping hides a correct lower-voted
+        mapping behind it and the item is lost.  With no variants supplied the
+        behaviour is unchanged: the top-voted candidate wins.
         """
         try:
             detailed_lookup = getattr(self._pmdb, "lookup_by_external_id_detailed", None)
@@ -340,11 +354,38 @@ class ItemMatcher:
                     _votes = int(detail.get("votes") or 0)
                 except (TypeError, ValueError):
                     _votes = 0
+                best_tmdb_id = _coerce_tmdb_id(detail.get("tmdb_id"), media_type)
+                best_title = str(detail.get("title") or "")
+
+                candidates = detail.get("candidates")
+                if title_variants and isinstance(candidates, (list, tuple)) and len(candidates) > 1:
+                    if not self._titles_are_compatible_any(title_variants, best_title):
+                        for candidate in candidates:
+                            if not isinstance(candidate, dict):
+                                continue
+                            candidate_tmdb_id = _coerce_tmdb_id(candidate.get("tmdb_id"), media_type)
+                            candidate_title = str(candidate.get("title") or "")
+                            if not candidate_tmdb_id or candidate_tmdb_id == best_tmdb_id:
+                                continue
+                            if self._titles_are_compatible_any(title_variants, candidate_title):
+                                try:
+                                    candidate_votes = int(candidate.get("votes") or 0)
+                                except (TypeError, ValueError):
+                                    candidate_votes = 0
+                                logger.info(
+                                    "[resolve] PMDB %s=%s: top-voted tmdb=%s title=%r is"
+                                    " incompatible; using lower-voted tmdb=%d title=%r"
+                                    " (votes=%d)",
+                                    id_type, ext_id, best_tmdb_id, best_title,
+                                    candidate_tmdb_id, candidate_title, candidate_votes,
+                                )
+                                return candidate_tmdb_id, str(detail.get("status") or "hit"), candidate_votes, candidate_title
+
                 return (
-                    _coerce_tmdb_id(detail.get("tmdb_id"), media_type),
+                    best_tmdb_id,
                     str(detail.get("status") or "miss"),
                     _votes,
-                    str(detail.get("title") or ""),
+                    best_title,
                 )
             tmdb_id = self._pmdb.lookup_by_external_id(id_type, ext_id, media_type)
             tmdb_id = _coerce_tmdb_id(tmdb_id, media_type)
@@ -365,7 +406,12 @@ class ItemMatcher:
 
     @staticmethod
     def _normalized_title_tokens(title: str) -> set[str]:
-        cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in str(title or ""))
+        # Decompose to NFKD and drop combining marks so transliterations that
+        # differ only in diacritics tokenize identically (e.g. "Jūjutsu" and
+        # "Jujutsu", "Pokémon" and "Pokemon").
+        decomposed = unicodedata.normalize("NFKD", str(title or ""))
+        folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+        cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in folded)
         return {
             token for token in cleaned.split()
             if token and token not in _TITLE_STOPWORDS and not token.isdigit()
@@ -373,25 +419,84 @@ class ItemMatcher:
 
     @classmethod
     def _titles_are_compatible(cls, source_title: str, mapped_title: str) -> bool:
+        return cls._titles_are_compatible_any([source_title], mapped_title)
+
+    @classmethod
+    def _titles_are_compatible_any(cls, source_titles, mapped_title: str) -> bool:
+        """True when *any* known title variant is compatible with the mapping.
+
+        Anime carries several equally-legitimate titles — romaji, English,
+        native and a list of synonyms — and providers disagree about which one to
+        report.  Comparing a single variant means a romaji source title against
+        an English mapped title (e.g. "Shingeki no Kyojin" vs "Attack on Titan")
+        shares no tokens at all and the *correct* mapping gets rejected.  Trying
+        every variant can only recover items: a mapping the single-variant check
+        already accepted still matches on that same variant.
+
+        Note an empty ``mapped_title`` is deliberately treated as compatible —
+        PMDB omits the title on some records, and treating "unknown" as a
+        mismatch would reject correct mappings, which is the opposite of intent.
+        """
         if not mapped_title:
             return True
-        source_tokens = cls._normalized_title_tokens(source_title)
         mapped_tokens = cls._normalized_title_tokens(mapped_title)
-        if not source_tokens or not mapped_tokens:
+        if not mapped_tokens:
             return True
-        if source_tokens == mapped_tokens:
+
+        candidates = [t for t in (source_titles or []) if str(t or "").strip()]
+        if not candidates:
             return True
-        overlap = len(source_tokens & mapped_tokens)
-        if not overlap:
-            return False
-        union = len(source_tokens | mapped_tokens)
-        return (overlap / max(1, union)) >= 0.75
+
+        saw_tokens = False
+        for source_title in candidates:
+            source_tokens = cls._normalized_title_tokens(source_title)
+            if not source_tokens:
+                continue
+            saw_tokens = True
+            if source_tokens == mapped_tokens:
+                return True
+            overlap = len(source_tokens & mapped_tokens)
+            if not overlap:
+                continue
+            union = len(source_tokens | mapped_tokens)
+            if (overlap / max(1, union)) >= 0.75:
+                return True
+        # No variant produced comparable tokens at all — nothing to judge on.
+        return not saw_tokens
+
+    @staticmethod
+    def _title_variants(item: dict, *, primary: str = "") -> list[str]:
+        """Collect every known title for an item, most-canonical first.
+
+        ``title_variants`` is populated by the provider clients from the titles
+        they already fetch (romaji/english/native plus AniList synonyms), so no
+        extra API calls are needed to widen the comparison.
+        """
+        variants: list[str] = []
+        seen: set[str] = set()
+        raw = [primary, item.get("title"), item.get("root_title")]
+        extra = item.get("title_variants")
+        if isinstance(extra, (list, tuple, set)):
+            raw.extend(extra)
+        elif isinstance(extra, str):
+            raw.append(extra)
+        for candidate in raw:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append(text)
+        return variants
 
     def _try_resolve(self, item: dict) -> MatchResult:
         title = item.get("title", "Unknown")
         media_type = item["media_type"]
         is_anime = item.get("simkl_type") == "anime"
         ids = item.get("ids", {})
+        title_variants = self._title_variants(item, primary=title)
         anime_resolve_mode = self._anime_resolve_mode(item)
         allow_root_series = bool(item.get("allow_root_series")) or anime_resolve_mode in {"history_identity", "resume_identity"}
 
@@ -435,7 +540,9 @@ class ItemMatcher:
                     if not ext_id:
                         continue
                     ext_id = str(ext_id)
-                    tmdb_id, status, votes, mapped_title = self._lookup_external_mapping(id_type, ext_id, media_type)
+                    tmdb_id, status, votes, mapped_title = self._lookup_external_mapping(
+                        id_type, ext_id, media_type, title_variants=title_variants,
+                    )
                     if not tmdb_id:
                         logger.debug(
                             "[resolve] anime '%s' PMDB %s=%s → miss (status=%s)",
@@ -456,10 +563,11 @@ class ItemMatcher:
                         "[resolve] anime '%s' PMDB %s=%s → tmdb=%d (votes=%d title=%r)",
                         title, id_type, ext_id, tmdb_id, votes, mapped_title,
                     )
-                    if mapped_title and not self._titles_are_compatible(title, mapped_title):
+                    if mapped_title and not self._titles_are_compatible_any(title_variants, mapped_title):
                         logger.warning(
-                            "[resolve] anime '%s' — PMDB %s=%s returned incompatible title %r for tmdb=%d; skipping",
-                            title, id_type, ext_id, mapped_title, tmdb_id,
+                            "[resolve] anime '%s' — PMDB %s=%s returned incompatible title %r for tmdb=%d"
+                            " (checked %d title variant(s)); skipping",
+                            title, id_type, ext_id, mapped_title, tmdb_id, len(title_variants),
                         )
                         continue
                     if votes > 0:
@@ -585,7 +693,10 @@ class ItemMatcher:
                 continue
             had_lookup_candidate = True
             ext_id = str(ext_id)
-            tmdb_id, status, _votes, _mapped_title = self._lookup_external_mapping(id_type, ext_id, media_type)
+            tmdb_id, status, _votes, _mapped_title = self._lookup_external_mapping(
+                id_type, ext_id, media_type,
+                title_variants=title_variants if is_anime else None,
+            )
             if tmdb_id:
                 # For anime items, apply the same safety guards used in list_identity
                 # mode so wrong community mappings can't enter the library via the
@@ -598,12 +709,13 @@ class ItemMatcher:
                             title, anime_resolve_mode, id_type, ext_id, tmdb_id,
                         )
                         continue
-                    if _mapped_title and not self._titles_are_compatible(title, _mapped_title):
+                    if _mapped_title and not self._titles_are_compatible_any(title_variants, _mapped_title):
                         logger.warning(
                             "[resolve] anime '%s' (mode=%s) — fallback: PMDB %s=%s"
-                            " returned incompatible title %r for TMDB %d; skipping",
+                            " returned incompatible title %r for TMDB %d"
+                            " (checked %d title variant(s)); skipping",
                             title, anime_resolve_mode, id_type, ext_id,
-                            _mapped_title, tmdb_id,
+                            _mapped_title, tmdb_id, len(title_variants),
                         )
                         continue
                     if _votes == 0:
@@ -700,13 +812,16 @@ class ItemMatcher:
     def _resolve_root_series(self, item: dict, ids: dict, media_type: str) -> MatchResult:
         title = item.get("title", "Unknown")
         root_title = item.get("root_title") or title
+        root_title_variants = self._title_variants(item, primary=root_title)
         lookup_unavailable = False
         for id_type, item_key in _ROOT_LOOKUP_CHAIN:
             ext_id = item.get(item_key) or ids.get(item_key) or ids.get(f"root_{id_type}")
             if not ext_id:
                 continue
             ext_id = str(ext_id)
-            tmdb_id, status, _votes, mapped_title = self._lookup_external_mapping(id_type, ext_id, media_type)
+            tmdb_id, status, _votes, mapped_title = self._lookup_external_mapping(
+                id_type, ext_id, media_type, title_variants=root_title_variants,
+            )
             if tmdb_id:
                 if tmdb_id in _BLOCKED_ANIME_PMDB_TMDB_IDS:
                     logger.warning(
@@ -715,11 +830,11 @@ class ItemMatcher:
                         title, id_type, ext_id, tmdb_id,
                     )
                     continue
-                if mapped_title and not self._titles_are_compatible(root_title, mapped_title):
+                if mapped_title and not self._titles_are_compatible_any(root_title_variants, mapped_title):
                     logger.warning(
                         "[resolve] root-series '%s' — PMDB %s=%s returned incompatible title %r"
-                        " for tmdb=%d; skipping",
-                        title, id_type, ext_id, mapped_title, tmdb_id,
+                        " for tmdb=%d (checked %d title variant(s)); skipping",
+                        title, id_type, ext_id, mapped_title, tmdb_id, len(root_title_variants),
                     )
                     continue
                 logger.info(

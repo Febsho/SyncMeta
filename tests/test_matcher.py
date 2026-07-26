@@ -527,6 +527,123 @@ class ItemMatcherTests(unittest.TestCase):
         self.assertEqual(client.calls, [("anilist", "38691", "tv")])
 
 
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_romaji_source_title_accepts_english_mapped_title(self, lookup_by_anilist) -> None:
+        # The headline false rejection: SIMKL/AniList report romaji while PMDB
+        # holds the English title, and the two share no tokens whatsoever. With
+        # the English title among the variants the correct mapping is kept.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            if id_type == "anilist":
+                return {
+                    "tmdb_id": 1429,
+                    "status": "hit",
+                    "votes": 9,
+                    "title": "Attack on Titan",
+                }
+            return {"tmdb_id": None, "status": "miss"}
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Shingeki no Kyojin",
+            "title_variants": ["Attack on Titan", "Shingeki no Kyojin", "進撃の巨人"],
+            "year": 2013,
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "16498",
+            "ids": {"anilist": "16498"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 1429)
+        self.assertEqual(result.resolution_kind, "external_mapping")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_romaji_only_title_still_rejects_unrelated_mapping(self, lookup_by_anilist) -> None:
+        # Widening the comparison must not make the guard permissive: an
+        # unrelated title is still rejected across every variant.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            return {
+                "tmdb_id": 68028,
+                "status": "hit",
+                "votes": 12,
+                "title": "Vazquez vs Marquez I",
+            }
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Shingeki no Kyojin",
+            "title_variants": ["Attack on Titan", "Shingeki no Kyojin"],
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "16498",
+            "ids": {"anilist": "16498"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertIsNone(result.tmdb_id)
+
+    def test_diacritics_are_folded_when_comparing_titles(self) -> None:
+        self.assertTrue(ItemMatcher._titles_are_compatible("Jūjutsu Kaisen", "Jujutsu Kaisen"))
+        self.assertTrue(ItemMatcher._titles_are_compatible("Pokémon", "Pokemon"))
+
+    def test_titles_are_compatible_any_accepts_when_one_variant_matches(self) -> None:
+        variants = ["Shingeki no Kyojin", "Attack on Titan"]
+        self.assertTrue(ItemMatcher._titles_are_compatible_any(variants, "Attack on Titan"))
+        self.assertFalse(ItemMatcher._titles_are_compatible_any(variants, "Breaking Bad"))
+
+    def test_titles_are_compatible_any_treats_missing_data_as_compatible(self) -> None:
+        # PMDB omits titles on some records; "unknown" must not read as a
+        # mismatch or correct mappings would be thrown away.
+        self.assertTrue(ItemMatcher._titles_are_compatible_any(["Anything"], ""))
+        self.assertTrue(ItemMatcher._titles_are_compatible_any([], "Attack on Titan"))
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_lower_voted_candidate_with_matching_title_wins(self, lookup_by_anilist) -> None:
+        # PMDB returns several mappings for one external id. The top-voted one
+        # is wrong; without inspecting the rest, the correct lower-voted mapping
+        # is never seen and the item is lost.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            return {
+                "tmdb_id": 68028,
+                "status": "hit",
+                "votes": 12,
+                "title": "Vazquez vs Marquez I",
+                "candidates": [
+                    {"tmdb_id": 68028, "votes": 12, "title": "Vazquez vs Marquez I"},
+                    {"tmdb_id": 95479, "votes": 3, "title": "Jujutsu Kaisen"},
+                ],
+            }
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Jujutsu Kaisen",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "113415",
+            "ids": {"anilist": "113415"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 95479)
+
     def test_cache_key_includes_anilist_id_so_stale_entries_are_invalidated(self) -> None:
         # Two items that differ only in anilist_id must produce different cache keys
         # so that a stale wrong resolution for one (e.g. Boruto cached as Naruto)

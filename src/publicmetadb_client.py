@@ -366,6 +366,29 @@ class PublicMetaDBClient:
                 # per-show mapping voted in by the community). Taking the highest-
                 # voted entry avoids landing on the wrong franchise entry.
                 best = max(results, key=lambda r: r.get("votes", 0))
+
+                def _result_title(entry: dict) -> str:
+                    return (
+                        entry.get("title")
+                        or entry.get("name")
+                        or entry.get("english_title")
+                        or entry.get("original_title")
+                        or ""
+                    )
+
+                # Expose every candidate, highest-voted first, so callers can
+                # apply their own title checks across the whole set instead of
+                # only the top-voted one.  When the top result carries a title
+                # that does not match the item, a lower-voted candidate is often
+                # the correct mapping and would otherwise be discarded unseen.
+                candidates = [
+                    {
+                        "tmdb_id": _coerce_tmdb_id(entry.get("tmdb_id"), media_type),
+                        "votes": int(entry.get("votes") or 0),
+                        "title": _result_title(entry),
+                    }
+                    for entry in sorted(results, key=lambda r: r.get("votes", 0), reverse=True)
+                ]
                 return {
                     "tmdb_id": _coerce_tmdb_id(best.get("tmdb_id"), media_type),
                     "status": "hit",
@@ -373,13 +396,8 @@ class PublicMetaDBClient:
                     # zero-vote (self-submitted, unconfirmed) mappings.
                     "votes": int(best.get("votes") or 0),
                     "result_count": len(results),
-                    "title": (
-                        best.get("title")
-                        or best.get("name")
-                        or best.get("english_title")
-                        or best.get("original_title")
-                        or ""
-                    ),
+                    "title": _result_title(best),
+                    "candidates": [c for c in candidates if c["tmdb_id"]],
                 }
             self._record_stat("mapping_lookup_misses")
             return {"tmdb_id": None, "status": "miss"}

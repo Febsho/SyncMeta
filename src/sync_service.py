@@ -158,8 +158,13 @@ _SAMPLE_TITLES_LIMIT = 5
 def _unresolved_item_summary(item: dict, list_name: str = "", unresolved_reason: str = "") -> dict:
     """Extract a compact, serialisable record for an item that could not be resolved."""
     ids = item.get("ids") or {}
+    title_variants = item.get("title_variants")
     summary = {
         "title": item.get("title") or "Unknown",
+        # Carried through so a later manual/auto retry keeps the same widened
+        # title comparison the original resolve attempt had.
+        "title_variants": [str(v) for v in title_variants if str(v or "").strip()]
+        if isinstance(title_variants, (list, tuple)) else [],
         "year": item.get("year"),
         "media_type": item.get("media_type"),
         "simkl_type": item.get("simkl_type"),
