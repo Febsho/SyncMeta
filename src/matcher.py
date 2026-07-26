@@ -69,6 +69,13 @@ def _coerce_tmdb_id(value: object, media_type: str = "") -> int | None:
             if key in value:
                 return _coerce_tmdb_id(value.get(key), media_type)
         return None
+    if isinstance(value, (list, tuple)):
+        # Fribb stores movie ids as a list.  Only a single-element list is
+        # unambiguous; a longer one must fall through to manual resolution
+        # rather than silently picking the first entry.
+        if len(value) != 1:
+            return None
+        return _coerce_tmdb_id(value[0], media_type)
     try:
         if value is None or value == "":
             return None
@@ -196,12 +203,15 @@ class ItemMatcher:
                     break
             if not isinstance(entry, dict):
                 continue
-            tmdb_raw = entry.get("themoviedb_id") or entry.get("themoviedb")
-            try:
-                tmdb_id = int(tmdb_raw) if tmdb_raw else None
-            except (TypeError, ValueError):
-                continue
+            tmdb_id, mapped_media_type = fribb_client.extract_tmdb(
+                entry.get("themoviedb_id") or entry.get("themoviedb")
+            )
             if not tmdb_id or tmdb_id in _BLOCKED_ANIME_PMDB_TMDB_IDS:
+                continue
+            # Never seed a movie id onto a tv item (or vice versa) — the mapping
+            # namespace must agree with the item before it can bypass lookup.
+            item_media_type = str(item.get("media_type") or "").strip().lower()
+            if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
                 continue
             with self._lock:
                 if cache_key not in self._cache:
@@ -771,7 +781,10 @@ class ItemMatcher:
                 anime_mapping_source="fribb_exact",
             )
 
-        tmdb_id = _coerce_tmdb_id(entry.get("themoviedb_id") or entry.get("themoviedb"), item.get("media_type") or "")
+        item_media_type = str(item.get("media_type") or "").strip().lower()
+        tmdb_id, mapped_media_type = fribb_client.extract_tmdb(
+            entry.get("themoviedb_id") or entry.get("themoviedb")
+        )
         if not tmdb_id:
             return MatchResult(
                 tmdb_id=None,
@@ -781,9 +794,13 @@ class ItemMatcher:
                 anime_mapping_source="fribb_exact",
             )
 
-        fribb_type = str(entry.get("type") or "").strip().lower()
-        expected_media_type = "movie" if fribb_type == "movie" else "tv"
-        if str(item.get("media_type") or "").strip().lower() != expected_media_type:
+        # The media type is taken from the key the mapping is stored under, not
+        # from the entry's `type` field.  `type` disagrees with the actual TMDB
+        # namespace in both directions — hundreds of MOVIE-typed entries carry a
+        # `tv` id, and hundreds of OVA/SPECIAL/ONA entries carry a `movie` id —
+        # so gating on it rejects correct mappings for anime films, OVAs and
+        # specials alike.  Only a genuine namespace conflict is a rejection.
+        if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
             return MatchResult(
                 tmdb_id=None,
                 resolution_kind="unresolved",
@@ -842,14 +859,16 @@ class ItemMatcher:
                     if exact_entry is not None:
                         break
                 if exact_entry is not None:
-                    fribb_tmdb = exact_entry.get("themoviedb")
-                    if fribb_tmdb:
-                        return tmdb_id == _coerce_tmdb_id(fribb_tmdb, item.get("media_type") or "")
-                    fribb_type = str(exact_entry.get("type") or "").strip().lower()
-                    expected_media_type = "movie" if fribb_type == "movie" else "tv"
+                    fribb_tmdb, mapped_media_type = fribb_client.extract_tmdb(
+                        exact_entry.get("themoviedb_id") or exact_entry.get("themoviedb")
+                    )
                     item_media_type = str(item.get("media_type") or "").strip().lower()
-                    if item_media_type == expected_media_type:
-                        return fribb_client.validate_tmdb(exact_entry, tmdb_id)
+                    if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
+                        # The mapping is for the other TMDB namespace, so it
+                        # cannot vouch for this item's raw id.
+                        return False
+                    if fribb_tmdb:
+                        return tmdb_id == fribb_tmdb
         except Exception:
             logger.debug("Anime direct TMDB verification failed; trying softer fallback", exc_info=True)
         if not self._anime_root_resolver:

@@ -520,8 +520,11 @@ class AniListClient:
                 ids["anidb"] = fribb_entry.get("anidb_id")
             if fribb_entry.get("tvdb_id"):
                 ids["tvdb"] = fribb_entry.get("tvdb_id")
-            if fribb_entry.get("imdb_id"):
-                ids["imdb"] = fribb_entry.get("imdb_id")
+            # imdb_id is a list upstream; keep a single string so downstream
+            # external-mapping lookups don't send "['tt0286390']" as the id.
+            imdb_id = fribb_client.single_imdb_id(fribb_entry.get("imdb_id"))
+            if imdb_id:
+                ids["imdb"] = imdb_id
             if fribb_entry.get("themoviedb_id"):
                 ids["tmdb"] = fribb_entry.get("themoviedb_id")
             if fribb_entry.get("simkl_id"):

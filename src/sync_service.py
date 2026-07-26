@@ -11,6 +11,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
+from . import fribb_client
 from .anilist_client import AniListClient
 from .config import AniListConfig, AppConfig
 from .matcher import ItemMatcher, MatchResult
@@ -504,23 +505,22 @@ class SyncService:
             raw = fribb.get("themoviedb_id") or fribb.get("themoviedb")
             if not raw:
                 return None
-            tmdb_id = _coerce_tmdb_id(raw, item.get("media_type") or "") or 0
-            if tmdb_id <= 0:
+            tmdb_id, mapped_media_type = fribb_client.extract_tmdb(raw)
+            if not tmdb_id or tmdb_id <= 0:
                 return None
 
-            # Validate type consistency before returning the override.
-            fribb_type = str(fribb.get("type") or "").strip().lower()
-            if fribb_type:
-                expected_media_type = "movie" if fribb_type == "movie" else "tv"
-                item_media_type = str(item.get("media_type") or "").strip().lower()
-                if item_media_type and item_media_type != expected_media_type:
-                    logger.debug(
-                        "Fribb type mismatch for %r — fribb.type=%r expects media_type=%r"
-                        " but item has media_type=%r; skipping Fribb override (tmdb=%s)",
-                        item.get("title"), fribb_type, expected_media_type,
-                        item_media_type, tmdb_id,
-                    )
-                    return None
+            # Validate namespace consistency before returning the override.  The
+            # key the mapping is stored under ("tv"/"movie") is authoritative;
+            # the entry's `type` field is not, since it routinely disagrees with
+            # the TMDB namespace for films, OVAs and specials.
+            item_media_type = str(item.get("media_type") or "").strip().lower()
+            if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
+                logger.debug(
+                    "Fribb namespace mismatch for %r — mapping is %r but item has"
+                    " media_type=%r; skipping Fribb override (tmdb=%s)",
+                    item.get("title"), mapped_media_type, item_media_type, tmdb_id,
+                )
+                return None
 
             return tmdb_id
         except Exception:

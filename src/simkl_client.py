@@ -376,8 +376,6 @@ class SimklClient:
             ("mal", "mal_id"),
             ("anidb", "anidb_id"),
             ("simkl", "simkl_id"),
-            ("imdb", "imdb_id"),
-            ("tmdb", "themoviedb_id"),
             ("tvdb", "tvdb_id"),
         ):
             if ids.get(target_key):
@@ -385,6 +383,17 @@ class SimklClient:
             value = fribb_entry.get(source_key)
             if value:
                 ids[target_key] = value
+        # imdb_id is a list upstream and themoviedb_id a media-type-keyed dict;
+        # both need normalizing before they reach an external-mapping lookup,
+        # which would otherwise send "['tt0286390']" / "{'tv': 1}" as the id.
+        if not ids.get("imdb"):
+            imdb_id = _fribb.single_imdb_id(fribb_entry.get("imdb_id"))
+            if imdb_id:
+                ids["imdb"] = imdb_id
+        if not ids.get("tmdb"):
+            tmdb_id, _media_type = _fribb.extract_tmdb(fribb_entry.get("themoviedb_id"))
+            if tmdb_id:
+                ids["tmdb"] = tmdb_id
 
     def _lookup_exact_anime_mapping(
         self,
@@ -511,11 +520,19 @@ class SimklClient:
         fribb_entry: dict | None = None,
     ) -> dict:
         root_ids = root_ids or {}
+        # Read the real field name (themoviedb_id, a media-type-keyed dict).
+        # The old code read "themoviedb", which does not exist upstream, so this
+        # diagnostic was always None for every SIMKL anime item.
+        fribb_tmdb_id: int | None = None
+        if isinstance(fribb_entry, dict):
+            fribb_tmdb_id, _fribb_tmdb_media_type = _fribb.extract_tmdb(
+                fribb_entry.get("themoviedb_id") or fribb_entry.get("themoviedb")
+            )
         return {
             "anilist_id": str(ids["anilist"]) if ids.get("anilist") else None,
             "mal_id": str(ids["mal"]) if ids.get("mal") else None,
             "anidb_id": str(ids["anidb"]) if ids.get("anidb") else None,
-            "fribb_tmdb_id": str(fribb_entry.get("themoviedb")) if isinstance(fribb_entry, dict) and fribb_entry.get("themoviedb") else None,
+            "fribb_tmdb_id": str(fribb_tmdb_id) if fribb_tmdb_id else None,
             "fribb_type": str(fribb_entry.get("type") or "").strip().upper() if isinstance(fribb_entry, dict) else "",
             "root_anilist_id": str(root_ids["root_anilist"]) if root_ids.get("root_anilist") else None,
             "root_mal_id": str(root_ids["root_mal"]) if root_ids.get("root_mal") else None,
