@@ -109,6 +109,8 @@
     .dry-run-preview-list{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--z400)}
     .dry-run-preview-list .preview-row{padding:4px 8px;border-radius:4px;background:var(--z950);border:1px solid var(--z900)}
     .hidden{display:none}
+    /* Visible to assistive tech only — for labels that would be redundant on screen. */
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
     .inline-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:nowrap;min-width:150px}
     .auth-box{margin-top:12px;padding:12px;border:1px solid var(--z800);border-radius:8px;background:var(--z900)}
     .auth-box.hidden{display:none}
@@ -3313,12 +3315,48 @@
 
     // ── Unresolved items panel ─────────────────────────────────────────────────
 
-    function renderUnresolvedPanel(items) {
+    // The backend records exactly why each item failed, but the panel used to
+    // show none of it — the user saw a title and an empty box with no clue what
+    // went wrong. These are the reason codes emitted by the sync service.
+    const UNRESOLVED_REASON_TEXT = {
+      unconfirmed_mapping: 'Only an unverified community mapping exists, and the offline anime map has no entry. Confirm the correct TMDB ID below.',
+      missing_anime_mapping: 'No anime mapping found for this title in either the community database or the offline anime map.',
+      missing_ids: 'This item carries no external IDs (IMDb/MAL/AniList/AniDB) to look it up by.',
+      lookup_unavailable: 'The mapping service could not be reached during this sync. It will be retried automatically.',
+      not_found: 'No matching TMDB entry was found.',
+      cached_miss: 'A previous attempt failed; it will be retried automatically. Enter an ID below to fix it now.',
+      tmdb_collision: 'Another item in this list already uses this TMDB ID.',
+    };
+
+    function unresolvedReasonText(item) {
+      const reason = String(item.unresolved_reason || '').trim();
+      if (reason && UNRESOLVED_REASON_TEXT[reason]) return UNRESOLVED_REASON_TEXT[reason];
+      // Fall back to the raw code so an unrecognised reason is still visible
+      // rather than silently blank.
+      if (reason) return reason.replace(/_/g, ' ');
+      return '';
+    }
+
+    // True when the user is part-way through mapping an item by hand. The panel
+    // is rebuilt wholesale via innerHTML, and during a sync that happens every
+    // 2s — which destroyed a half-typed TMDB ID and stole focus mid-keystroke.
+    function unresolvedPanelIsBusy(body) {
+      if (!body) return false;
+      const active = document.activeElement;
+      if (active && body.contains(active)) return true;
+      return Array.from(body.querySelectorAll('.unresolved-tmdb-input'))
+        .some(input => String(input.value || '').trim() !== '');
+    }
+
+    function renderUnresolvedPanel(items, force) {
       const panel = el('unresolved-panel');
       const body = el('unresolved-body');
       if (!panel || !body) return;
       panel.style.display = '';
       lastUnresolvedItems = Array.isArray(items) ? items.slice() : [];
+      // Defer a background refresh rather than yanking the row out from under
+      // the user; an explicit action passes force to re-render immediately.
+      if (!force && unresolvedPanelIsBusy(body)) return;
       const search = String(el('unresolved-search') && el('unresolved-search').value || '').trim().toLowerCase();
       if (search) {
         items = lastUnresolvedItems.filter(item => [
@@ -3346,9 +3384,13 @@
         const year = item.year ? ` (${item.year})` : '';
         const listBadge = item.list_name ? `<div class="catalog-note" style="margin-top:2px;font-size:11px">📋 ${esc(item.list_name)}</div>` : '';
         const isCollision = item.unresolved_reason === 'tmdb_collision' || item.anime_conflict_reason === 'tmdb_collision';
+        const reasonText = unresolvedReasonText(item);
+        const conflictNote = item.anime_conflict_reason
+          ? `<div class="catalog-note" style="margin-top:2px;color:var(--orange)"><span aria-hidden="true">⚠</span> ${esc(item.anime_conflict_reason)}</div>`
+          : '';
         const reasonLabel = isCollision
-          ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)">⚠ TMDB collision — another item already occupies TMDB ${esc(item.candidate_tmdb_id || '')}. Enter a <strong>different</strong> TMDB ID below.</div>`
-          : (item.anime_conflict_reason ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)">${esc(item.anime_conflict_reason)}</div>` : '');
+          ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)"><span aria-hidden="true">⚠</span> TMDB collision — another item already occupies TMDB ${esc(item.candidate_tmdb_id || '')}. Enter a <strong>different</strong> TMDB ID below.</div>`
+          : `${reasonText ? `<div class="catalog-note" style="margin-top:4px;color:var(--z400)">${esc(reasonText)}</div>` : ''}${conflictNote}`;
         const confidenceBadge = item.match_confidence && item.match_confidence !== 'unresolved' ? `<div class="catalog-note" style="margin-top:2px">confidence: ${esc(item.match_confidence)}</div>` : '';
         // For collision items the candidate is the *colliding* ID — don't pre-fill
         // it (user must enter the correct distinct ID). For other reasons it's a
@@ -3371,6 +3413,10 @@
         const cacheKey = escAttr(item.cache_key || '');
         const typeLabel = item.media_type === 'tv' ? (item.simkl_type === 'anime' ? 'Anime' : 'TV') : item.media_type === 'movie' ? 'Movie' : esc(item.media_type || '—');
         return `<tr data-cache-key="${cacheKey}">
+          <td style="vertical-align:top">
+            <input type="checkbox" class="unresolved-select" data-cache-key="${cacheKey}"
+                   aria-label="Select ${escAttr(displayTitle)}" />
+          </td>
           <td>
             <div style="font-weight:500">${esc(displayTitle)}<span class="catalog-note">${esc(year)}</span></div>
             ${listBadge}
@@ -3393,7 +3439,15 @@
       const summaryHtml = animeItems.length
         ? `<div class="panel-body" style="padding-top:0;color:var(--z500);font-size:12px">Anime review queue: ${animeItems.length} item${animeItems.length === 1 ? '' : 's'} need franchise-safe review.${regularItems.length ? ` ${regularItems.length} other unresolved item${regularItems.length === 1 ? '' : 's'} too.` : ''}</div>`
         : '';
-      body.innerHTML = `${summaryHtml}<div class="table-scroll"><table><thead><tr><th>Title</th><th>Type</th><th style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      // Bulk actions: this queue routinely holds hundreds of rows, so dismissing
+      // them one at a time is impractical.
+      const bulkHtml = `<div class="panel-body" style="padding-top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" id="unresolved-select-all">Select all (${items.length})</button>
+        <button class="btn btn-sm" type="button" id="unresolved-select-none">Clear selection</button>
+        <button class="btn btn-sm btn-danger" type="button" id="unresolved-dismiss-selected" disabled>Dismiss selected</button>
+        <span class="catalog-note" id="unresolved-selection-count" aria-live="polite"></span>
+      </div>`;
+      body.innerHTML = `${summaryHtml}${bulkHtml}<div class="table-scroll"><table><thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Title</th><th scope="col">Type</th><th scope="col" style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
       body.querySelectorAll('.unresolved-auto-btn').forEach(btn => {
         btn.addEventListener('click', () => autoResolveUnresolvedItem(btn.closest('tr')));
       });
@@ -3403,15 +3457,71 @@
       body.querySelectorAll('.unresolved-dismiss-btn').forEach(btn => {
         btn.addEventListener('click', () => dismissUnresolvedItem(btn.closest('tr')));
       });
+
+      const checkboxes = () => Array.from(body.querySelectorAll('.unresolved-select'));
+      const dismissSelectedBtn = el('unresolved-dismiss-selected');
+      const countNode = el('unresolved-selection-count');
+      function syncSelectionState() {
+        const selected = checkboxes().filter(cb => cb.checked);
+        if (dismissSelectedBtn) dismissSelectedBtn.disabled = selected.length === 0;
+        if (countNode) countNode.textContent = selected.length ? `${selected.length} selected` : '';
+      }
+      checkboxes().forEach(cb => cb.addEventListener('change', syncSelectionState));
+      const selectAllBtn = el('unresolved-select-all');
+      if (selectAllBtn) selectAllBtn.addEventListener('click', () => {
+        checkboxes().forEach(cb => { cb.checked = true; });
+        syncSelectionState();
+      });
+      const selectNoneBtn = el('unresolved-select-none');
+      if (selectNoneBtn) selectNoneBtn.addEventListener('click', () => {
+        checkboxes().forEach(cb => { cb.checked = false; });
+        syncSelectionState();
+      });
+      if (dismissSelectedBtn) dismissSelectedBtn.addEventListener('click', () => {
+        const keys = checkboxes().filter(cb => cb.checked).map(cb => cb.dataset.cacheKey).filter(Boolean);
+        dismissUnresolvedItems(keys);
+      });
+      syncSelectionState();
     }
 
     async function fetchUnresolved() {
+      let result;
       try {
-        const result = await apiPost('/api/profile/unresolved', {});
-        if (result.ok) renderUnresolvedPanel(result.data.items || []);
+        result = await apiPost('/api/profile/unresolved', {});
       } catch (e) {
         console.error('Failed to load unresolved items', e);
+        showToast('Could not load mapping issues — connection unavailable.', true);
+        return;
       }
+      if (!result.ok) {
+        // Previously swallowed, so a failed load was indistinguishable from
+        // "no issues".
+        showToast(result.data?.message || result.data?.error || 'Could not load mapping issues.', true);
+        return;
+      }
+      renderUnresolvedPanel(result.data.items || [], true);
+    }
+
+    async function dismissUnresolvedItems(cacheKeys) {
+      const keys = Array.from(new Set((cacheKeys || []).filter(Boolean)));
+      if (!keys.length) return;
+      const btn = el('unresolved-dismiss-selected');
+      if (btn) { btn.disabled = true; btn.textContent = `Dismissing ${keys.length}...`; }
+      let lastItems = null;
+      let failed = 0;
+      for (const cacheKey of keys) {
+        try {
+          const result = await apiPost('/api/profile/unresolved/dismiss', { cache_key: cacheKey });
+          if (result.ok) lastItems = result.data.items || lastItems;
+          else failed++;
+        } catch {
+          failed++;
+        }
+      }
+      if (btn) btn.textContent = 'Dismiss selected';
+      if (lastItems) renderUnresolvedPanel(lastItems, true);
+      if (failed) showToast(`${failed} of ${keys.length} item${keys.length === 1 ? '' : 's'} could not be dismissed.`, true);
+      else showToast(`Dismissed ${keys.length} item${keys.length === 1 ? '' : 's'}.`, false, true);
     }
 
     async function resolveUnresolvedItem(row) {
@@ -3450,7 +3560,7 @@
         if (mapBtn) { mapBtn.textContent = btnLabel; mapBtn.style.color = 'var(--green)'; }
         // Re-render dashboard stats so unresolved/added counts update instantly.
         if (result.data.profile) { lastDashboardProfile = result.data.profile; renderDashboard(result.data.profile); }
-        setTimeout(() => renderUnresolvedPanel(result.data.items || []), 800);
+        setTimeout(() => renderUnresolvedPanel(result.data.items || [], true), 800);
       } else {
         if (autoBtn) autoBtn.disabled = false;
         if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
@@ -3481,7 +3591,7 @@
       if (result.ok) {
         if (autoBtn) { autoBtn.textContent = result.data.pmdb_added ? '✓ Added to list' : '✓ Auto mapped'; autoBtn.style.color = 'var(--green)'; }
         if (result.data.profile) { lastDashboardProfile = result.data.profile; renderDashboard(result.data.profile); }
-        setTimeout(() => renderUnresolvedPanel(result.data.items || []), 800);
+        setTimeout(() => renderUnresolvedPanel(result.data.items || [], true), 800);
         return;
       }
       if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = 'Auto Map'; }
@@ -3504,7 +3614,7 @@
         return;
       }
       if (result.ok) {
-        renderUnresolvedPanel(result.data.items || []);
+        renderUnresolvedPanel(result.data.items || [], true);
         return;
       }
       // Without this the click looked like a no-op on failure.
@@ -3521,7 +3631,7 @@
     });
     const unresolvedSearch = el('unresolved-search');
     if (unresolvedSearch) unresolvedSearch.addEventListener('input', () => {
-      renderUnresolvedPanel(lastUnresolvedItems);
+      renderUnresolvedPanel(lastUnresolvedItems, true);
       if (lastDashboardProfile) renderErrorsPanel(lastDashboardProfile);
     });
     const issuesTabUnresolved = el('issues-tab-unresolved');

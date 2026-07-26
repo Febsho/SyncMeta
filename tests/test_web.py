@@ -1287,6 +1287,42 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["profile"]["last_results"][0]["items_added"], 1)
         mock_add_item_to_list.assert_called_once_with("pmdb-list-1", 4567, "tv")
 
+    @patch("src.fribb_client.lookup_by_anilist")
+    @patch("web.PublicMetaDBClient.lookup_by_external_id_detailed")
+    def test_auto_resolve_does_not_reuse_a_rejected_candidate(
+        self, mock_lookup_detailed, mock_fribb_anilist,
+    ) -> None:
+        # candidate_tmdb_id is the ID the matcher *declined* — an unverified or
+        # blocklisted community mapping, recorded only as a hint for the user.
+        # Returning it as the automatic answer re-applied the exact mapping the
+        # safety guards rejected.
+        mock_fribb_anilist.return_value = None
+        mock_lookup_detailed.return_value = {"tmdb_id": None, "status": "miss"}
+
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        private_profile = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        private_profile["unresolved_items"] = [{
+            "cache_key": "anime-blocked",
+            "title": "Example Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "12345",
+            "anime_resolve_mode": "list_identity",
+            # 277700 is on the known-bad blocklist in matcher.py.
+            "candidate_tmdb_id": 277700,
+            "unresolved_reason": "unconfirmed_mapping",
+        }]
+        web._profile_store._profiles[profile["profile_id"]] = private_profile
+
+        response = self.client.post("/api/profile/unresolved/auto-resolve", json={"cache_key": "anime-blocked"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(data["status"], "unresolved")
+        self.assertIn("No automatic mapping", data["message"])
+
     @patch("web.PublicMetaDBClient.delete_list")
     def test_delete_managed_list_endpoint_removes_mdblist_selection(self, mock_delete_list) -> None:
         profile = web._profile_store.create_profile("secret", {

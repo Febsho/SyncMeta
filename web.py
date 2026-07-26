@@ -812,12 +812,12 @@ def _make_anime_root_resolver(config: AppConfig):
 
 
 def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) -> int | None:
-    candidate_tmdb = item.get("candidate_tmdb_id")
-    try:
-        if candidate_tmdb:
-            return _parse_tmdb_id(candidate_tmdb)
-    except ValueError:
-        pass
+    # candidate_tmdb_id is deliberately NOT returned up front. It is the ID the
+    # matcher just declined — either an unconfirmed zero-vote community mapping or
+    # one on the known-bad blocklist — and it is recorded only as a hint for the
+    # user. Handing it back as an automatic answer would re-apply the exact
+    # mapping the safety guards rejected. Instead, run a real resolve below; the
+    # matcher will return the candidate only if it can now verify it.
     config = _config_from_profile(private_profile, dry_run=False, sync_modes={"lists": True, "history": False, "resume": False})
     pmdb = PublicMetaDBClient(config.pmdb)
     matcher = ItemMatcher(
@@ -833,6 +833,8 @@ def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) ->
     )
     return matcher.resolve_tmdb_id({
         "title": item.get("title"),
+        # Carried through so the widened title comparison still applies here.
+        "title_variants": item.get("title_variants") or [],
         "year": item.get("year"),
         "media_type": item.get("media_type"),
         "simkl_type": item.get("simkl_type"),
@@ -844,6 +846,10 @@ def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) ->
         "root_anilist_id": item.get("root_anilist_id"),
         "anidb_id": item.get("anidb_id"),
         "tvdb_id": item.get("tvdb_id"),
+        # Part of ItemMatcher._cache_key. Omitting it produced a different key
+        # than the one stored on the unresolved item, so the result was cached
+        # where the next sync would never look for it.
+        "anime_resolve_mode": item.get("anime_resolve_mode") or "",
     })
 
 
