@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SyncMeta</title>
   <style>
-    :root{--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24}
+    :root{color-scheme:dark;--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24}
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--black);color:var(--z300);min-height:100vh;-webkit-font-smoothing:antialiased}
     nav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,.8);backdrop-filter:blur(24px);border-bottom:1px solid rgba(255,255,255,.1);padding:0 24px}
@@ -54,7 +54,13 @@
     .options-col .form-row{margin-bottom:0}
     .form-row{margin-bottom:14px}.form-row:last-child{margin-bottom:0}.form-row label{display:block;font-size:11px;font-weight:600;color:var(--z500);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px}
     .form-row input[type=text],.form-row input[type=password],.form-row input[type=number],.form-row select{width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:13px;font-family:inherit}
-    .form-row input:focus,.form-row select:focus{outline:none;border-color:var(--z600)} .form-row input::placeholder{color:var(--z600)}
+    .form-row input:focus,.form-row select:focus{border-color:var(--accent)} .form-row input::placeholder{color:var(--z600)}
+    /* A visible focus ring for every keyboard-reachable control. The previous
+       rule removed the outline and replaced it with a z700->z600 border shift of
+       roughly 1.2:1 contrast, well under the 3:1 WCAG 2.4.11 minimum, and buttons
+       had no focus style at all. */
+    :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+    .btn:focus-visible,.catalog-row:focus-visible,.status-card:focus-visible,.status-list-btn:focus-visible,.settings-nav-item:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .hint{font-size:11px;color:var(--z600);margin-top:4px}.hint a{color:var(--z400);text-decoration:none}.hint a:hover{color:var(--white)}
     .guide-box{padding:16px 18px;border:1px solid var(--z800);border-radius:10px;background:linear-gradient(180deg,rgba(39,39,46,.38),rgba(10,10,11,.88));margin-bottom:16px}
     .guide-title{font-size:13px;font-weight:800;color:var(--white);margin-bottom:8px}
@@ -109,6 +115,8 @@
     .dry-run-preview-list{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--z400)}
     .dry-run-preview-list .preview-row{padding:4px 8px;border-radius:4px;background:var(--z950);border:1px solid var(--z900)}
     .hidden{display:none}
+    /* Visible to assistive tech only — for labels that would be redundant on screen. */
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
     .inline-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:nowrap;min-width:150px}
     .auth-box{margin-top:12px;padding:12px;border:1px solid var(--z800);border-radius:8px;background:var(--z900)}
     .auth-box.hidden{display:none}
@@ -478,16 +486,16 @@
                   <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists in <strong>Lists</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
                 </div>
                 <div class="form-row">
-                  <label>Profile UUID</label>
+                  <label for="profile-id">Profile UUID</label>
                   <input type="text" id="profile-id" class="mono" placeholder="Leave blank to create a new profile" autocomplete="off">
                   <div class="hint">Use this UUID + password to reopen the same profile in another browser or server.</div>
                 </div>
                 <div class="form-row">
-                  <label>Profile Password</label>
+                  <label for="profile-password">Profile Password</label>
                   <input type="password" id="profile-password" placeholder="Required to save, load, and sync this profile" autocomplete="off">
                 </div>
                 <div class="form-row">
-                  <label>New Profile Password</label>
+                  <label for="profile-new-password">New Profile Password</label>
                   <input type="password" id="profile-new-password" placeholder="Only fill this to reset your profile password" autocomplete="off">
                   <div class="hint">Use your profile UUID plus a new password to reset access.</div>
                 </div>
@@ -512,7 +520,7 @@
                     <div class="conn-card-desc" style="margin-bottom:0">Destination. All synced lists and activity go here.</div>
                   </div>
                   <div class="conn-card-pmdb-field">
-                    <div class="form-row" style="margin-bottom:0"><label>API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
+                    <div class="form-row" style="margin-bottom:0"><label for="pmdb-api-key">API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
                   </div>
                 </div>
               </div>
@@ -522,15 +530,15 @@
                   <div class="conn-card-desc">Movies, shows, anime, watch history, and PIN auth.</div>
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
                   <div class="form-row">
-                    <label>Redirect URL</label>
+                    <label for="simkl-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="simkl-redirect-url" readonly value="">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('simkl-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label>Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
-                  <div class="form-row"><label>Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
-                  <div class="form-row"><label>Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-client-id">Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-client-secret">Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
+                  <div class="form-row"><label for="simkl-access-token">Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-simkl-auth" onclick="startSimklAuth()">Get SIMKL Token</button>
                     <span class="actions-meta" id="simkl-auth-status">Start PIN auth here if no token yet.</span>
@@ -555,16 +563,16 @@
                   <input type="checkbox" id="trakt-watchlist-shows-toggle" checked class="hidden">
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>, then paste the credentials below. Use the redirect URI if asked.</div>
                   <div class="form-row">
-                    <label>Redirect URI</label>
+                    <label for="trakt-redirect-url">Redirect URI</label>
                     <div class="copy-row">
                       <input type="text" id="trakt-redirect-url" readonly value="">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('trakt-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label>Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
-                  <div class="form-row"><label>Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
-                  <div class="form-row"><label>Access Token</label><input type="password" id="trakt-access-token" placeholder="Filled after Trakt auth" autocomplete="off"></div>
-                  <div class="form-row"><label>Refresh Token</label><input type="password" id="trakt-refresh-token" placeholder="Saved for future refresh support" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-client-id">Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-client-secret">Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-access-token">Access Token</label><input type="password" id="trakt-access-token" placeholder="Filled after Trakt auth" autocomplete="off"></div>
+                  <div class="form-row"><label for="trakt-refresh-token">Refresh Token</label><input type="password" id="trakt-refresh-token" placeholder="Saved for future refresh support" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-trakt-auth" onclick="startTraktAuth()">Connect Trakt</button>
                     <span class="actions-meta" id="trakt-auth-status">Start device auth here if no token yet.</span>
@@ -587,12 +595,12 @@
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
-                  <div class="form-row" style="margin-bottom:0"><label>Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
                 </div>
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Selected MDBList catalog lists. MDBList watch status sync is handled by MDBList's own Trakt/Plex integrations.</div>
-                  <div class="form-row" style="margin-bottom:0"><label>API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
+                  <div class="form-row" style="margin-bottom:0"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
                 </div>
               </div>
             </div>
@@ -646,7 +654,7 @@
                     <input type="text" id="trakt-discover-query" placeholder="Search public Trakt lists..." autocomplete="off">
                     <button class="btn btn-sm" type="button" onclick="searchTraktLists()">Search</button>
                   </div>
-                  <div class="catalog-list" id="trakt-catalog-list"></div>
+                  <div class="catalog-list" id="trakt-catalog-list" role="listbox" aria-multiselectable="true" aria-label="Trakt lists to sync"></div>
                 </div>
               </div>
               <div class="lists-subtab" id="lsub-mdblist">
@@ -669,7 +677,7 @@
                     <input type="text" id="mdblist-discover-query" placeholder="Search public MDBList lists..." autocomplete="off">
                     <button class="btn btn-sm" type="button" onclick="searchMdbListLists()">Search</button>
                   </div>
-                  <div class="catalog-list" id="mdblist-list"></div>
+                  <div class="catalog-list" id="mdblist-list" role="listbox" aria-multiselectable="true" aria-label="MDBList lists to sync"></div>
                 </div>
               </div>
             </div>
@@ -681,54 +689,54 @@
               <div class="settings-group form-section">
                 <div class="settings-group-title">List Sync</div>
                 <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label>Sync lists automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
                 <div class="form-row" style="margin-top:12px">
-                  <label>Update Every (Seconds)</label>
+                  <label for="opt-interval-seconds">Update Every (Seconds)</label>
                   <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
                   <div class="hint">Minimum 21600 s (6 h). Default 43200 s (12 h). Scheduled from end of last successful run.</div>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label>Remove items no longer in source</label></div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label>Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                <div class="toggle-row"><label for="opt-remove-missing" class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label for="opt-remove-missing">Remove items no longer in source</label></div>
+                <div class="toggle-row"><label for="opt-delete-disabled-lists" class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label for="opt-delete-disabled-lists">Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">PMDB Native Watchlist</div>
                 <div class="settings-group-desc">Select which services contribute their "plan to watch" items to your PublicMetaDB native Watchlist. Arrows show the sync direction.</div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label>SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label>Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label>AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row"><label for="opt-simkl-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label for="opt-simkl-pmdb-watchlist">SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row"><label for="opt-trakt-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label for="opt-trakt-pmdb-watchlist">Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
+                <div class="toggle-row" style="margin-bottom:0"><label for="opt-anilist-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label for="opt-anilist-pmdb-watchlist">AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">Watch History</div>
                 <div class="settings-group-desc">Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.</div>
                 <div class="form-row">
-                  <label>Source</label>
+                  <label for="opt-activity-history-source">Source</label>
                   <select id="opt-activity-history-source">
                     <option value="off">Off</option>
                     <option value="simkl">SIMKL</option>
                     <option value="trakt">Trakt</option>
                   </select>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label>Sync watch history automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
                 <div class="form-row" style="margin-top:12px">
-                  <label>Auto-Sync Every (Seconds)</label>
+                  <label for="opt-history-interval-seconds">Auto-Sync Every (Seconds)</label>
                   <input type="number" id="opt-history-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
                   <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
                 </div>
-                <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label>Only import SIMKL anime watch history</label></div>
+                <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
               </div>
               <div class="settings-group form-section">
                 <div class="settings-group-title">Resume Progress</div>
                 <div class="settings-group-desc">Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.</div>
                 <div class="form-row">
-                  <label>Source</label>
+                  <label for="opt-activity-resume-source">Source</label>
                   <select id="opt-activity-resume-source">
                     <option value="off">Off</option>
                     <option value="trakt">Trakt</option>
                   </select>
                 </div>
-                <div class="toggle-row"><label class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label>Sync resume progress automatically in the background</label></div>
+                <div class="toggle-row"><label for="opt-auto-resume-sync" class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label for="opt-auto-resume-sync">Sync resume progress automatically in the background</label></div>
                 <div class="form-row" style="margin-bottom:0">
-                  <label>Auto-Sync Every (Seconds)</label>
+                  <label for="opt-resume-interval-seconds">Auto-Sync Every (Seconds)</label>
                   <input type="number" id="opt-resume-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
                   <div class="hint">Minimum 86400 s (24 h). Only affects automatic resume sync.</div>
                 </div>
@@ -737,7 +745,7 @@
                 <div class="settings-group-title">List Visibility</div>
                 <div class="settings-group-desc">Control the default visibility of synced lists in PublicMetaDB for each source.</div>
                 <div class="form-row">
-                  <label>SIMKL Lists</label>
+                  <label for="opt-simkl-visibility">SIMKL Lists</label>
                   <select id="opt-simkl-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -745,7 +753,7 @@
                   <div class="hint">Recommended: private — these are your personal SIMKL status lists.</div>
                 </div>
                 <div class="form-row">
-                  <label>AniList Lists</label>
+                  <label for="opt-anilist-visibility">AniList Lists</label>
                   <select id="opt-anilist-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -753,7 +761,7 @@
                   <div class="hint">Recommended: private — these reflect your personal AniList activity.</div>
                 </div>
                 <div class="form-row">
-                  <label>Trakt Personal Lists</label>
+                  <label for="opt-trakt-personal-visibility">Trakt Personal Lists</label>
                   <select id="opt-trakt-personal-visibility">
                     <option value="private">Private</option>
                     <option value="public">Public</option>
@@ -761,7 +769,7 @@
                   <div class="hint">Applies to your Trakt watchlist and personal-style catalogs.</div>
                 </div>
                 <div class="form-row">
-                  <label>Trakt Public Lists</label>
+                  <label for="opt-trakt-public-visibility">Trakt Public Lists</label>
                   <select id="opt-trakt-public-visibility">
                     <option value="public">Public</option>
                     <option value="private">Private</option>
@@ -769,7 +777,7 @@
                   <div class="hint">Applies to liked Trakt lists and Discover/public Trakt lists.</div>
                 </div>
                 <div class="form-row" style="margin-bottom:0">
-                  <label>MDBList Lists</label>
+                  <label for="opt-mdblist-visibility">MDBList Lists</label>
                   <select id="opt-mdblist-visibility">
                     <option value="public">Public</option>
                     <option value="private">Private</option>
@@ -802,11 +810,15 @@
     </div>
   </footer>
 
-  <div class="toast" id="toast">
+  <!-- role=status + aria-live so every success and error is announced. Without
+       these the toast was the app's only feedback channel and was invisible to
+       assistive technology. -->
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
     <div class="toast-message" id="toast-message"></div>
     <div class="toast-hint hidden" id="toast-hint"></div>
     <div class="toast-actions hidden" id="toast-actions">
       <button type="button" class="toast-action" id="toast-copy">Copy details</button>
+      <button type="button" class="toast-action" id="toast-dismiss" aria-label="Dismiss notification">Dismiss</button>
     </div>
   </div>
 
@@ -916,8 +928,13 @@
     let profileDraftDirty = false;
     let pollingIntervalMs = 0;
     let statusFetchInFlight = null;
+    let statusFetchToken = null;
     const POLL_RUNNING_MS = 2000;
     const POLL_IDLE_MS = 30000;
+    // How long to keep polling fast while waiting for a just-triggered sync to
+    // be picked up by a worker and reported as running.
+    const FAST_POLL_HOLD_MS = 20000;
+    let fastPollHoldUntil = 0;
 
     function el(id) { return document.getElementById(id); }
 
@@ -940,8 +957,33 @@
       }
     }
 
+    // A just-triggered sync is queued before it starts running, so the next
+    // status response can still report sync_running=false. Without a hold the
+    // interval would drop straight back to the 30s idle tick and the dashboard
+    // would appear frozen for up to half a minute after the user clicked Sync.
+    function holdFastPolling(ms) {
+      fastPollHoldUntil = Date.now() + Number(ms || FAST_POLL_HOLD_MS);
+      setPollingInterval(POLL_RUNNING_MS);
+    }
+
+    function releaseFastPollingHold() {
+      fastPollHoldUntil = 0;
+    }
+
     function refreshPollingForProfile(profile) {
-      setPollingInterval(profile && profile.sync_running ? POLL_RUNNING_MS : POLL_IDLE_MS);
+      const queue = (profile && profile.queue_status) || {};
+      const queuedOrRunning = Number(queue.profile_queue_position || 0) > 0 || !!queue.profile_running;
+      if ((profile && profile.sync_running) || queuedOrRunning) {
+        // The backend has acknowledged the run; normal rules take over.
+        releaseFastPollingHold();
+        setPollingInterval(POLL_RUNNING_MS);
+        return;
+      }
+      if (Date.now() < fastPollHoldUntil) {
+        setPollingInterval(POLL_RUNNING_MS);
+        return;
+      }
+      setPollingInterval(POLL_IDLE_MS);
     }
 
     function refreshRedirectUrlHints() {
@@ -957,11 +999,11 @@
       if (!input || !input.value) return;
       try {
         await navigator.clipboard.writeText(input.value);
-        showToast('Copied redirect URL', true);
+        showToast('Copied redirect URL', false, true);
       } catch {
         input.select();
         document.execCommand('copy');
-        showToast('Copied redirect URL', true);
+        showToast('Copied redirect URL', false, true);
       }
     }
 
@@ -1379,8 +1421,24 @@
       }
       if (!loadTraktDeviceState()) {
         setTraktAuthCode('');
-        setTraktAuthStatus(hasSavedSecret('trakt', 'access_token_saved') ? 'Trakt access token is stored securely for this profile.' : 'Start Trakt device auth here if you do not have a token yet.', false);
+        setTraktAuthStatus(hasSavedSecret('trakt', 'access_token_saved') ? traktTokenStatusText() : 'Start Trakt device auth here if you do not have a token yet.', false);
       }
+    }
+
+    // The token expiry was stored and never shown, so a lapsing Trakt connection
+    // gave no warning until a sync failed.
+    function traktTokenStatusText() {
+      const base = 'Trakt access token is stored securely for this profile.';
+      if (!traktAccessTokenExpiresAt) return base;
+      const expiresAt = new Date(traktAccessTokenExpiresAt).getTime();
+      if (!Number.isFinite(expiresAt)) return base;
+      const msLeft = expiresAt - Date.now();
+      if (msLeft <= 0) return 'Trakt access token has expired — reconnect Trakt.';
+      const daysLeft = Math.floor(msLeft / 86400000);
+      if (daysLeft <= 7) {
+        return `Trakt access token expires ${daysLeft <= 0 ? 'today' : `in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`} — it refreshes automatically, but reconnect if syncs start failing.`;
+      }
+      return `${base} Expires ${new Date(traktAccessTokenExpiresAt).toLocaleDateString()}.`;
     }
 
     function flashSaved() {
@@ -1412,13 +1470,22 @@
     }
 
     // 'state' is 'ok' | 'off' | 'err'
+    const DOT_STATE_TEXT = { ok: 'Connected', off: 'Not connected', err: 'Connection error' };
+
     function setDot(id, okOrState, errorMsg) {
       const node = el(id);
       if (!node) return;
       let state = okOrState;
       if (typeof okOrState === 'boolean') state = okOrState ? 'ok' : 'off';
       node.className = 'dot dot-' + state;
-      node.title = state === 'err' ? (errorMsg || 'Token error — reconnect this service') : '';
+      const label = state === 'err'
+        ? (errorMsg || 'Token error — reconnect this service')
+        : (DOT_STATE_TEXT[state] || '');
+      node.title = state === 'err' ? label : '';
+      // The dot conveys connection state by colour alone, which is invisible to
+      // screen readers and to anyone who cannot distinguish the hues.
+      node.setAttribute('role', 'img');
+      node.setAttribute('aria-label', DOT_STATE_TEXT[state] || '');
     }
 
     // Parse sync_error text to figure out which provider is broken and show
@@ -1492,7 +1559,7 @@
         const buttons = SIMKL_STATUS_OPTIONS[mediaType].map((item, index, items) => {
           const active = simklSelectedStatuses[mediaType].indexOf(item.value) !== -1;
           const wide = items.length % 2 === 1 && index === items.length - 1 ? ' wide' : '';
-          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" data-simkl-media="${esc(mediaType)}" data-simkl-status="${esc(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
+          return `<button type="button" class="status-card ${active ? 'active' : ''}${wide}" aria-pressed="${active ? 'true' : 'false'}" data-simkl-media="${escAttr(mediaType)}" data-simkl-status="${escAttr(item.value)}"><span class="status-card-mark">+</span><span>${esc(item.label)}</span></button>`;
         }).join('');
         const title = mediaType.charAt(0).toUpperCase() + mediaType.slice(1);
         return `<div class="status-group"><div class="status-group-title">${esc(title)}</div><div class="status-grid">${buttons}</div></div>`;
@@ -1520,7 +1587,7 @@
       const buttons = [`<button type="button" class="status-list-btn ${allActive ? 'active' : ''}" id="anilist-select-all"><span>All</span><span>${allActive ? 'On' : 'Off'}</span></button>`]
         .concat(ANILIST_STATUS_OPTIONS.map(item => {
           const active = anilistSelectedStatuses.indexOf(item.value) !== -1;
-          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" data-anilist-status="${esc(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
+          return `<button type="button" class="status-list-btn ${active ? 'active' : ''}" aria-pressed="${active ? 'true' : 'false'}" data-anilist-status="${escAttr(item.value)}"><span>${esc(item.label)}</span><span>${active ? 'On' : 'Off'}</span></button>`;
         }))
         .join('');
 
@@ -1570,6 +1637,9 @@
         siteStatsPolling = null;
       }
       stopProfileLogPolling();
+      // This 1s countdown timer had no stop path and kept ticking on the landing
+      // page and after logout.
+      stopNextSyncTicker();
     }
 
     function switchView(name) {
@@ -1580,7 +1650,11 @@
         name = 'dashboard';
       }
       document.querySelectorAll('.nav-link').forEach(link => {
-        link.classList.toggle('active', link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard' && !['logs'].includes(navTarget)));
+        const isActive = link.dataset.nav === navTarget || (name === 'dashboard' && link.dataset.nav === 'dashboard' && !['logs'].includes(navTarget));
+        link.classList.toggle('active', isActive);
+        // Which view you are on was signalled by a CSS class only.
+        if (isActive) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
       });
       el('view-dashboard').style.display = name === 'dashboard' ? 'block' : 'none';
       el('view-logs').style.display = name === 'logs' ? 'block' : 'none';
@@ -1653,7 +1727,10 @@
         return;
       }
       body.innerHTML = profileLogs.map(entry => {
-        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+        // /api/logs reports `ts` as epoch seconds; tolerate an ISO `timestamp`
+        // too so either log store's shape renders a time instead of a blank.
+        const when = entry.timestamp || (entry.ts ? entry.ts * 1000 : null);
+        const stamp = when ? new Date(when).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
         const level = String(entry.level || 'INFO').toUpperCase();
         return `<div class="log-row">
           <div class="log-time">${esc(stamp)}</div>
@@ -1673,8 +1750,9 @@
         renderProfileLogs();
       }
       try {
-        const profileParam = sessionProfileId ? '&profile=' + encodeURIComponent(sessionProfileId) : '';
-        const resp = await fetch('/api/logs?after=' + profileLogsCursor + '&limit=' + (reset ? 300 : 200) + profileParam);
+        // No profile parameter: the server scopes logs to the session. Sending a
+        // client-side id was how an empty value silently disabled the filter.
+        const resp = await fetch('/api/logs?after=' + profileLogsCursor + '&limit=' + (reset ? 300 : 200));
         if (!resp.ok) {
           if (statusNode) statusNode.textContent = resp.status === 401 ? 'Sign in to view your profile logs.' : 'Could not load logs.';
           stopProfileLogPolling();
@@ -1722,11 +1800,26 @@
     }
 
     async function clearProfileLogs() {
-      try { await fetch('/api/logs/clear', { method: 'POST' }); } catch {}
+      const statusNode = el('profile-logs-status');
+      let resp;
+      try {
+        resp = await fetch('/api/logs/clear', { method: 'POST' });
+      } catch (err) {
+        console.debug('Log clear error:', err);
+        if (statusNode) statusNode.textContent = 'Could not clear logs — connection unavailable.';
+        return;
+      }
+      if (!resp.ok) {
+        if (statusNode) {
+          statusNode.textContent = resp.status === 401
+            ? 'Sign in to clear your profile logs.'
+            : 'Could not clear logs.';
+        }
+        return;
+      }
       profileLogs = [];
       profileLogsCursor = 0;
       renderProfileLogs();
-      const statusNode = el('profile-logs-status');
       if (statusNode) statusNode.textContent = 'Logs cleared.';
     }
 
@@ -1782,10 +1875,36 @@
       return 'in ' + Math.floor(delta / 86400) + 'd';
     }
 
+    // Safe for element *text* only. Serializing a text node escapes &, < and >
+    // but leaves quotes alone, so this must never be used inside an attribute.
     function esc(value) {
       const node = document.createElement('div');
       node.textContent = value;
       return node.innerHTML;
+    }
+
+    // The list pickers are div-based rows, so they need explicit keyboard
+    // activation — without this the app's core function (choosing which lists
+    // sync) was reachable by mouse only.
+    function onActivate(node, handler) {
+      node.addEventListener('click', handler);
+      node.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        event.preventDefault(); // Space would otherwise scroll the page
+        handler(event);
+      });
+    }
+
+    // Safe for quoted attribute values. Provider IDs and list names come from
+    // third-party APIs, and a value containing a quote would otherwise close the
+    // attribute early and inject markup.
+    function escAttr(value) {
+      return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function renderSiteStats(stats) {
@@ -1820,13 +1939,21 @@
         ['Trakt', sourceUsage.trakt || 0],
         ['MDBList', sourceUsage.mdblist || 0],
       ].map(([label, count]) => `<tr><td>${label}</td><td class="num">${count}</td><td class="num">${(totals.profiles || 0) ? Math.round((count / totals.profiles) * 100) : 0}%</td></tr>`).join('')}</tbody></table></div>`;
-      el('site-stats-window').innerHTML = `<div class="table-scroll"><table><thead><tr><th>Metric</th><th class="num">Last 24h</th></tr></thead><tbody>
+      // The backend already computes a run-outcome breakdown and a duplicate
+      // count; both were dropped, leaving a bare "sync runs" number with no
+      // indication of how many of those runs actually succeeded.
+      el('site-stats-window').innerHTML = `<div class="table-scroll"><table><thead><tr><th scope="col">Metric</th><th scope="col" class="num">Last 24h</th></tr></thead><tbody>
         <tr><td>Sync runs</td><td class="num">${last24h.sync_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Completed</td><td class="num c-green">${last24h.completed_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Failed</td><td class="num ${(last24h.failed_runs || 0) > 0 ? 'c-red' : 'c-dim'}">${last24h.failed_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Stopped</td><td class="num ${(last24h.stopped_runs || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.stopped_runs || 0}</td></tr>
+        <tr><td>&nbsp;&nbsp;Dry runs</td><td class="num c-dim">${last24h.dry_runs || 0}</td></tr>
         <tr><td>Lists processed</td><td class="num">${last24h.lists || 0}</td></tr>
         <tr><td>Items fetched</td><td class="num">${last24h.fetched || 0}</td></tr>
         <tr><td>Items resolved</td><td class="num">${last24h.resolved || 0}</td></tr>
         <tr><td>Items added</td><td class="num c-green">${last24h.added || 0}</td></tr>
         <tr><td>Items removed</td><td class="num c-red">${last24h.removed || 0}</td></tr>
+        <tr><td>Duplicates</td><td class="num ${(last24h.duplicates || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.duplicates || 0}</td></tr>
         <tr><td>Unresolved</td><td class="num ${(last24h.unresolved || 0) > 0 ? 'c-orange' : 'c-dim'}">${last24h.unresolved || 0}</td></tr>
         <tr><td>Errors</td><td class="num ${(last24h.errors || 0) > 0 ? 'c-red' : 'c-dim'}">${last24h.errors || 0}</td></tr>
       </tbody></table></div>`;
@@ -1875,6 +2002,12 @@
         hintNode.classList.add('hidden');
       }
 
+      // The actions row is shown whenever there is anything to act on. Errors
+      // additionally get a copy button; every toast gets a manual dismiss, since
+      // auto-hide used to be the only way to clear one.
+      const dismissBtn = el('toast-dismiss');
+      if (dismissBtn) dismissBtn.onclick = () => hideToast();
+
       const showCopy = isError && (provider || status);
       if (showCopy) {
         const details = [
@@ -1895,8 +2028,9 @@
         actionsNode.classList.remove('hidden');
       } else {
         copyBtn.onclick = null;
-        actionsNode.classList.add('hidden');
       }
+      copyBtn.classList.toggle('hidden', !showCopy);
+      actionsNode.classList.remove('hidden');
 
       toast.className = 'toast show' + (isError ? ' error' : '') + (isSuccess ? ' success' : '');
       if (toastHideTimer) clearTimeout(toastHideTimer);
@@ -1905,6 +2039,15 @@
         toast.className = 'toast';
         toastHideTimer = null;
       }, duration);
+    }
+
+    function hideToast() {
+      const toast = el('toast');
+      if (toast) toast.className = 'toast';
+      if (toastHideTimer) {
+        clearTimeout(toastHideTimer);
+        toastHideTimer = null;
+      }
     }
 
     function flattenStatusMessage(message) {
@@ -2135,11 +2278,11 @@
         rows = defaultItems.map(item => {
           const isWatchlist = item.source === 'watchlist';
           const selected = isWatchlist ? isTraktWatchlistEnabled(item.watchlistMediaType) : isTraktListSelected(traktListKey(item));
-          const attrs = isWatchlist ? `data-trakt-watchlist="${esc(item.watchlistMediaType)}"` : `data-trakt-key="${esc(traktListKey(item))}"`;
+          const attrs = isWatchlist ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : `data-trakt-key="${escAttr(traktListKey(item))}"`;
           const meta = isWatchlist ? 'Trakt' : traktCatalogMeta(item);
           return `
-            <div class="catalog-row ${selected ? 'selected' : ''}" ${attrs}>
-              <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+            <div class="catalog-row ${selected ? 'selected' : ''}" ${attrs} role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+              <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
               <div class="catalog-body">
                 <div class="catalog-title">${esc(item.name)}</div>
                 <div class="catalog-meta">${esc(meta)}</div>
@@ -2169,8 +2312,8 @@
         }
         rows = enabledItems.length
           ? enabledItems.map(item => `
-            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${esc(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${esc(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''}>
-              <div class="catalog-check">&#10003;</div>
+            <div class="catalog-row selected" ${item.key ? `data-trakt-key="${escAttr(item.key)}"` : ''} ${item.removable === 'watchlist' ? `data-trakt-watchlist="${escAttr(item.watchlistMediaType)}"` : ''} ${item.removable === 'liked-all' ? 'data-trakt-liked-all="1"' : ''} role="option" tabindex="0" aria-selected="true">
+              <div class="catalog-check" aria-hidden="true">&#10003;</div>
               <div class="catalog-body">
                 <div class="catalog-title">${esc(item.name)}</div>
                 <div class="catalog-meta">${esc(item.meta)}</div>
@@ -2192,8 +2335,8 @@
             const key = traktListKey(item);
             const selected = traktSyncAllLikedLists && item.source === 'liked' ? true : isTraktListSelected(key);
             return `
-              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${esc(key)}">
-                <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+              <div class="catalog-row ${selected ? 'selected' : ''}" data-trakt-key="${escAttr(key)}" role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+                <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
                 <div class="catalog-body">
                   <div class="catalog-title">${esc(item.name)}</div>
                   <div class="catalog-meta">${esc(traktCatalogMeta(item))}</div>
@@ -2207,7 +2350,7 @@
 
       el('trakt-catalog-list').innerHTML = rows;
       document.querySelectorAll('#trakt-catalog-list [data-trakt-watchlist]').forEach(node => {
-        node.addEventListener('click', () => toggleTraktWatchlist(node.dataset.traktWatchlist));
+        onActivate(node, () => toggleTraktWatchlist(node.dataset.traktWatchlist));
       });
       document.querySelectorAll('#trakt-catalog-list [data-trakt-liked-all="1"]').forEach(node => {
         node.addEventListener('click', () => {
@@ -2218,7 +2361,7 @@
         });
       });
       document.querySelectorAll('#trakt-catalog-list [data-trakt-key]').forEach(node => {
-        node.addEventListener('click', () => toggleTraktListSelection(node.dataset.traktKey));
+        onActivate(node, () => toggleTraktListSelection(node.dataset.traktKey));
       });
     }
 
@@ -2368,8 +2511,8 @@
           item.likes ? `${item.likes} likes` : '',
         ].filter(Boolean).join(' · ');
         return `
-          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${esc(key)}">
-            <div class="catalog-check">${selected ? '&#10003;' : ''}</div>
+          <div class="catalog-row ${selected ? 'selected' : ''}" data-mdblist-key="${escAttr(key)}" role="option" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
+            <div class="catalog-check" aria-hidden="true">${selected ? '&#10003;' : ''}</div>
             <div class="catalog-body">
               <div class="catalog-title">${esc(item.name)}</div>
               <div class="catalog-meta">${esc(meta)}</div>
@@ -2380,7 +2523,7 @@
       }).join('');
 
       document.querySelectorAll('[data-mdblist-key]').forEach(node => {
-        node.addEventListener('click', () => toggleMdbListSelection(node.dataset.mdblistKey));
+        onActivate(node, () => toggleMdbListSelection(node.dataset.mdblistKey));
       });
     }
 
@@ -2729,7 +2872,7 @@
       scheduleTraktDeviceCheck(1000);
     }
 
-    function renderEmptyDashboard(message) {
+    function renderEmptyDashboard(message, keepPolling) {
       lastDashboardProfile = null;
       currentResultsPage = 1;
       pendingDeleteListName = '';
@@ -2759,13 +2902,60 @@
       if (nextBadge) nextBadge.classList.add('hidden');
       const dryRunPreview = el('dry-run-preview-container');
       if (dryRunPreview) { dryRunPreview.classList.add('hidden'); dryRunPreview.innerHTML = ''; }
+      // This state disables the action buttons, so the next successful status
+      // must always re-render to restore them. Clearing the fingerprint stops
+      // renderDashboard being skipped as "unchanged" and leaving them stuck.
+      lastStatusRenderKey = '';
+      if (keepPolling) {
+        // Transient transport failure: keep checking at the idle rate so the page
+        // recovers on its own. Stopping the timer here previously left a single
+        // failed poll on first load looking like a permanently dead page.
+        setPollingInterval(POLL_IDLE_MS);
+        return;
+      }
+      // No profile to poll for — stop until one is saved or loaded.
       if (polling) {
         clearInterval(polling);
         polling = null;
       }
+      stopNextSyncTicker();
     }
 
     let nextSyncTicker = null;
+    const HISTORY_PAGE_SIZE = 25;
+    let historyPage = 1;
+    let historyPageItems = [];
+
+    async function goToHistoryPage(page) {
+      const target = Math.max(1, Number(page) || 1);
+      if (target === 1) {
+        historyPage = 1;
+        historyPageItems = [];
+        if (lastDashboardProfile) renderDashboard(lastDashboardProfile);
+        return;
+      }
+      const data = await fetchSyncRuns(target, HISTORY_PAGE_SIZE);
+      if (!data) return;
+      historyPage = target;
+      // The runs endpoint reports per-run `totals`; the history rows are built
+      // from a `results` array, so adapt one to the other.
+      historyPageItems = (Array.isArray(data.items) ? data.items : []).map(run => {
+        const totals = run.totals || {};
+        return {
+          run_id: run.run_id,
+          timestamp: run.timestamp,
+          status: run.status,
+          dry_run: run.dry_run,
+          error_message: run.error_message,
+          results: [{
+            items_added: totals.added || 0,
+            items_removed: totals.removed || 0,
+            error_count: totals.errors || 0,
+          }],
+        };
+      });
+      if (lastDashboardProfile) renderDashboard(lastDashboardProfile);
+    }
     function formatCountdown(seconds) {
       seconds = Math.max(0, Math.floor(seconds));
       if (seconds < 60) return seconds + 's';
@@ -2825,6 +3015,13 @@
     function ensureNextSyncTicker() {
       if (nextSyncTicker) return;
       nextSyncTicker = setInterval(updateNextSyncBadge, 1000);
+    }
+
+    function stopNextSyncTicker() {
+      if (nextSyncTicker) {
+        clearInterval(nextSyncTicker);
+        nextSyncTicker = null;
+      }
     }
 
     function renderDryRunPreview(profile, results) {
@@ -2909,7 +3106,7 @@
         unresolved: rows.filter(row => Number(row.items_skipped_unresolved || 0) > 0).length,
         ambiguous: rows.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0).length,
       };
-      node.innerHTML = filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${key}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
+      node.innerHTML = filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${escAttr(key)}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
       node.querySelectorAll('[data-results-filter]').forEach(btn => {
         btn.addEventListener('click', () => {
           currentResultsFilter = btn.dataset.resultsFilter || 'all';
@@ -2941,7 +3138,12 @@
         ? profile.sync_live_results
         : (profile.last_results || []);
       const history = profile.history || [];
-      const visibleHistory = history.slice(0, 25);
+      // Page 1 comes free in the status payload; later pages are fetched from
+      // /api/profile/sync/runs, which supports server-side pagination and was
+      // previously unreachable from the UI.
+      const visibleHistory = historyPage > 1 && historyPageItems.length
+        ? historyPageItems
+        : history.slice(0, HISTORY_PAGE_SIZE);
       const options = profile.options || {};
       const totals = results.reduce((acc, row) => {
         acc.fetched += row.items_fetched || 0;
@@ -3074,21 +3276,36 @@
           const statsHtml = entryStatus === 'failed' && !summary.added && !summary.removed && !summary.errors
             ? `${errorDetail}`
             : `<span class="c-green">+${summary.added}</span><span class="c-red">-${summary.removed}</span>${summary.errors > 0 ? `<span class="c-red">${summary.errors} err</span>` : errorDetail}`;
-          const detailAction = entry.run_id ? `<button class="btn btn-sm" type="button" data-history-run="${esc(entry.run_id)}">Details</button>` : '';
-          return `<div class="history-item"><span class="history-time">${new Date(entry.timestamp).toLocaleString()}${mode}${statusBadge}</span><div class="history-stats">${statsHtml}${detailAction}</div></div>`;
+          const detailAction = entry.run_id ? `<button class="btn btn-sm" type="button" data-history-run="${escAttr(entry.run_id)}">Details</button>` : '';
+          return `<div class="history-item"><span class="history-time">${esc(new Date(entry.timestamp).toLocaleString())}${mode}${statusBadge}</span><div class="history-stats">${statsHtml}${detailAction}</div></div>`;
         }).join('');
-        const historyNote = history.length > visibleHistory.length
-          ? `<div class="panel-body" style="padding-top:12px;padding-bottom:0;color:var(--z500);font-size:12px">Showing the newest ${visibleHistory.length} of ${history.length} sync runs.</div>`
+        const totalRuns = history.length;
+        const totalPages = Math.max(1, Math.ceil(totalRuns / HISTORY_PAGE_SIZE));
+        const firstIndex = (historyPage - 1) * HISTORY_PAGE_SIZE + 1;
+        const lastIndex = firstIndex + visibleHistory.length - 1;
+        const historyNote = totalRuns > visibleHistory.length || historyPage > 1
+          ? `<div class="panel-body" style="padding-top:12px;padding-bottom:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--z500);font-size:12px">
+              <span>Runs ${firstIndex}–${lastIndex} of ${totalRuns}</span>
+              <button class="btn btn-sm" type="button" id="history-prev-page" ${historyPage <= 1 ? 'disabled' : ''}>Newer</button>
+              <button class="btn btn-sm" type="button" id="history-next-page" ${historyPage >= totalPages ? 'disabled' : ''}>Older</button>
+            </div>`
           : '';
         el('history-body').innerHTML = `${historyHtml}${historyNote}`;
         document.querySelectorAll('[data-history-run]').forEach(node => {
           node.addEventListener('click', () => openRunDetails(node.dataset.historyRun, ''));
         });
+        const historyPrev = el('history-prev-page');
+        const historyNext = el('history-next-page');
+        if (historyPrev) historyPrev.addEventListener('click', () => goToHistoryPage(historyPage - 1));
+        if (historyNext) historyNext.addEventListener('click', () => goToHistoryPage(historyPage + 1));
       }
 
       switchIssuesTab(currentIssueTab);
-      if (profile.latest_run_id && !runDetailsCache[profile.latest_run_id]) {
-        fetchRunDetail(profile.latest_run_id).then(() => renderErrorsPanel(profile));
+      // While the run is still going its detail keeps changing, so bypass the
+      // cache; otherwise the Errors panel shows the first snapshot all run long.
+      const runStillGoing = !!profile.sync_running;
+      if (profile.latest_run_id && (runStillGoing || !runDetailsCache[profile.latest_run_id])) {
+        fetchRunDetail(profile.latest_run_id, runStillGoing).then(() => renderErrorsPanel(profile));
       } else {
         renderErrorsPanel(profile);
       }
@@ -3116,17 +3333,37 @@
       el('issues-tab-errors').classList.toggle('btn-primary', currentIssueTab === 'errors');
     }
 
-    async function fetchSyncRuns() {
-      const result = await apiPost('/api/profile/sync/runs', { page: 1, page_size: 25 });
-      if (!result.ok) return [];
+    async function fetchSyncRuns(page, pageSize) {
+      let result;
+      try {
+        result = await apiPost('/api/profile/sync/runs', {
+          page: Number(page) > 0 ? Number(page) : 1,
+          page_size: Number(pageSize) > 0 ? Number(pageSize) : HISTORY_PAGE_SIZE,
+        });
+      } catch {
+        showToast('Network error while loading sync history.', true);
+        return null;
+      }
+      if (!result.ok) {
+        showToast(result.data?.message || result.data?.error || 'Could not load sync history.', true);
+        return null;
+      }
       latestDetailedRuns = Array.isArray(result.data.items) ? result.data.items : [];
-      return latestDetailedRuns;
+      return result.data;
     }
 
-    async function fetchRunDetail(runId) {
+    // `skipCache` is required while a run is still in progress: its detail keeps
+    // changing, and a cached copy froze the Errors panel at the first snapshot
+    // taken for the whole remainder of the run.
+    async function fetchRunDetail(runId, skipCache) {
       if (!runId) return null;
-      if (runDetailsCache[runId]) return runDetailsCache[runId];
-      const result = await apiPost('/api/profile/sync/run-details', { run_id: runId });
+      if (!skipCache && runDetailsCache[runId]) return runDetailsCache[runId];
+      let result;
+      try {
+        result = await apiPost('/api/profile/sync/run-details', { run_id: runId });
+      } catch {
+        return null;
+      }
       if (!result.ok) return null;
       runDetailsCache[runId] = result.data.run || null;
       return runDetailsCache[runId];
@@ -3156,7 +3393,7 @@
       body.innerHTML = `<div class="table-scroll"><table><thead><tr><th>Row</th><th>Stage</th><th>Errors</th><th>Failed Items</th></tr></thead><tbody>${fatalRow}${filtered.map(row => `
         <tr>
           <td>${esc(row.display_name || row.list_name || '')}<div class="catalog-note">${esc(row.source_name || row.row_type || '')}</div></td>
-          <td>${esc(Object.entries(row.error_stage_counts || {}).map(([key, value]) => `${key}:${value}`).join(', ') || 'general')}</td>
+          <td>${esc(Object.entries(row.error_stage_counts || {}).map(([key, value]) => `${key.replace(/_/g, ' ')} (${value})`).join(', ') || 'general')}</td>
           <td>${(row.errors || []).map(err => `<div class="catalog-note" style="color:var(--red)">${esc(err)}</div>`).join('')}</td>
           <td>${esc((row.sample_failed_titles || []).join(', ') || '-')}</td>
         </tr>`).join('')}</tbody></table></div>`;
@@ -3203,12 +3440,48 @@
 
     // ── Unresolved items panel ─────────────────────────────────────────────────
 
-    function renderUnresolvedPanel(items) {
+    // The backend records exactly why each item failed, but the panel used to
+    // show none of it — the user saw a title and an empty box with no clue what
+    // went wrong. These are the reason codes emitted by the sync service.
+    const UNRESOLVED_REASON_TEXT = {
+      unconfirmed_mapping: 'Only an unverified community mapping exists, and the offline anime map has no entry. Confirm the correct TMDB ID below.',
+      missing_anime_mapping: 'No anime mapping found for this title in either the community database or the offline anime map.',
+      missing_ids: 'This item carries no external IDs (IMDb/MAL/AniList/AniDB) to look it up by.',
+      lookup_unavailable: 'The mapping service could not be reached during this sync. It will be retried automatically.',
+      not_found: 'No matching TMDB entry was found.',
+      cached_miss: 'A previous attempt failed; it will be retried automatically. Enter an ID below to fix it now.',
+      tmdb_collision: 'Another item in this list already uses this TMDB ID.',
+    };
+
+    function unresolvedReasonText(item) {
+      const reason = String(item.unresolved_reason || '').trim();
+      if (reason && UNRESOLVED_REASON_TEXT[reason]) return UNRESOLVED_REASON_TEXT[reason];
+      // Fall back to the raw code so an unrecognised reason is still visible
+      // rather than silently blank.
+      if (reason) return reason.replace(/_/g, ' ');
+      return '';
+    }
+
+    // True when the user is part-way through mapping an item by hand. The panel
+    // is rebuilt wholesale via innerHTML, and during a sync that happens every
+    // 2s — which destroyed a half-typed TMDB ID and stole focus mid-keystroke.
+    function unresolvedPanelIsBusy(body) {
+      if (!body) return false;
+      const active = document.activeElement;
+      if (active && body.contains(active)) return true;
+      return Array.from(body.querySelectorAll('.unresolved-tmdb-input'))
+        .some(input => String(input.value || '').trim() !== '');
+    }
+
+    function renderUnresolvedPanel(items, force) {
       const panel = el('unresolved-panel');
       const body = el('unresolved-body');
       if (!panel || !body) return;
       panel.style.display = '';
       lastUnresolvedItems = Array.isArray(items) ? items.slice() : [];
+      // Defer a background refresh rather than yanking the row out from under
+      // the user; an explicit action passes force to re-render immediately.
+      if (!force && unresolvedPanelIsBusy(body)) return;
       const search = String(el('unresolved-search') && el('unresolved-search').value || '').trim().toLowerCase();
       if (search) {
         items = lastUnresolvedItems.filter(item => [
@@ -3234,16 +3507,20 @@
         const title = item.title && item.title !== 'Unknown' ? item.title : null;
         const displayTitle = title || (item.simkl_id ? `SIMKL #${item.simkl_id}` : item.mal_id ? `MAL #${item.mal_id}` : item.anilist_id ? `AniList #${item.anilist_id}` : 'Unknown');
         const year = item.year ? ` (${item.year})` : '';
-        const listBadge = item.list_name ? `<div class="catalog-note" style="margin-top:2px;font-size:11px">📋 ${esc(item.list_name)}</div>` : '';
+        const listBadge = item.list_name ? `<div class="catalog-note" style="margin-top:2px;font-size:11px"><span aria-hidden="true">📋</span> <span class="sr-only">List:</span> ${esc(item.list_name)}</div>` : '';
         const isCollision = item.unresolved_reason === 'tmdb_collision' || item.anime_conflict_reason === 'tmdb_collision';
+        const reasonText = unresolvedReasonText(item);
+        const conflictNote = item.anime_conflict_reason
+          ? `<div class="catalog-note" style="margin-top:2px;color:var(--orange)"><span aria-hidden="true">⚠</span> ${esc(item.anime_conflict_reason)}</div>`
+          : '';
         const reasonLabel = isCollision
-          ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)">⚠ TMDB collision — another item already occupies TMDB ${esc(item.candidate_tmdb_id || '')}. Enter a <strong>different</strong> TMDB ID below.</div>`
-          : (item.anime_conflict_reason ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)">${esc(item.anime_conflict_reason)}</div>` : '');
+          ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)"><span aria-hidden="true">⚠</span> TMDB collision — another item already occupies TMDB ${esc(item.candidate_tmdb_id || '')}. Enter a <strong>different</strong> TMDB ID below.</div>`
+          : `${reasonText ? `<div class="catalog-note" style="margin-top:4px;color:var(--z400)">${esc(reasonText)}</div>` : ''}${conflictNote}`;
         const confidenceBadge = item.match_confidence && item.match_confidence !== 'unresolved' ? `<div class="catalog-note" style="margin-top:2px">confidence: ${esc(item.match_confidence)}</div>` : '';
         // For collision items the candidate is the *colliding* ID — don't pre-fill
         // it (user must enter the correct distinct ID). For other reasons it's a
         // genuine suggestion so pre-fill it to save the user a lookup.
-        const suggestedValue = (!isCollision && item.candidate_tmdb_id) ? esc(item.candidate_tmdb_id) : '';
+        const suggestedValue = (!isCollision && item.candidate_tmdb_id) ? escAttr(item.candidate_tmdb_id) : '';
         const suggestedBadge = (!isCollision && item.candidate_tmdb_id)
           ? `<div class="catalog-note" style="margin-top:2px;color:var(--green)">suggested TMDB: ${esc(item.candidate_tmdb_id)}</div>`
           : '';
@@ -3252,15 +3529,19 @@
         const searchQuery = encodeURIComponent(title || displayTitle);
         const tmdbSearchUrl = `https://www.themoviedb.org/search?query=${searchQuery}`;
         const idLinks = [
-          item.imdb_id ? `<a href="https://www.imdb.com/title/${esc(item.imdb_id)}" target="_blank" rel="noopener" style="color:var(--z400)">IMDb</a>` : '',
-          item.mal_id ? `<a href="https://myanimelist.net/anime/${esc(item.mal_id)}" target="_blank" rel="noopener" style="color:var(--z400)">MAL</a>` : '',
-          item.anilist_id ? `<a href="https://anilist.co/anime/${esc(item.anilist_id)}" target="_blank" rel="noopener" style="color:var(--z400)">AniList</a>` : '',
+          item.imdb_id ? `<a href="https://www.imdb.com/title/${escAttr(item.imdb_id)}" target="_blank" rel="noopener" style="color:var(--z400)">IMDb</a>` : '',
+          item.mal_id ? `<a href="https://myanimelist.net/anime/${escAttr(item.mal_id)}" target="_blank" rel="noopener" style="color:var(--z400)">MAL</a>` : '',
+          item.anilist_id ? `<a href="https://anilist.co/anime/${escAttr(item.anilist_id)}" target="_blank" rel="noopener" style="color:var(--z400)">AniList</a>` : '',
           `<a href="${tmdbSearchUrl}" target="_blank" rel="noopener" style="color:var(--orange)">Search TMDB ↗</a>`,
         ].filter(Boolean).join(' · ');
 
-        const cacheKey = esc(item.cache_key || '');
+        const cacheKey = escAttr(item.cache_key || '');
         const typeLabel = item.media_type === 'tv' ? (item.simkl_type === 'anime' ? 'Anime' : 'TV') : item.media_type === 'movie' ? 'Movie' : esc(item.media_type || '—');
         return `<tr data-cache-key="${cacheKey}">
+          <td style="vertical-align:top">
+            <input type="checkbox" class="unresolved-select" data-cache-key="${cacheKey}"
+                   aria-label="Select ${escAttr(displayTitle)}" />
+          </td>
           <td>
             <div style="font-weight:500">${esc(displayTitle)}<span class="catalog-note">${esc(year)}</span></div>
             ${listBadge}
@@ -3283,7 +3564,28 @@
       const summaryHtml = animeItems.length
         ? `<div class="panel-body" style="padding-top:0;color:var(--z500);font-size:12px">Anime review queue: ${animeItems.length} item${animeItems.length === 1 ? '' : 's'} need franchise-safe review.${regularItems.length ? ` ${regularItems.length} other unresolved item${regularItems.length === 1 ? '' : 's'} too.` : ''}</div>`
         : '';
-      body.innerHTML = `${summaryHtml}<div class="table-scroll"><table><thead><tr><th>Title</th><th>Type</th><th style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      // A breakdown by cause, so it's clear at a glance whether the queue is one
+      // systemic problem or many unrelated ones.
+      const reasonCounts = items.reduce((acc, item) => {
+        const key = String(item.unresolved_reason || 'unknown').trim() || 'unknown';
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {});
+      const reasonEntries = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1]);
+      const histogramHtml = reasonEntries.length > 1
+        ? `<div class="panel-body" style="padding-top:0;color:var(--z500);font-size:12px">By cause: ${reasonEntries
+            .map(([key, count]) => `${esc(key.replace(/_/g, ' '))} <strong>${count}</strong>`)
+            .join(' · ')}</div>`
+        : '';
+      // Bulk actions: this queue routinely holds hundreds of rows, so dismissing
+      // them one at a time is impractical.
+      const bulkHtml = `<div class="panel-body" style="padding-top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" id="unresolved-select-all">Select all (${items.length})</button>
+        <button class="btn btn-sm" type="button" id="unresolved-select-none">Clear selection</button>
+        <button class="btn btn-sm btn-danger" type="button" id="unresolved-dismiss-selected" disabled>Dismiss selected</button>
+        <span class="catalog-note" id="unresolved-selection-count" aria-live="polite"></span>
+      </div>`;
+      body.innerHTML = `${summaryHtml}${histogramHtml}${bulkHtml}<div class="table-scroll"><table><thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Title</th><th scope="col">Type</th><th scope="col" style="min-width:220px">Auto / Manual Mapping</th></tr></thead><tbody>${rows}</tbody></table></div>`;
       body.querySelectorAll('.unresolved-auto-btn').forEach(btn => {
         btn.addEventListener('click', () => autoResolveUnresolvedItem(btn.closest('tr')));
       });
@@ -3293,15 +3595,71 @@
       body.querySelectorAll('.unresolved-dismiss-btn').forEach(btn => {
         btn.addEventListener('click', () => dismissUnresolvedItem(btn.closest('tr')));
       });
+
+      const checkboxes = () => Array.from(body.querySelectorAll('.unresolved-select'));
+      const dismissSelectedBtn = el('unresolved-dismiss-selected');
+      const countNode = el('unresolved-selection-count');
+      function syncSelectionState() {
+        const selected = checkboxes().filter(cb => cb.checked);
+        if (dismissSelectedBtn) dismissSelectedBtn.disabled = selected.length === 0;
+        if (countNode) countNode.textContent = selected.length ? `${selected.length} selected` : '';
+      }
+      checkboxes().forEach(cb => cb.addEventListener('change', syncSelectionState));
+      const selectAllBtn = el('unresolved-select-all');
+      if (selectAllBtn) selectAllBtn.addEventListener('click', () => {
+        checkboxes().forEach(cb => { cb.checked = true; });
+        syncSelectionState();
+      });
+      const selectNoneBtn = el('unresolved-select-none');
+      if (selectNoneBtn) selectNoneBtn.addEventListener('click', () => {
+        checkboxes().forEach(cb => { cb.checked = false; });
+        syncSelectionState();
+      });
+      if (dismissSelectedBtn) dismissSelectedBtn.addEventListener('click', () => {
+        const keys = checkboxes().filter(cb => cb.checked).map(cb => cb.dataset.cacheKey).filter(Boolean);
+        dismissUnresolvedItems(keys);
+      });
+      syncSelectionState();
     }
 
     async function fetchUnresolved() {
+      let result;
       try {
-        const result = await apiPost('/api/profile/unresolved', {});
-        if (result.ok) renderUnresolvedPanel(result.data.items || []);
+        result = await apiPost('/api/profile/unresolved', {});
       } catch (e) {
         console.error('Failed to load unresolved items', e);
+        showToast('Could not load mapping issues — connection unavailable.', true);
+        return;
       }
+      if (!result.ok) {
+        // Previously swallowed, so a failed load was indistinguishable from
+        // "no issues".
+        showToast(result.data?.message || result.data?.error || 'Could not load mapping issues.', true);
+        return;
+      }
+      renderUnresolvedPanel(result.data.items || [], true);
+    }
+
+    async function dismissUnresolvedItems(cacheKeys) {
+      const keys = Array.from(new Set((cacheKeys || []).filter(Boolean)));
+      if (!keys.length) return;
+      const btn = el('unresolved-dismiss-selected');
+      if (btn) { btn.disabled = true; btn.textContent = `Dismissing ${keys.length}...`; }
+      let lastItems = null;
+      let failed = 0;
+      for (const cacheKey of keys) {
+        try {
+          const result = await apiPost('/api/profile/unresolved/dismiss', { cache_key: cacheKey });
+          if (result.ok) lastItems = result.data.items || lastItems;
+          else failed++;
+        } catch {
+          failed++;
+        }
+      }
+      if (btn) btn.textContent = 'Dismiss selected';
+      if (lastItems) renderUnresolvedPanel(lastItems, true);
+      if (failed) showToast(`${failed} of ${keys.length} item${keys.length === 1 ? '' : 's'} could not be dismissed.`, true);
+      else showToast(`Dismissed ${keys.length} item${keys.length === 1 ? '' : 's'}.`, false, true);
     }
 
     async function resolveUnresolvedItem(row) {
@@ -3318,7 +3676,15 @@
       input.style.borderColor = '';
       if (autoBtn) autoBtn.disabled = true;
       if (mapBtn) { mapBtn.disabled = true; mapBtn.textContent = 'Saving…'; }
-      const result = await apiPost('/api/profile/unresolved/resolve', {cache_key: cacheKey, tmdb_id: tmdbId});
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/resolve', {cache_key: cacheKey, tmdb_id: tmdbId});
+      } catch {
+        if (autoBtn) autoBtn.disabled = false;
+        if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
+        showToast('Network error while saving mapping.', true);
+        return;
+      }
       if (result.ok) {
         const added = result.data.pmdb_added;
         const skipReason = result.data.pmdb_skip_reason;
@@ -3332,11 +3698,11 @@
         if (mapBtn) { mapBtn.textContent = btnLabel; mapBtn.style.color = 'var(--green)'; }
         // Re-render dashboard stats so unresolved/added counts update instantly.
         if (result.data.profile) { lastDashboardProfile = result.data.profile; renderDashboard(result.data.profile); }
-        setTimeout(() => renderUnresolvedPanel(result.data.items || []), 800);
+        setTimeout(() => renderUnresolvedPanel(result.data.items || [], true), 800);
       } else {
         if (autoBtn) autoBtn.disabled = false;
         if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
-        showToast(result.data?.error || 'Failed to save mapping', true);
+        showToast(result.data?.message || result.data?.error || 'Failed to save mapping', true);
       }
     }
 
@@ -3350,25 +3716,47 @@
       if (autoBtn) { autoBtn.disabled = true; autoBtn.textContent = 'Trying…'; }
       if (mapBtn) mapBtn.disabled = true;
       if (input) input.disabled = true;
-      const result = await apiPost('/api/profile/unresolved/auto-resolve', {cache_key: cacheKey});
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/auto-resolve', {cache_key: cacheKey});
+      } catch {
+        if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = 'Auto Map'; }
+        if (mapBtn) mapBtn.disabled = false;
+        if (input) input.disabled = false;
+        showToast('Network error while auto-mapping.', true);
+        return;
+      }
       if (result.ok) {
         if (autoBtn) { autoBtn.textContent = result.data.pmdb_added ? '✓ Added to list' : '✓ Auto mapped'; autoBtn.style.color = 'var(--green)'; }
         if (result.data.profile) { lastDashboardProfile = result.data.profile; renderDashboard(result.data.profile); }
-        setTimeout(() => renderUnresolvedPanel(result.data.items || []), 800);
+        setTimeout(() => renderUnresolvedPanel(result.data.items || [], true), 800);
         return;
       }
       if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = 'Auto Map'; }
       if (mapBtn) mapBtn.disabled = false;
       if (input) input.disabled = false;
-      showToast(result.data?.error || 'Auto-resolve failed', true);
+      // The backend explains *why* via `message` (e.g. "No automatic mapping
+      // found yet."); without reading it the user only ever saw the generic text.
+      showToast(result.data?.message || result.data?.error || 'Auto-resolve failed', true);
     }
 
     async function dismissUnresolvedItem(row) {
       if (!row) return;
       const cacheKey = row.dataset.cacheKey;
       if (!cacheKey) return;
-      const result = await apiPost('/api/profile/unresolved/dismiss', {cache_key: cacheKey});
-      if (result.ok) renderUnresolvedPanel(result.data.items || []);
+      let result;
+      try {
+        result = await apiPost('/api/profile/unresolved/dismiss', {cache_key: cacheKey});
+      } catch {
+        showToast('Network error while dismissing item.', true);
+        return;
+      }
+      if (result.ok) {
+        renderUnresolvedPanel(result.data.items || [], true);
+        return;
+      }
+      // Without this the click looked like a no-op on failure.
+      showToast(result.data?.message || result.data?.error || 'Could not dismiss item.', true);
     }
 
     const refreshBtn = el('btn-unresolved-refresh');
@@ -3381,7 +3769,7 @@
     });
     const unresolvedSearch = el('unresolved-search');
     if (unresolvedSearch) unresolvedSearch.addEventListener('input', () => {
-      renderUnresolvedPanel(lastUnresolvedItems);
+      renderUnresolvedPanel(lastUnresolvedItems, true);
       if (lastDashboardProfile) renderErrorsPanel(lastDashboardProfile);
     });
     const issuesTabUnresolved = el('issues-tab-unresolved');
@@ -3396,6 +3784,18 @@
       if (lastDashboardProfile) renderErrorsPanel(lastDashboardProfile);
     });
     if (runDetailClose) runDetailClose.addEventListener('click', () => el('run-detail-panel').classList.add('hidden'));
+
+    // Escape closes the run-details panel and dismisses a toast; neither could be
+    // dismissed from the keyboard before.
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const runDetail = el('run-detail-panel');
+      if (runDetail && !runDetail.classList.contains('hidden')) {
+        runDetail.classList.add('hidden');
+        return;
+      }
+      hideToast();
+    });
 
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -3547,15 +3947,15 @@
       const runId = row.run_id || '';
       const rowKey = row.row_key || '';
       const detailBtn = row.has_details && runId
-        ? `<button class="btn btn-sm" type="button" data-row-detail="${esc(runId)}" data-row-key="${esc(rowKey)}">Details</button>`
+        ? `<button class="btn btn-sm" type="button" data-row-detail="${escAttr(runId)}" data-row-key="${escAttr(rowKey)}">Details</button>`
         : '';
       if (!listName) return detailBtn ? `<div class="inline-actions">${detailBtn}</div>` : '';
       const label = row.display_name || row.list_name || '';
       const busy = deletingManagedListName === listName;
       if (pendingDeleteListName === listName) {
-        return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm btn-danger" type="button" data-delete-confirm="${esc(listName)}" data-delete-label="${esc(label)}" ${busy ? 'disabled' : ''}>${busy ? 'Deleting...' : 'Confirm'}</button><button class="btn btn-sm btn-ghost" type="button" data-delete-cancel="${esc(listName)}" ${busy ? 'disabled' : ''}>Cancel</button></div>`;
+        return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm btn-danger" type="button" data-delete-confirm="${escAttr(listName)}" data-delete-label="${escAttr(label)}" ${busy ? 'disabled' : ''}>${busy ? 'Deleting...' : 'Confirm'}</button><button class="btn btn-sm btn-ghost" type="button" data-delete-cancel="${escAttr(listName)}" ${busy ? 'disabled' : ''}>Cancel</button></div>`;
       }
-      return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm" type="button" data-delete-list="${esc(listName)}" data-delete-label="${esc(label)}" ${busy ? 'disabled' : ''}>Delete</button></div>`;
+      return `<div class="inline-actions">${detailBtn}<button class="btn btn-sm" type="button" data-delete-list="${escAttr(listName)}" data-delete-label="${escAttr(label)}" ${busy ? 'disabled' : ''}>Delete</button></div>`;
     }
 
     function armDeleteManagedList(listName) {
@@ -3674,6 +4074,15 @@
         }
       }
 
+      // Identity for this call, claimed before the request starts so the finally
+      // block can tell whether it still owns the in-flight handle without
+      // touching `request` (which is still in its temporal dead zone while the
+      // body runs synchronously).
+      const myToken = {};
+      if (!wantsCredentials) {
+        statusFetchToken = myToken;
+      }
+
       const request = (async () => {
       try {
         const fallbackProfileId = sessionProfileId || el('profile-id').value.trim() || localStorage.getItem(PROFILE_KEY) || '';
@@ -3689,15 +4098,17 @@
           return;
         }
         const profile = result.data.profile;
+        // Discard a stale response before it can touch anything. This check has
+        // to come before the profile-identity writes below: a superseded response
+        // must not rewrite sessionProfileId or localStorage just because its
+        // render is skipped.
+        if (!wantsCredentials && myGen !== _statusGeneration) {
+          return profile;
+        }
         if (profile && profile.profile_id) {
           sessionProfileId = profile.profile_id;
           el('profile-id').value = profile.profile_id;
           localStorage.setItem(PROFILE_KEY, profile.profile_id);
-        }
-        // Discard render if a newer forced refresh has been issued (e.g. post-sync).
-        // This prevents a stale poll from overwriting the "Syncing..." state.
-        if (!wantsCredentials && myGen !== _statusGeneration) {
-          return profile;
         }
         refreshPollingForProfile(profile);
         if (wantsCredentials) {
@@ -3734,11 +4145,20 @@
         if (!wantsCredentials && lastDashboardProfile) {
           return lastDashboardProfile;
         }
-        if (!wantsCredentials) renderEmptyDashboard('Status is temporarily unavailable.');
+        if (!wantsCredentials) {
+          // A transport failure is temporary. renderEmptyDashboard stops polling,
+          // so restart it at the idle rate — otherwise a single blip on first
+          // load leaves the page dead until a manual reload.
+          renderEmptyDashboard('Status is temporarily unavailable. Retrying...', true);
+        }
         return null;
       } finally {
-        if (!wantsCredentials) {
+        if (!wantsCredentials && statusFetchToken === myToken) {
+          // Only clear our own handle. _forceStatusRefresh may already have
+          // installed a newer one, and clearing that would reopen the dedupe
+          // window and allow two concurrent polls.
           statusFetchInFlight = null;
+          statusFetchToken = null;
         }
       }
       })();
@@ -3753,6 +4173,9 @@
       // Bump generation so any in-flight poll response is discarded, then fetch fresh.
       _statusGeneration++;
       statusFetchInFlight = null;
+      // Drop ownership too, so the superseded request's finally block leaves the
+      // handle installed by the fresh fetch below alone.
+      statusFetchToken = null;
       fetchStatus(false);
     }
 
@@ -3783,7 +4206,7 @@
           if (result.status === 409) {
             showToast('A sync is already in progress — opening dashboard.', false, true);
             switchView('dashboard');
-            setPollingInterval(POLL_RUNNING_MS);
+            holdFastPolling();
             _forceStatusRefresh();
           } else {
             showToast(formatApiError(result.data, 'Unable to start sync.'), true, false);
@@ -3793,7 +4216,7 @@
 
         showToast(dryRun ? 'List dry run started.' : 'List sync started.', false, true);
         switchView('dashboard');
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         if (syncBtn) syncBtn.disabled = false;
@@ -3830,7 +4253,7 @@
           if (result.status === 409) {
             showToast('A sync is already in progress — opening dashboard.', false, true);
             switchView('dashboard');
-            setPollingInterval(POLL_RUNNING_MS);
+            holdFastPolling();
             _forceStatusRefresh();
           } else {
             showToast(formatApiError(result.data, 'Unable to start activity sync.'), true, false);
@@ -3843,7 +4266,7 @@
         switchView('dashboard');
         pendingClearWatchHistory = false;
         clearingWatchHistory = false;
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         if (histBtn) histBtn.disabled = false;
@@ -3933,7 +4356,7 @@
         // Re-render with the server-returned profile so sync_cancel_requested is reflected,
         // then ensure polling is running so we catch the moment sync_running flips to false.
         if (result.data.profile) renderDashboard(result.data.profile);
-        setPollingInterval(POLL_RUNNING_MS);
+        holdFastPolling();
         _forceStatusRefresh();
       } catch {
         el('btn-stop').disabled = false;

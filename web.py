@@ -812,12 +812,12 @@ def _make_anime_root_resolver(config: AppConfig):
 
 
 def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) -> int | None:
-    candidate_tmdb = item.get("candidate_tmdb_id")
-    try:
-        if candidate_tmdb:
-            return _parse_tmdb_id(candidate_tmdb)
-    except ValueError:
-        pass
+    # candidate_tmdb_id is deliberately NOT returned up front. It is the ID the
+    # matcher just declined — either an unconfirmed zero-vote community mapping or
+    # one on the known-bad blocklist — and it is recorded only as a hint for the
+    # user. Handing it back as an automatic answer would re-apply the exact
+    # mapping the safety guards rejected. Instead, run a real resolve below; the
+    # matcher will return the candidate only if it can now verify it.
     config = _config_from_profile(private_profile, dry_run=False, sync_modes={"lists": True, "history": False, "resume": False})
     pmdb = PublicMetaDBClient(config.pmdb)
     matcher = ItemMatcher(
@@ -833,6 +833,8 @@ def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) ->
     )
     return matcher.resolve_tmdb_id({
         "title": item.get("title"),
+        # Carried through so the widened title comparison still applies here.
+        "title_variants": item.get("title_variants") or [],
         "year": item.get("year"),
         "media_type": item.get("media_type"),
         "simkl_type": item.get("simkl_type"),
@@ -844,6 +846,10 @@ def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) ->
         "root_anilist_id": item.get("root_anilist_id"),
         "anidb_id": item.get("anidb_id"),
         "tvdb_id": item.get("tvdb_id"),
+        # Part of ItemMatcher._cache_key. Omitting it produced a different key
+        # than the one stored on the unresolved item, so the result was cached
+        # where the next sync would never look for it.
+        "anime_resolve_mode": item.get("anime_resolve_mode") or "",
     })
 
 
@@ -1744,16 +1750,26 @@ def api_profile_save():
 
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
+    # The profile filter is taken from the session, never from the query string.
+    # log_capture.snapshot() only filters when given a non-empty profile id, so a
+    # caller-supplied (or missing) value would return every profile's logs.
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
     after_seq = request.args.get("after", 0, type=int)
     limit = min(request.args.get("limit", 300, type=int), 500)
-    profile_id = request.args.get("profile", "").strip()
     entries = log_capture.snapshot(after_seq=after_seq, limit=limit, profile_id=profile_id)
     return jsonify({"entries": entries})
 
 
 @app.route("/api/logs/clear", methods=["POST"])
 def api_logs_clear():
-    log_capture.clear()
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    # Scoped to the caller: an unfiltered clear would destroy every other user's
+    # buffered logs and reset the shared sequence counter under their cursors.
+    log_capture.clear(profile_id)
     return jsonify({"ok": True})
 
 

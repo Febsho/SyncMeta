@@ -185,7 +185,12 @@ class ItemMatcherTests(unittest.TestCase):
         self.assertIsNone(result.tmdb_id)
         self.assertEqual(result.unresolved_reason, "not_found")
 
-    def test_simkl_anime_allows_verified_direct_tmdb_after_mapping_miss(self) -> None:
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_simkl_anime_allows_verified_direct_tmdb_after_mapping_miss(self, lookup_by_anilist) -> None:
+        # Fribb has no entry for this id, so there is nothing to contradict the
+        # item's own TMDB ID; identity is instead vouched for by the root chain.
+        lookup_by_anilist.return_value = None
+
         matcher = ItemMatcher(
             StubPMDBClient(),
             anime_root_resolver=lambda anilist_id, mal_id: {
@@ -206,6 +211,194 @@ class ItemMatcherTests(unittest.TestCase):
 
         self.assertEqual(result.tmdb_id, 1575337)
         self.assertEqual(result.resolution_kind, "direct_tmdb")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_simkl_anime_rejects_direct_tmdb_contradicted_by_fribb(self, lookup_by_anilist) -> None:
+        # Fribb maps this AniList id to a *tv* entry with a different TMDB ID.
+        # A raw movie TMDB ID on the item therefore cannot be trusted, even
+        # though the root chain resolves — the mapping actively contradicts it.
+        lookup_by_anilist.return_value = {
+            "anilist_id": 999,
+            "type": "OVA",
+            "themoviedb_id": {"tv": 12634},
+        }
+
+        matcher = ItemMatcher(
+            StubPMDBClient(),
+            anime_root_resolver=lambda anilist_id, mal_id: {
+                "root": {"id": anilist_id or 999, "idMal": mal_id},
+                "episode_offset": 0,
+            },
+        )
+
+        result = matcher.resolve_match({
+            "title": "Contradicted Direct TMDB Anime",
+            "year": 2026,
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "tmdb_id": "1575337",
+            "anilist_id": "999",
+            "ids": {"anilist": "999"},
+        })
+
+        self.assertIsNone(result.tmdb_id)
+        self.assertEqual(result.resolution_kind, "unresolved")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_anime_movie_resolves_via_fribb_list_valued_mapping(self, lookup_by_anilist) -> None:
+        # Princess Mononoke. Upstream stores movie ids as a list, which used to
+        # raise TypeError inside the coercion helper and be swallowed, making
+        # every anime film unresolvable via Fribb.
+        lookup_by_anilist.return_value = {
+            "anilist_id": 164,
+            "mal_id": 164,
+            "type": "MOVIE",
+            "themoviedb_id": {"movie": [128]},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        result = matcher.resolve_match({
+            "title": "Mononoke Hime",
+            "year": 1997,
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "anilist_id": "164",
+            "ids": {"anilist": "164"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 128)
+        self.assertEqual(result.resolution_kind, "fribb_exact")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_ambiguous_multi_movie_mapping_is_not_guessed(self, lookup_by_anilist) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 4242,
+            "type": "MOVIE",
+            "themoviedb_id": {"movie": [111, 222]},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        result = matcher.resolve_match({
+            "title": "Ambiguous Anime Film",
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "anilist_id": "4242",
+            "ids": {"anilist": "4242"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertIsNone(result.tmdb_id)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_ova_typed_entry_with_movie_mapping_resolves_for_movie_item(self, lookup_by_anilist) -> None:
+        # 386 upstream entries typed OVA/SPECIAL/ONA carry a *movie* TMDB id.
+        # Gating on `type` classified them as tv and rejected them outright.
+        lookup_by_anilist.return_value = {
+            "anilist_id": 821,
+            "type": "OVA",
+            "themoviedb_id": {"movie": [1390599]},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        result = matcher.resolve_match({
+            "title": "Initial D Battle Stage",
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "anilist_id": "821",
+            "ids": {"anilist": "821"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 1390599)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_movie_typed_entry_with_tv_mapping_resolves_for_tv_item(self, lookup_by_anilist) -> None:
+        # The mirror case: 715 entries typed MOVIE carry a *tv* TMDB id.
+        lookup_by_anilist.return_value = {
+            "anilist_id": 777,
+            "type": "MOVIE",
+            "themoviedb_id": {"tv": 31910},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        result = matcher.resolve_match({
+            "title": "Typed Movie But Actually A Series",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "777",
+            "ids": {"anilist": "777"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 31910)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_genuine_namespace_conflict_is_still_rejected(self, lookup_by_anilist) -> None:
+        # A tv-namespace mapping must not satisfy a movie item.
+        lookup_by_anilist.return_value = {
+            "anilist_id": 999,
+            "type": "OVA",
+            "themoviedb_id": {"tv": 12634},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        result = matcher.resolve_match({
+            "title": "Blue Seed Beyond",
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "anilist_id": "999",
+            "ids": {"anilist": "999"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertIsNone(result.tmdb_id)
+        self.assertEqual(result.candidate_tmdb_id, 12634)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_preseed_from_fribb_populates_cache_without_api_calls(self, lookup_by_anilist) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 164,
+            "type": "MOVIE",
+            "themoviedb_id": {"movie": [128]},
+        }
+
+        client = StubPMDBClient()
+        matcher = ItemMatcher(client)
+        item = {
+            "title": "Mononoke Hime",
+            "media_type": "movie",
+            "simkl_type": "anime",
+            "anilist_id": "164",
+            "ids": {"anilist": "164"},
+            "anime_resolve_mode": "list_identity",
+        }
+
+        self.assertEqual(matcher.preseed_anime_from_fribb([item]), 1)
+        result = matcher.resolve_match(item)
+        self.assertEqual(result.tmdb_id, 128)
+        self.assertEqual(result.resolution_kind, "cache")
+        self.assertEqual(client.calls, [])
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_preseed_refuses_to_seed_across_media_types(self, lookup_by_anilist) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 164,
+            "type": "MOVIE",
+            "themoviedb_id": {"movie": [128]},
+        }
+
+        matcher = ItemMatcher(StubPMDBClient())
+        seeded = matcher.preseed_anime_from_fribb([{
+            "title": "Mononoke Hime",
+            "media_type": "tv",  # conflicts with the movie-namespace mapping
+            "simkl_type": "anime",
+            "anilist_id": "164",
+            "ids": {"anilist": "164"},
+            "anime_resolve_mode": "list_identity",
+        }])
+
+        self.assertEqual(seeded, 0)
 
     def test_anime_sequel_keeps_exact_mapping_instead_of_root_series(self) -> None:
         client = StubPMDBClient()
@@ -333,6 +526,189 @@ class ItemMatcherTests(unittest.TestCase):
         self.assertEqual(result.unresolved_reason, "missing_anime_mapping")
         self.assertEqual(client.calls, [("anilist", "38691", "tv")])
 
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_romaji_source_title_accepts_english_mapped_title(self, lookup_by_anilist) -> None:
+        # The headline false rejection: SIMKL/AniList report romaji while PMDB
+        # holds the English title, and the two share no tokens whatsoever. With
+        # the English title among the variants the correct mapping is kept.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            if id_type == "anilist":
+                return {
+                    "tmdb_id": 1429,
+                    "status": "hit",
+                    "votes": 9,
+                    "title": "Attack on Titan",
+                }
+            return {"tmdb_id": None, "status": "miss"}
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Shingeki no Kyojin",
+            "title_variants": ["Attack on Titan", "Shingeki no Kyojin", "進撃の巨人"],
+            "year": 2013,
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "16498",
+            "ids": {"anilist": "16498"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 1429)
+        self.assertEqual(result.resolution_kind, "external_mapping")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_romaji_only_title_still_rejects_unrelated_mapping(self, lookup_by_anilist) -> None:
+        # Widening the comparison must not make the guard permissive: an
+        # unrelated title is still rejected across every variant.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            return {
+                "tmdb_id": 68028,
+                "status": "hit",
+                "votes": 12,
+                "title": "Vazquez vs Marquez I",
+            }
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Shingeki no Kyojin",
+            "title_variants": ["Attack on Titan", "Shingeki no Kyojin"],
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "16498",
+            "ids": {"anilist": "16498"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertIsNone(result.tmdb_id)
+
+    def test_diacritics_are_folded_when_comparing_titles(self) -> None:
+        self.assertTrue(ItemMatcher._titles_are_compatible("Jūjutsu Kaisen", "Jujutsu Kaisen"))
+        self.assertTrue(ItemMatcher._titles_are_compatible("Pokémon", "Pokemon"))
+
+    def test_titles_are_compatible_any_accepts_when_one_variant_matches(self) -> None:
+        variants = ["Shingeki no Kyojin", "Attack on Titan"]
+        self.assertTrue(ItemMatcher._titles_are_compatible_any(variants, "Attack on Titan"))
+        self.assertFalse(ItemMatcher._titles_are_compatible_any(variants, "Breaking Bad"))
+
+    def test_titles_are_compatible_any_treats_missing_data_as_compatible(self) -> None:
+        # PMDB omits titles on some records; "unknown" must not read as a
+        # mismatch or correct mappings would be thrown away.
+        self.assertTrue(ItemMatcher._titles_are_compatible_any(["Anything"], ""))
+        self.assertTrue(ItemMatcher._titles_are_compatible_any([], "Attack on Titan"))
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_lower_voted_candidate_with_matching_title_wins(self, lookup_by_anilist) -> None:
+        # PMDB returns several mappings for one external id. The top-voted one
+        # is wrong; without inspecting the rest, the correct lower-voted mapping
+        # is never seen and the item is lost.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            client.calls.append((id_type, id_value, media_type))
+            return {
+                "tmdb_id": 68028,
+                "status": "hit",
+                "votes": 12,
+                "title": "Vazquez vs Marquez I",
+                "candidates": [
+                    {"tmdb_id": 68028, "votes": 12, "title": "Vazquez vs Marquez I"},
+                    {"tmdb_id": 95479, "votes": 3, "title": "Jujutsu Kaisen"},
+                ],
+            }
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Jujutsu Kaisen",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "113415",
+            "ids": {"anilist": "113415"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.tmdb_id, 95479)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_failure_reason_survives_a_restart(self, lookup_by_anilist) -> None:
+        # The reason a resolution failed was held only in memory, so after a
+        # restart the Issues panel reported the generic "cached_miss" for the
+        # whole 7-day TTL instead of the real explanation.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+
+        def fake_lookup_detailed(id_type: str, id_value: str, media_type: str) -> dict:
+            return {"tmdb_id": 68028, "status": "hit", "votes": 0, "title": "Some Anime"}
+
+        client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
+        matcher = ItemMatcher(client)
+
+        item = {
+            "title": "Some Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "555001",
+            "ids": {"anilist": "555001"},
+            "anime_resolve_mode": "list_identity",
+        }
+        first = matcher.resolve_match(item)
+        self.assertEqual(first.unresolved_reason, "unconfirmed_mapping")
+
+        persisted = matcher.failed_resolution_cache
+        self.assertTrue(persisted)
+        self.assertIn("|unconfirmed_mapping", next(iter(persisted.values())))
+
+        # A fresh matcher seeded from the persisted cache keeps the reason.
+        restarted = ItemMatcher(StubPMDBClient(), initial_failed_cache=persisted)
+        again = restarted.resolve_match(item)
+        self.assertIsNone(again.tmdb_id)
+        self.assertEqual(again.unresolved_reason, "unconfirmed_mapping")
+
+    def test_legacy_failed_cache_without_a_reason_still_loads(self) -> None:
+        # Entries written before the reason was persisted have no separator.
+        import datetime
+        iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        matcher = ItemMatcher(StubPMDBClient(), initial_failed_cache={"legacy-key": iso})
+        self.assertIn("legacy-key", matcher.failed_resolution_cache)
+        self.assertEqual(matcher.failed_resolution_cache["legacy-key"], iso)
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_list_identity_miss_is_counted_in_stats(self, lookup_by_anilist) -> None:
+        # The most common anime failure mode was the one terminal return that
+        # skipped _record_match_stat, so it never appeared in the counters.
+        lookup_by_anilist.return_value = None
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = (  # type: ignore[method-assign]
+            lambda id_type, id_value, media_type: {"tmdb_id": None, "status": "miss"}
+        )
+        matcher = ItemMatcher(client)
+
+        result = matcher.resolve_match({
+            "title": "Totally Unmapped Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "555002",
+            "ids": {"anilist": "555002"},
+            "anime_resolve_mode": "list_identity",
+        })
+
+        self.assertEqual(result.unresolved_reason, "missing_anime_mapping")
+        self.assertEqual(matcher.stats_snapshot()["not_found_failures"], 1)
 
     def test_cache_key_includes_anilist_id_so_stale_entries_are_invalidated(self) -> None:
         # Two items that differ only in anilist_id must produce different cache keys

@@ -11,6 +11,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
+from . import fribb_client
 from .anilist_client import AniListClient
 from .config import AniListConfig, AppConfig
 from .matcher import ItemMatcher, MatchResult
@@ -97,6 +98,20 @@ _STATUS_LABELS = {
 }
 
 
+def _safe_season_int(value: object) -> int | None:
+    """Coerce a season/offset value to int, tolerating absent and unusable input.
+
+    Note 0 is meaningful here (season 0 = specials), so callers must distinguish
+    ``None`` from ``0`` rather than testing truthiness.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _status_list_name(media_type: str, status: str) -> str:
     """Build a PMDB list name like 'Plan to Watch - Anime'."""
     type_label = _TYPE_LABELS.get(media_type, media_type.title())
@@ -157,8 +172,13 @@ _SAMPLE_TITLES_LIMIT = 5
 def _unresolved_item_summary(item: dict, list_name: str = "", unresolved_reason: str = "") -> dict:
     """Extract a compact, serialisable record for an item that could not be resolved."""
     ids = item.get("ids") or {}
+    title_variants = item.get("title_variants")
     summary = {
         "title": item.get("title") or "Unknown",
+        # Carried through so a later manual/auto retry keeps the same widened
+        # title comparison the original resolve attempt had.
+        "title_variants": [str(v) for v in title_variants if str(v or "").strip()]
+        if isinstance(title_variants, (list, tuple)) else [],
         "year": item.get("year"),
         "media_type": item.get("media_type"),
         "simkl_type": item.get("simkl_type"),
@@ -504,23 +524,22 @@ class SyncService:
             raw = fribb.get("themoviedb_id") or fribb.get("themoviedb")
             if not raw:
                 return None
-            tmdb_id = _coerce_tmdb_id(raw, item.get("media_type") or "") or 0
-            if tmdb_id <= 0:
+            tmdb_id, mapped_media_type = fribb_client.extract_tmdb(raw)
+            if not tmdb_id or tmdb_id <= 0:
                 return None
 
-            # Validate type consistency before returning the override.
-            fribb_type = str(fribb.get("type") or "").strip().lower()
-            if fribb_type:
-                expected_media_type = "movie" if fribb_type == "movie" else "tv"
-                item_media_type = str(item.get("media_type") or "").strip().lower()
-                if item_media_type and item_media_type != expected_media_type:
-                    logger.debug(
-                        "Fribb type mismatch for %r — fribb.type=%r expects media_type=%r"
-                        " but item has media_type=%r; skipping Fribb override (tmdb=%s)",
-                        item.get("title"), fribb_type, expected_media_type,
-                        item_media_type, tmdb_id,
-                    )
-                    return None
+            # Validate namespace consistency before returning the override.  The
+            # key the mapping is stored under ("tv"/"movie") is authoritative;
+            # the entry's `type` field is not, since it routinely disagrees with
+            # the TMDB namespace for films, OVAs and specials.
+            item_media_type = str(item.get("media_type") or "").strip().lower()
+            if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
+                logger.debug(
+                    "Fribb namespace mismatch for %r — mapping is %r but item has"
+                    " media_type=%r; skipping Fribb override (tmdb=%s)",
+                    item.get("title"), mapped_media_type, item_media_type, tmdb_id,
+                )
+                return None
 
             return tmdb_id
         except Exception:
@@ -1524,10 +1543,26 @@ class SyncService:
         if tmdb_id <= 0:
             fribb = self._lookup_fribb_entry(item, allow_root_fallback=False)
             if isinstance(fribb, dict):
-                try:
-                    tmdb_id = int(fribb.get("themoviedb_id") or fribb.get("themoviedb") or 0)
-                except (TypeError, ValueError):
-                    tmdb_id = 0
+                # themoviedb_id is a media-type-keyed dict; int() on it raised and
+                # silently left tmdb_id at 0, abandoning the remap.
+                extracted, _mapped_media_type = fribb_client.extract_tmdb(
+                    fribb.get("themoviedb_id") or fribb.get("themoviedb")
+                )
+                tmdb_id = extracted or 0
+
+        # The mapping data may carry TMDB coordinates directly, which removes the
+        # need to translate the TVDB season through PMDB anime-seasons at all.
+        xml_tmdb_season = remapped_tvdb.get("tmdb_season")
+        xml_tmdb_episode = remapped_tvdb.get("tmdb_episode")
+        if xml_tmdb_season is not None and xml_tmdb_episode is not None:
+            if int(xml_tmdb_season) <= 0:
+                return None  # Season 0 = specials; leave untouched
+            xml_tmdb_id = remapped_tvdb.get("tmdb_id") or tmdb_id
+            out: dict = {"season": int(xml_tmdb_season), "episode": int(xml_tmdb_episode)}
+            if xml_tmdb_id and int(xml_tmdb_id) != item_tmdb_id:
+                out["tmdb_id"] = int(xml_tmdb_id)
+            return out
+
         if tmdb_id <= 0:
             return None
 
@@ -1541,39 +1576,62 @@ class SyncService:
 
         return {"season": tvdb_season, "episode": tvdb_episode, **({"tmdb_id": tmdb_id} if tmdb_id != item_tmdb_id else {})}
 
-    def _remap_via_fribb(self, fribb: dict, item_tmdb_id: int, episode: int) -> dict | None:
-        """Use Fribb's TVDB season info + PMDB anime-seasons for accurate remapping.
+    @staticmethod
+    def _fribb_season_offset(fribb: dict, namespace: str) -> tuple[int | None, int]:
+        """Read Fribb's season / episode offset for one id namespace.
 
-        Fribb gives us which TVDB season this AniList/MAL entry belongs to and the
-        episode offset within that season.  PMDB anime-seasons maps TVDB season
-        (stored as season_number) to a TMDB season + episode range.  When PMDB
-        data is unavailable we fall back to assuming tvdb_season == tmdb_season,
-        which is correct for the vast majority of modern seasonal anime.
+        Both fields are dicts keyed by namespace upstream — ``season`` is
+        ``{"tvdb": N, "tmdb": N}`` and ``episode_offset`` is ``{"tvdb": N,
+        "tmdb": N}``.  Returns ``(season, offset)`` with ``season`` None when the
+        entry carries nothing for that namespace.
         """
-        tvdb_season_raw = fribb.get("thetvdb_season")
-        if tvdb_season_raw is None:
-            return None
-        try:
-            tvdb_season = int(tvdb_season_raw)
-            tvdb_epoffset = int(fribb.get("thetvdb_epoffset") or 0)
-        except (TypeError, ValueError):
-            return None
+        season_raw = fribb.get("season")
+        season = None
+        if isinstance(season_raw, dict) and namespace in season_raw:
+            season = _safe_season_int(season_raw.get(namespace))
+        offset_raw = fribb.get("episode_offset")
+        offset = 0
+        if isinstance(offset_raw, dict):
+            offset = _safe_season_int(offset_raw.get(namespace)) or 0
+        return season, offset
 
+    def _remap_via_fribb(self, fribb: dict, item_tmdb_id: int, episode: int) -> dict | None:
+        """Use Fribb's season info to remap an episode into TMDB numbering.
+
+        Fribb records which season of a target database this AniList/MAL entry
+        belongs to, plus the episode offset within that season.  It carries these
+        for both TVDB and TMDB; when the TMDB pair is present it is a direct
+        answer and no PMDB round trip is needed.  Otherwise the TVDB season is
+        translated through PMDB anime-seasons (whose season_number is the TVDB
+        season), falling back to assuming tvdb_season == tmdb_season, which holds
+        for the vast majority of modern seasonal anime.
+        """
+        # Prefer the Fribb-provided TMDB ID when the item doesn't have one.
+        tmdb_id = item_tmdb_id
+        fribb_tmdb, _mapped_media_type = fribb_client.extract_tmdb(
+            fribb.get("themoviedb_id") or fribb.get("themoviedb")
+        )
+        if not tmdb_id and fribb_tmdb:
+            tmdb_id = fribb_tmdb
+
+        # Direct TMDB coordinates: no translation, no PMDB lookup.
+        tmdb_season, tmdb_offset = self._fribb_season_offset(fribb, "tmdb")
+        if tmdb_season is not None:
+            if tmdb_season <= 0:
+                return None  # Season 0 = specials; leave untouched
+            out: dict = {"season": tmdb_season, "episode": tmdb_offset + episode}
+            if tmdb_id and tmdb_id != item_tmdb_id:
+                out["tmdb_id"] = tmdb_id
+            return out
+
+        tvdb_season, tvdb_epoffset = self._fribb_season_offset(fribb, "tvdb")
+        if tvdb_season is None:
+            return None
         if tvdb_season <= 0:
             return None  # Season 0 = specials; leave untouched
 
         # Episode number within the TVDB season
         tvdb_episode = tvdb_epoffset + episode
-
-        # Prefer the Fribb-provided TMDB ID when the item doesn't have one
-        # (Fribb's themoviedb is the TMDB ID for the franchise root).
-        tmdb_id = item_tmdb_id
-        fribb_tmdb = fribb.get("themoviedb_id") or fribb.get("themoviedb")
-        if not tmdb_id and fribb_tmdb:
-            try:
-                tmdb_id = _coerce_tmdb_id(fribb_tmdb, "tv") or 0
-            except (TypeError, ValueError):
-                pass
 
         # Try PMDB anime-seasons: season_number in PMDB == TVDB season number.
         if tmdb_id > 0:

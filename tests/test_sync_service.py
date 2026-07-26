@@ -2608,5 +2608,89 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(pmdb.resume_batches, [])
 
 
+class RemapViaFribbTests(unittest.TestCase):
+    """Fribb season/offset remapping.
+
+    The upstream feed stores these as namespace-keyed dicts — ``season`` is
+    ``{"tvdb": N, "tmdb": N}`` and ``episode_offset`` is ``{"tvdb": N, "tmdb":
+    N}``. The old code read ``thetvdb_season`` / ``thetvdb_epoffset``, neither of
+    which exists upstream, so this returned None for every single item and the
+    whole tier was dead.
+    """
+
+    def _service(self, anime_seasons=None) -> SyncService:
+        config = AppConfig(pmdb=PublicMetaDBConfig(api_key="pmdb-key"))
+        service = SyncService(config)
+        service._get_cached_anime_seasons = lambda tmdb_id: anime_seasons or []  # type: ignore[method-assign]
+        return service
+
+    def test_tmdb_season_is_used_directly_without_a_pmdb_lookup(self) -> None:
+        calls = []
+        service = self._service()
+
+        def fail_if_called(tmdb_id):
+            calls.append(tmdb_id)
+            return []
+
+        service._get_cached_anime_seasons = fail_if_called  # type: ignore[method-assign]
+
+        result = service._remap_via_fribb(
+            {"season": {"tvdb": 2, "tmdb": 3}, "episode_offset": {"tvdb": 12, "tmdb": 5}},
+            item_tmdb_id=1429,
+            episode=4,
+        )
+
+        self.assertEqual(result, {"season": 3, "episode": 9})  # 4 + tmdb offset 5
+        self.assertEqual(calls, [], "TMDB coordinates should not need a PMDB round trip")
+
+    def test_tvdb_season_falls_back_when_no_tmdb_pair_exists(self) -> None:
+        service = self._service()
+        result = service._remap_via_fribb(
+            {"season": {"tvdb": 2}, "episode_offset": {"tvdb": 12}},
+            item_tmdb_id=1429,
+            episode=4,
+        )
+        self.assertEqual(result, {"season": 2, "episode": 16})  # 4 + tvdb offset 12
+
+    def test_missing_offsets_default_to_zero(self) -> None:
+        service = self._service()
+        result = service._remap_via_fribb({"season": {"tmdb": 2}}, item_tmdb_id=1429, episode=7)
+        self.assertEqual(result, {"season": 2, "episode": 7})
+
+    def test_season_zero_specials_are_left_untouched(self) -> None:
+        service = self._service()
+        self.assertIsNone(
+            service._remap_via_fribb(
+                {"season": {"tvdb": 0, "tmdb": 0}, "episode_offset": {"tvdb": 2}},
+                item_tmdb_id=1429,
+                episode=1,
+            )
+        )
+
+    def test_entry_without_season_data_is_skipped(self) -> None:
+        service = self._service()
+        self.assertIsNone(service._remap_via_fribb({}, item_tmdb_id=1429, episode=1))
+
+    def test_fribb_tmdb_id_is_adopted_when_item_has_none(self) -> None:
+        service = self._service()
+        result = service._remap_via_fribb(
+            {"season": {"tmdb": 1}, "themoviedb_id": {"tv": 46260}},
+            item_tmdb_id=0,
+            episode=3,
+        )
+        self.assertEqual(result, {"season": 1, "episode": 3, "tmdb_id": 46260})
+
+    def test_tvdb_season_is_translated_through_pmdb_anime_seasons(self) -> None:
+        service = self._service(anime_seasons=[
+            {"season_number": 2, "tmdb_season": 4, "tmdb_episode_start": 10},
+        ])
+        result = service._remap_via_fribb(
+            {"season": {"tvdb": 2}, "episode_offset": {"tvdb": 0}},
+            item_tmdb_id=1429,
+            episode=3,
+        )
+        self.assertEqual(result, {"season": 4, "episode": 12})  # start 10 + (3 - 1)
+
+
 if __name__ == "__main__":
     unittest.main()

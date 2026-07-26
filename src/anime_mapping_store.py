@@ -46,10 +46,63 @@ def _safe_int(value: object) -> int | None:
             extracted = value.get("tv") or value.get("movie") or next(iter(value.values()), None)
             if extracted is None or isinstance(extracted, dict):
                 return None
+            if isinstance(extracted, (list, tuple)):
+                # Fribb stores movie ids as a list.  Only a single-element list is
+                # unambiguous; anything longer must not be guessed at.
+                if len(extracted) != 1:
+                    return None
+                extracted = extracted[0]
             return int(extracted)
+        if isinstance(value, (list, tuple)):
+            if len(value) != 1:
+                return None
+            return int(value[0])
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def extract_tmdb(value: object) -> tuple[int | None, str | None]:
+    """Return ``(tmdb_id, media_type)`` from a Fribb ``themoviedb_id`` value.
+
+    The upstream feed always stores this as a dict keyed by media type, and the
+    two keys carry different value shapes::
+
+        {"tv": 26209}     -> (26209, "tv")
+        {"movie": [128]}  -> (128, "movie")
+        {"movie": [1, 2]} -> (None, "movie")   # ambiguous: refuse to guess
+
+    The media type in the key is authoritative — far more so than the entry's
+    ``type`` field, which disagrees with it in both directions (e.g. entries
+    typed ``MOVIE`` that carry a ``tv`` id, and ``OVA``/``SPECIAL`` entries that
+    carry a ``movie`` id).  Returning it lets callers validate an item's media
+    type against the mapping instead of against ``type``.
+
+    A bare scalar is tolerated for forward/backward compatibility, in which case
+    the media type is unknown and ``None`` is returned alongside the id.
+    """
+    if value is None or value == "":
+        return None, None
+    if isinstance(value, dict):
+        for media_type in ("tv", "movie"):
+            if media_type in value:
+                return _safe_int(value.get(media_type)), media_type
+        # Unknown key shape: extract what we can but claim no media type.
+        return _safe_int(value), None
+    return _safe_int(value), None
+
+
+def _iter_imdb_ids(value: object) -> list[str]:
+    """Normalize a Fribb ``imdb_id`` (always a list upstream) to clean strings."""
+    if value is None:
+        return []
+    raw = value if isinstance(value, (list, tuple)) else [value]
+    out: list[str] = []
+    for candidate in raw:
+        text = str(candidate or "").strip()
+        if text:
+            out.append(text)
+    return out
 
 
 class AnimeMappingStore:
@@ -65,6 +118,7 @@ class AnimeMappingStore:
         self._fribb_by_simkl: dict[int, dict] = {}
         self._fribb_by_tmdb: dict[int, list[dict]] = {}
         self._fribb_by_imdb: dict[str, list[dict]] = {}
+        self._fribb_by_tvdb: dict[int, list[dict]] = {}
         self._xml_by_anidb: dict[int, ET.Element] = {}
         self._xml_by_tvdb: dict[int, list[ET.Element]] = {}
         self._xml_by_tmdb: dict[int, list[ET.Element]] = {}
@@ -81,6 +135,7 @@ class AnimeMappingStore:
         simkl_id: int | None = None,
         tmdb_id: int | None = None,
         imdb_id: str | None = None,
+        tvdb_id: int | None = None,
     ) -> dict | None:
         self._ensure_fribb_loaded()
         if anilist_id:
@@ -104,7 +159,11 @@ class AnimeMappingStore:
             if len(entries) == 1:
                 return entries[0]
         if imdb_id:
-            entries = self._fribb_by_imdb.get(str(imdb_id)) or []
+            entries = self._fribb_by_imdb.get(str(imdb_id).strip()) or []
+            if len(entries) == 1:
+                return entries[0]
+        if tvdb_id:
+            entries = self._fribb_by_tvdb.get(int(tvdb_id)) or []
             if len(entries) == 1:
                 return entries[0]
         return None
@@ -112,10 +171,56 @@ class AnimeMappingStore:
     def validate_tmdb(self, entry: dict | None, tmdb_id: int | None) -> bool:
         if not entry or not tmdb_id:
             return False
-        mapped = _safe_int(entry.get("themoviedb_id") or entry.get("themoviedb"))
+        mapped, _media_type = extract_tmdb(
+            entry.get("themoviedb_id") or entry.get("themoviedb")
+        )
         return bool(mapped and mapped == int(tmdb_id))
 
     def resolve_tvdb_episode_from_anidb_episode(
+        self,
+        anidb_id: int,
+        anidb_episode: int,
+        anidb_season: int = 1,
+    ) -> dict | None:
+        """Resolve an AniDB episode to TVDB — and to TMDB when the feed says so.
+
+        The result always carries ``tvdb_*`` keys.  It additionally carries
+        ``tmdb_season`` / ``tmdb_episode`` / ``tmdb_id`` when the entry records
+        TMDB coordinates, letting callers skip translating the TVDB season
+        through PMDB entirely.
+        """
+        result = self._resolve_tvdb_episode(anidb_id, anidb_episode, anidb_season)
+        if not result:
+            return result
+        return self._with_tmdb_coordinates(result, anidb_id, anidb_episode)
+
+    def _with_tmdb_coordinates(self, result: dict, anidb_id: int, anidb_episode: int) -> dict:
+        """Attach TMDB coordinates to a TVDB resolution when the feed has them.
+
+        Only applied when the entry-level ``episodeoffset`` produced the result.
+        Per-range ``mapping-list`` offsets and absolute numbering are TVDB-specific
+        and have no TMDB counterpart upstream, so those keep the TVDB path.
+        """
+        anime_entry = self._xml_by_anidb.get(int(anidb_id))
+        if anime_entry is None:
+            return result
+        attrs = anime_entry.attrib
+        tmdb_season = _safe_int(attrs.get("tmdbseason"))
+        if tmdb_season is None:
+            return result
+        entry_offset = _safe_int(attrs.get("episodeoffset")) or 0
+        if _safe_int(result.get("tvdb_episode")) != int(anidb_episode) + entry_offset:
+            return result
+
+        enriched = dict(result)
+        enriched["tmdb_season"] = tmdb_season
+        enriched["tmdb_episode"] = int(anidb_episode) + (_safe_int(attrs.get("tmdboffset")) or 0)
+        tmdb_id = _safe_int(attrs.get("tmdbtv")) or _safe_int(attrs.get("tmdbid"))
+        if tmdb_id:
+            enriched["tmdb_id"] = tmdb_id
+        return enriched
+
+    def _resolve_tvdb_episode(
         self,
         anidb_id: int,
         anidb_episode: int,
@@ -325,6 +430,7 @@ class AnimeMappingStore:
             self._fribb_by_simkl.clear()
             self._fribb_by_tmdb.clear()
             self._fribb_by_imdb.clear()
+            self._fribb_by_tvdb.clear()
             for entry in data:
                 if not isinstance(entry, dict):
                     continue
@@ -337,11 +443,17 @@ class AnimeMappingStore:
                     entry_id = _safe_int(entry.get(field_name))
                     if entry_id:
                         target[entry_id] = entry
-                tmdb_id = _safe_int(entry.get("themoviedb_id") or entry.get("themoviedb"))
+                tvdb_id = _safe_int(entry.get("tvdb_id"))
+                if tvdb_id:
+                    self._fribb_by_tvdb.setdefault(tvdb_id, []).append(entry)
+                tmdb_id, _tmdb_media_type = extract_tmdb(
+                    entry.get("themoviedb_id") or entry.get("themoviedb")
+                )
                 if tmdb_id:
                     self._fribb_by_tmdb.setdefault(tmdb_id, []).append(entry)
-                imdb_id = str(entry.get("imdb_id") or "").strip()
-                if imdb_id:
+                # imdb_id is always a list upstream, and 46 entries carry more
+                # than one.  Index every id so each resolves back to the entry.
+                for imdb_id in _iter_imdb_ids(entry.get("imdb_id")):
                     self._fribb_by_imdb.setdefault(imdb_id, []).append(entry)
             self._fribb_loaded = True
 
@@ -382,9 +494,12 @@ class AnimeMappingStore:
                 tvdb_id = _safe_int(attrs.get("tvdbid"))
                 if tvdb_id:
                     self._xml_by_tvdb.setdefault(tvdb_id, []).append(anime)
-                tmdb_id = _safe_int(attrs.get("tmdbtv"))
-                if tmdb_id:
-                    self._xml_by_tmdb.setdefault(tmdb_id, []).append(anime)
+                # tmdbtv is the series id; tmdbid is the movie id.  Index both so
+                # anime films are reachable, not just series.
+                for tmdb_attr in ("tmdbtv", "tmdbid"):
+                    tmdb_id = _safe_int(attrs.get(tmdb_attr))
+                    if tmdb_id:
+                        self._xml_by_tmdb.setdefault(tmdb_id, []).append(anime)
                 imdb_ids = str(attrs.get("imdbid") or "").strip()
                 if imdb_ids:
                     for imdb_id in [part.strip() for part in imdb_ids.split(",") if part.strip() and part.strip() != "unknown"]:

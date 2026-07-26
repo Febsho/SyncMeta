@@ -7,6 +7,7 @@ from unittest.mock import patch
 os.environ["DISABLE_PROFILE_SCHEDULER"] = "1"
 
 import web  # noqa: E402
+from src import log_capture  # noqa: E402
 
 
 class WebTests(unittest.TestCase):
@@ -529,6 +530,70 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(clear_response.status_code, 200)
         self.assertEqual(logs_after_clear.get_json()["entries"], [])
+
+    def _make_bare_profile(self) -> dict:
+        return web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+
+    def test_global_logs_endpoint_requires_a_session(self) -> None:
+        # Unauthenticated, this returned every profile's buffered sync logs.
+        response = self.client.get("/api/logs")
+        self.assertEqual(response.status_code, 401)
+
+    def test_global_logs_endpoint_ignores_a_client_supplied_profile(self) -> None:
+        first = self._make_bare_profile()
+        second = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": first["profile_id"], "password": "secret"})
+
+        log_capture.set_profile_context(first["profile_id"])
+        web.logger.info("first-only capture line")
+        log_capture.set_profile_context(second["profile_id"])
+        web.logger.info("second-only capture line")
+        log_capture.set_profile_context(None)
+
+        # Asking for the other profile's logs must not honour the request.
+        response = self.client.get("/api/logs?profile=" + second["profile_id"])
+        messages = [entry["message"] for entry in response.get_json()["entries"]]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("first-only capture line", messages)
+        self.assertNotIn("second-only capture line", messages)
+
+    def test_global_logs_clear_requires_a_session(self) -> None:
+        response = self.client.post("/api/logs/clear")
+        self.assertEqual(response.status_code, 401)
+
+    def test_global_logs_clear_only_affects_the_caller(self) -> None:
+        first = self._make_bare_profile()
+        second = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": first["profile_id"], "password": "secret"})
+
+        log_capture.set_profile_context(first["profile_id"])
+        web.logger.info("caller line")
+        log_capture.set_profile_context(second["profile_id"])
+        web.logger.info("bystander line")
+        log_capture.set_profile_context(None)
+
+        seq_before = log_capture.snapshot(limit=500)[-1]["seq"]
+        clear_response = self.client.post("/api/logs/clear")
+        self.assertEqual(clear_response.status_code, 200)
+
+        remaining = [entry["message"] for entry in log_capture.snapshot(limit=500)]
+        self.assertNotIn("caller line", remaining)
+        self.assertIn("bystander line", remaining, "another profile's logs must survive")
+
+        # The shared sequence counter must keep advancing, or every other
+        # client's cursor would sit above all future entries.
+        log_capture.set_profile_context(second["profile_id"])
+        web.logger.info("line after clear")
+        log_capture.set_profile_context(None)
+        seq_after = log_capture.snapshot(limit=500)[-1]["seq"]
+        self.assertGreater(seq_after, seq_before)
 
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {
@@ -1221,6 +1286,42 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["profile"]["last_results"][0]["items_skipped_unresolved"], 0)
         self.assertEqual(data["profile"]["last_results"][0]["items_added"], 1)
         mock_add_item_to_list.assert_called_once_with("pmdb-list-1", 4567, "tv")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    @patch("web.PublicMetaDBClient.lookup_by_external_id_detailed")
+    def test_auto_resolve_does_not_reuse_a_rejected_candidate(
+        self, mock_lookup_detailed, mock_fribb_anilist,
+    ) -> None:
+        # candidate_tmdb_id is the ID the matcher *declined* — an unverified or
+        # blocklisted community mapping, recorded only as a hint for the user.
+        # Returning it as the automatic answer re-applied the exact mapping the
+        # safety guards rejected.
+        mock_fribb_anilist.return_value = None
+        mock_lookup_detailed.return_value = {"tmdb_id": None, "status": "miss"}
+
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        private_profile = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        private_profile["unresolved_items"] = [{
+            "cache_key": "anime-blocked",
+            "title": "Example Anime",
+            "media_type": "tv",
+            "simkl_type": "anime",
+            "anilist_id": "12345",
+            "anime_resolve_mode": "list_identity",
+            # 277700 is on the known-bad blocklist in matcher.py.
+            "candidate_tmdb_id": 277700,
+            "unresolved_reason": "unconfirmed_mapping",
+        }]
+        web._profile_store._profiles[profile["profile_id"]] = private_profile
+
+        response = self.client.post("/api/profile/unresolved/auto-resolve", json={"cache_key": "anime-blocked"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(data["status"], "unresolved")
+        self.assertIn("No automatic mapping", data["message"])
 
     @patch("web.PublicMetaDBClient.delete_list")
     def test_delete_managed_list_endpoint_removes_mdblist_selection(self, mock_delete_list) -> None:

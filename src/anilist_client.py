@@ -64,7 +64,9 @@ query ($userName: String, $status: MediaListStatus) {
           title {
             romaji
             english
+            native
           }
+          synonyms
           seasonYear
           format
           episodes
@@ -520,8 +522,11 @@ class AniListClient:
                 ids["anidb"] = fribb_entry.get("anidb_id")
             if fribb_entry.get("tvdb_id"):
                 ids["tvdb"] = fribb_entry.get("tvdb_id")
-            if fribb_entry.get("imdb_id"):
-                ids["imdb"] = fribb_entry.get("imdb_id")
+            # imdb_id is a list upstream; keep a single string so downstream
+            # external-mapping lookups don't send "['tt0286390']" as the id.
+            imdb_id = fribb_client.single_imdb_id(fribb_entry.get("imdb_id"))
+            if imdb_id:
+                ids["imdb"] = imdb_id
             if fribb_entry.get("themoviedb_id"):
                 ids["tmdb"] = fribb_entry.get("themoviedb_id")
             if fribb_entry.get("simkl_id"):
@@ -570,6 +575,7 @@ class AniListClient:
 
         return {
             "title": title,
+            "title_variants": self._media_title_variants(media) + fribb_client.title_hints(fribb_entry),
             "year": media.get("seasonYear"),
             "media_type": media_type,
             "simkl_type": "anime",
@@ -733,3 +739,37 @@ class AniListClient:
     def _media_title(media: dict) -> str:
         titles = media.get("title", {})
         return titles.get("english") or titles.get("romaji") or "Unknown"
+
+    @staticmethod
+    def _media_title_variants(media: dict) -> list[str]:
+        """Every title AniList knows for this entry, most-canonical first.
+
+        Providers disagree about which title to report — PMDB often holds the
+        English title where AniList reports romaji — so the matcher compares
+        against all of them rather than rejecting a correct mapping whose title
+        simply happens to be in the other language.
+        """
+        titles = media.get("title") or {}
+        candidates: list[str] = []
+        if isinstance(titles, dict):
+            candidates.extend([
+                titles.get("english"),
+                titles.get("romaji"),
+                titles.get("native"),
+            ])
+        synonyms = media.get("synonyms")
+        if isinstance(synonyms, (list, tuple)):
+            candidates.extend(synonyms)
+
+        variants: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append(text)
+        return variants
