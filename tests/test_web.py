@@ -47,6 +47,11 @@ class WebTests(unittest.TestCase):
         self.assertIn("Use the redirect URL if asked.", html)
         self.assertIn('id="simkl-redirect-url"', html)
         self.assertIn('id="trakt-redirect-url"', html)
+        self.assertIn('id="anilist-access-token"', html)
+        # AniList's redirect URL is a fixed AniList endpoint, not this site's
+        # address, and it is what makes the paste-a-token flow work at all.
+        self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)
+        self.assertIn("response_type=token", html)
         self.assertIn("https://github.com/Febsho/SyncMeta-for-PublicMetaDB", html)
         self.assertIn("List Visibility", html)
         self.assertIn('id="opt-simkl-visibility"', html)

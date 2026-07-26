@@ -600,7 +600,19 @@
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
                   <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
-                  <div class="form-row" style="margin-bottom:0"><label for="anilist-access-token">Access Token <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="password" id="anilist-access-token" placeholder="Only needed to write to AniList" autocomplete="off"><div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only required to write to AniList &mdash; private lists, or using AniList as a sync-pair target. Stored securely for this profile. Leave blank to keep it. <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">Create a token</a></div></div>
+                  <div class="form-row">
+                    <label for="anilist-access-token">Access Token <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label>
+                    <input type="password" id="anilist-access-token" placeholder="Only needed to write to AniList" autocomplete="off">
+                    <div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only required to <strong>write</strong> to AniList &mdash; private lists, or using AniList as a sync-pair target. Stored securely for this profile. Leave blank to keep it.</div>
+                  </div>
+                  <div class="form-row" style="margin-bottom:0">
+                    <label for="anilist-redirect-url">Redirect URL</label>
+                    <div class="copy-row">
+                      <input type="text" id="anilist-redirect-url" readonly value="https://anilist.co/api/v2/oauth/pin">
+                      <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('anilist-redirect-url')">Copy</button>
+                    </div>
+                    <div class="hint">Unlike SIMKL and Trakt, this is a fixed AniList URL, not this site&rsquo;s address. Create a client at <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">anilist.co/settings/developer</a>, set its Redirect URL to the value above, then open<br><code style="font-size:11px;color:var(--z400)">https://anilist.co/api/v2/oauth/authorize?client_id=YOUR_ID&amp;response_type=token</code><br>and paste the token AniList shows you into the field above. No client secret is needed, and the token lasts a year.</div>
+                  </div>
                 </div>
                 <div class="conn-card form-section">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
