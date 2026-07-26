@@ -306,6 +306,7 @@
       </a>
       <div class="nav-links">
         <button class="nav-link" data-nav="dashboard" style="display:none">Dashboard</button>
+        <button class="nav-link" data-nav="sync" style="display:none">Sync</button>
         <button class="nav-link" data-nav="logs" style="display:none">Logs</button>
         <button class="nav-link" data-nav="stats" style="display:none">Stats</button>
         <button class="nav-link" data-nav="settings" style="display:none">Settings</button>
@@ -414,6 +415,42 @@
         </div>
       </div>
 
+      <div id="view-sync" style="display:none">
+        <div class="topbar">
+          <div>
+            <h1 class="page-title">Cross-Service Sync</h1>
+            <div class="page-sub" id="sync-pairs-sub">Copy lists between Trakt, SIMKL, AniList, MDBList and PublicMetaDB.</div>
+          </div>
+          <div class="inline-actions">
+            <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
+            <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-run">Run All</button>
+          </div>
+        </div>
+        <div class="cards" id="sync-cards"></div>
+        <div class="panel">
+          <div class="panel-header"><span>Sync Pairs</span><span class="catalog-note" id="pairs-count"></span></div>
+            
+              <div class="form-section">
+                <div class="form-section-title">Cross-Service Sync Pairs</div>
+                <div class="hint" style="margin-bottom:12px">
+                  A pair copies one kind of list from one service to another, in one
+                  direction. Add a second pair for the reverse direction. Every
+                  service that can be written to may be a target.
+                </div>
+                <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
+                <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
+                <div class="inline-actions" style="justify-content:flex-start;margin-top:12px">
+                  <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
+                  <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
+                  <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
+                  <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
+                </div>
+                <div id="pairs-results" style="margin-top:12px"></div>
+              </div>
+            
+        </div>
+      </div>
+
       <div id="view-logs" style="display:none">
         <div class="panel">
           <div class="panel-header">
@@ -458,10 +495,6 @@
               <button class="settings-nav-item" id="snav-lists" onclick="showSettingsTab('lists')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
                 Lists
-              </button>
-              <button class="settings-nav-item" id="snav-pairs" onclick="showSettingsTab('pairs')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 17h6a4 4 0 004-4V7"/><polyline points="11 4 14 7 11 10"/><path d="M20 7h-6a4 4 0 00-4 4v6"/><polyline points="13 20 10 17 13 14"/></svg>
-                Sync Pairs
               </button>
               <button class="settings-nav-item" id="snav-behavior" onclick="showSettingsTab('behavior')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
@@ -700,25 +733,6 @@
             </div>
 
             <!-- BEHAVIOR TAB -->
-            <div class="settings-tab" id="stab-pairs">
-              <div class="form-section">
-                <div class="form-section-title">Cross-Service Sync Pairs</div>
-                <div class="hint" style="margin-bottom:12px">
-                  A pair copies one kind of list from one service to another, in one
-                  direction. Add a second pair for the reverse direction. Every
-                  service that can be written to may be a target.
-                </div>
-                <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
-                <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
-                <div class="inline-actions" style="justify-content:flex-start;margin-top:12px">
-                  <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
-                  <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
-                  <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
-                  <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
-                </div>
-                <div id="pairs-results" style="margin-top:12px"></div>
-              </div>
-            </div>
             <div class="settings-tab" id="stab-behavior">
               <div class="settings-page-title">Behavior</div>
               <div class="settings-page-desc">Control how and when SyncMeta fetches and pushes data.</div>
@@ -1698,9 +1712,15 @@
         else link.removeAttribute('aria-current');
       });
       el('view-dashboard').style.display = name === 'dashboard' ? 'block' : 'none';
+      el('view-sync').style.display = name === 'sync' ? 'block' : 'none';
       el('view-logs').style.display = name === 'logs' ? 'block' : 'none';
       el('view-stats').style.display = name === 'stats' ? 'block' : 'none';
       el('view-settings').style.display = name === 'settings' ? 'block' : 'none';
+      if (name === 'sync') {
+        // Capability depends on live credentials, so refresh on open rather
+        // than showing a view cached from before a service was connected.
+        fetchPairs();
+      }
       if (navTarget === 'connections') {
         showSettingsTab('connections');
       } else if (navTarget === 'rules') {
@@ -4636,18 +4656,54 @@
       const navEl = document.getElementById('snav-' + tab);
       if (tabEl) tabEl.classList.add('active');
       if (navEl) { navEl.classList.add('active'); navEl.setAttribute('aria-current', 'true'); }
-      // Pairs depend on live provider capability, so load them on open rather
-      // than caching a stale view from before a service was connected.
-      if (tab === 'pairs') fetchPairs();
+
     }
 
     // ── Cross-service sync pairs ───────────────────────────────────────────
 
     let pairsState = { pairs: [], providers: [], categories: [], removal_modes: [] };
+    // provider key -> list_sources(), fetched lazily. Enumerating lists calls
+    // each provider's API, so it must not block opening the view.
+    let pairListsByProvider = {};
+    const pairListsLoading = new Set();
+
+    async function ensurePairLists(providerKey) {
+      if (!providerKey || pairListsByProvider[providerKey] || pairListsLoading.has(providerKey)) return;
+      const provider = pairsState.providers.find(p => p.key === providerKey);
+      if (!provider || !provider.configured || !provider.has_lists) return;
+      pairListsLoading.add(providerKey);
+      try {
+        const result = await apiPost('/api/profile/pairs/lists', { provider: providerKey });
+        pairListsByProvider[providerKey] = (result.ok && Array.isArray(result.data.lists)) ? result.data.lists : [];
+      } catch {
+        pairListsByProvider[providerKey] = [];
+      } finally {
+        pairListsLoading.delete(providerKey);
+        renderPairs();
+      }
+    }
 
     function providerLabel(key) {
       const provider = pairsState.providers.find(p => p.key === key);
       return provider ? provider.label : key;
+    }
+
+    function renderSyncCards() {
+      const node = el('sync-cards');
+      if (!node) return;
+      const pairs = pairsState.pairs || [];
+      const enabled = pairs.filter(p => p.enabled !== false).length;
+      const problems = pairs.filter(p => p.problem).length;
+      const destructive = pairs.filter(p => p.removal_mode && p.removal_mode !== 'additive').length;
+      const connected = (pairsState.providers || []).filter(p => p.configured).length;
+      node.innerHTML = `
+        <div class="card"><div class="card-label">Pairs</div><div class="card-value">${pairs.length}</div><div class="card-sub">${enabled} enabled</div></div>
+        <div class="card"><div class="card-label">Services</div><div class="card-value">${connected}</div><div class="card-sub">of ${(pairsState.providers || []).length} connected</div></div>
+        <div class="card"><div class="card-label">Needs Attention</div><div class="card-value" style="color:${problems ? 'var(--orange)' : 'var(--z600)'}">${problems}</div><div class="card-sub">${problems ? 'pair(s) cannot run' : 'all pairs runnable'}</div></div>
+        <div class="card"><div class="card-label">Can Remove</div><div class="card-value" style="color:${destructive ? 'var(--orange)' : 'var(--z600)'}">${destructive}</div><div class="card-sub">${destructive ? 'pair(s) may delete' : 'all additive'}</div></div>
+      `;
+      const count = el('pairs-count');
+      if (count) count.textContent = pairs.length ? `${pairs.length} configured` : '';
     }
 
     function renderPairCapabilities() {
@@ -4672,24 +4728,65 @@
         return;
       }
 
-      // Only offer providers that can actually read / be written to, so an
-      // impossible pair cannot be built in the first place.
-      const sources = pairsState.providers.filter(p => p.configured && p.reads.length);
+      // Every provider is listed, but ones that cannot fill the role are
+      // disabled with the reason attached. Omitting them entirely gave no way
+      // to tell a missing setting from a bug.
+      const sources = pairsState.providers.filter(p => p.configured && p.reads.length && !p.unavailable_reason);
       const targets = pairsState.providers.filter(p => p.configured && p.writes.length);
 
+      function optionsFor(role, selectedKey) {
+        return pairsState.providers.map(provider => {
+          const usable = role === 'source'
+            ? (provider.configured && provider.reads.length && !provider.unavailable_reason)
+            : (provider.configured && provider.writes.length);
+          let why = '';
+          if (!usable) {
+            // For a target, an inability to write is the truthful reason and
+            // outranks any source-side note.
+            why = role === 'target'
+              ? (provider.write_blocked_reason || provider.unavailable_reason || 'Not available')
+              : (provider.unavailable_reason || 'Not available');
+          }
+          const label = usable ? provider.label : `${provider.label} — ${why}`;
+          return `<option value="${escAttr(provider.key)}" ${provider.key === selectedKey ? 'selected' : ''} ${usable ? '' : 'disabled'}>${esc(label)}</option>`;
+        }).join('');
+      }
+
       node.innerHTML = pairsState.pairs.map((pair, index) => {
-        const sourceOptions = sources.map(p =>
-          `<option value="${escAttr(p.key)}" ${p.key === pair.source ? 'selected' : ''}>${esc(p.label)}</option>`
-        ).join('');
-        const targetOptions = targets.map(p =>
-          `<option value="${escAttr(p.key)}" ${p.key === pair.target ? 'selected' : ''}>${esc(p.label)}</option>`
-        ).join('');
+        const sourceOptions = optionsFor('source', pair.source);
+        const targetOptions = optionsFor('target', pair.target);
         const categoryBoxes = pairsState.categories.map(category => `
           <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
             <input type="checkbox" data-pair-index="${index}" data-pair-category="${escAttr(category.key)}"
                    ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
             ${esc(category.label)}
           </label>`).join('');
+        // Which named lists on the source feed this pair. Providers whose
+        // categories are single fixed lists (SIMKL/AniList statuses) offer none,
+        // and the pair simply syncs the whole category.
+        const sourceProvider = pairsState.providers.find(p => p.key === pair.source);
+        const availableLists = pairListsByProvider[pair.source] || [];
+        const listsPending = !!(sourceProvider && sourceProvider.has_lists && !pairListsByProvider[pair.source]);
+        if (listsPending) ensurePairLists(pair.source);
+        const chosenLists = pair.source_lists || [];
+        const listPicker = listsPending ? `
+          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+            <label>Which lists</label>
+            <div class="catalog-note">Loading lists from ${esc(providerLabel(pair.source))}...</div>
+          </div>` : availableLists.length ? `
+          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+            <label id="pair-lists-label-${index}">Which lists</label>
+            <div role="group" aria-labelledby="pair-lists-label-${index}">
+              ${availableLists.map(entry => `
+                <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
+                  <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
+                         ${chosenLists.includes(entry.key) ? 'checked' : ''}>
+                  ${esc(entry.label)}
+                </label>`).join('')}
+            </div>
+            <div class="hint">${chosenLists.length ? 'Only the ticked lists are read.' : `Nothing ticked &mdash; ${esc(providerLabel(pair.source))}'s default for each category is used.`}</div>
+          </div>` : '';
+
         const removalOptions = pairsState.removal_modes.map(mode =>
           `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(mode.label)}</option>`
         ).join('');
@@ -4720,6 +4817,7 @@
             <label id="pair-cats-label-${index}">What to sync</label>
             <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
           </div>
+          ${listPicker}
           <div class="form-row" style="margin-bottom:0">
             <label for="pair-removal-${index}">Removals</label>
             <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
@@ -4742,9 +4840,16 @@
           const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
           if (!pair) return;
           const field = input.dataset.pairField;
+          const previous = pair[field];
           pair[field] = input.type === 'checkbox' ? input.checked : input.value;
+          if (field === 'source' && previous !== pair[field]) {
+            // List keys are provider-specific, so a stale pick would silently
+            // filter the new source down to nothing.
+            pair.source_lists = [];
+          }
           // Re-render so the destructive-mode warning and names track the change.
           if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairs();
+          renderSyncCards();
         });
       });
       node.querySelectorAll('[data-pair-category]').forEach(input => {
@@ -4755,6 +4860,17 @@
           const categories = new Set(pair.categories || []);
           if (input.checked) categories.add(category); else categories.delete(category);
           pair.categories = Array.from(categories);
+        });
+      });
+      node.querySelectorAll('[data-pair-list]').forEach(input => {
+        input.addEventListener('change', () => {
+          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
+          if (!pair) return;
+          const chosen = new Set(pair.source_lists || []);
+          if (input.checked) chosen.add(input.dataset.pairList);
+          else chosen.delete(input.dataset.pairList);
+          pair.source_lists = Array.from(chosen);
+          renderPairs();
         });
       });
       node.querySelectorAll('[data-pair-remove]').forEach(btn => {
@@ -4791,6 +4907,7 @@
         removal_modes: Array.isArray(result.data.removal_modes) ? result.data.removal_modes : [],
       };
       renderPairCapabilities();
+      renderSyncCards();
       renderPairs();
     }
 
@@ -4809,6 +4926,7 @@
         source: source,
         target: target,
         categories: ['watchlist'],
+        source_lists: [],
         removal_mode: 'additive',
         enabled: true,
       });
@@ -4825,6 +4943,7 @@
           source: pair.source,
           target: pair.target,
           categories: pair.categories || [],
+          source_lists: pair.source_lists || [],
           removal_mode: pair.removal_mode || 'additive',
           enabled: pair.enabled !== false,
         }));

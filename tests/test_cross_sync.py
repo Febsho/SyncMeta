@@ -48,6 +48,7 @@ class FakeAdapter(ProviderAdapter):
         self._fetch_error = fetch_error
         self.added: list[tuple[str, list[dict]]] = []
         self.removed: list[tuple[str, list[dict]]] = []
+        self.fetched: list[tuple[str, list[str]]] = []
 
     def can_write(self) -> bool:
         return self._writable
@@ -55,7 +56,8 @@ class FakeAdapter(ProviderAdapter):
     def write_blocked_reason(self) -> str:
         return self._blocked_reason
 
-    def fetch(self, category: str) -> list[dict]:
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        self.fetched.append((category, list(source_lists or [])))
         if self._fetch_error:
             raise RuntimeError(self._fetch_error)
         return list(self._contents.get(category, []))
@@ -362,6 +364,37 @@ class IdentityTests(unittest.TestCase):
 
         self.assertEqual(stats.added, 0, "item already present on the target")
         self.assertEqual(target.added, [])
+
+
+class SourceListSelectionTests(unittest.TestCase):
+    def test_selected_lists_are_passed_to_the_source(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pair(_pair(source_lists=["watchlist", "list:me/faves"]))
+
+        self.assertEqual(source.fetched[0][1], ["watchlist", "list:me/faves"])
+
+    def test_no_selection_means_the_provider_default(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pair(_pair())
+
+        self.assertEqual(source.fetched[0][1], [])
+
+    def test_the_target_is_read_without_a_source_list_filter(self) -> None:
+        # source_lists narrows what is read *from the source*; the target's
+        # current contents must always be read in full or the diff is wrong.
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pair(_pair(source_lists=["list:me/faves"]))
+
+        self.assertEqual(target.fetched[0][1], [])
 
 
 class MdbListSourceTests(unittest.TestCase):

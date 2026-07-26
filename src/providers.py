@@ -183,6 +183,10 @@ class ProviderAdapter:
     reads: tuple[str, ...] = ()
     writes: tuple[str, ...] = ()
 
+    #: Whether this provider has named lists worth offering per pair. False for
+    #: providers whose categories are single fixed lists (SIMKL/AniList statuses).
+    supports_list_selection: bool = False
+
     def can_write(self) -> bool:
         """Whether the configured credentials permit writing at all."""
         return True
@@ -197,8 +201,23 @@ class ProviderAdapter:
     def writable_categories(self) -> tuple[str, ...]:
         return self.writes if self.can_write() else ()
 
-    def fetch(self, category: str) -> list[dict]:
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        """Read a category.
+
+        ``source_lists`` narrows the read to specific named lists when the
+        provider has them (see ``list_sources``).  Empty or None means the
+        provider's default for that category — e.g. Trakt's own watchlist.
+        """
         raise NotImplementedError
+
+    def list_sources(self) -> list[dict]:
+        """Named lists this provider can read, for per-pair selection.
+
+        Returns ``[{"key", "label", "categories"}]``.  Providers whose
+        categories are single fixed lists (SIMKL statuses, AniList statuses)
+        return nothing, and their pairs simply sync the whole category.
+        """
+        return []
 
     def add(self, category: str, items: list[dict]) -> dict:
         raise NotImplementedError
@@ -216,7 +235,20 @@ class ProviderAdapter:
             "reads": list(self.readable_categories()),
             "writes": list(self.writable_categories()),
             "write_blocked_reason": "" if self.can_write() else self.write_blocked_reason(),
+            # Named lists are deliberately NOT included: enumerating them hits
+            # every provider's API, which made opening the pair editor wait on
+            # live network calls. They are fetched on demand instead.
+            "has_lists": bool(self.reads) and self.supports_list_selection,
         }
+
+    def safe_list_sources(self) -> list[dict]:
+        """list_sources() but never raising — it hits the network for some
+        providers, and a capability report must not fail because one is down."""
+        try:
+            return list(self.list_sources())
+        except Exception:
+            logger.warning("%s: could not enumerate lists", self.label, exc_info=True)
+            return []
 
     def _unsupported(self, category: str, action: str) -> dict:
         raise ValueError(f"{self.label} cannot {action} {category!r}")
@@ -227,13 +259,61 @@ class TraktAdapter(ProviderAdapter):
     label = "Trakt"
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    supports_list_selection = True
 
     def __init__(self, client):
         self._client = client
 
-    def fetch(self, category: str) -> list[dict]:
+    def list_sources(self) -> list[dict]:
+        """Trakt's own watchlist plus the user's personal and liked lists."""
+        out = [{
+            "key": "watchlist",
+            "label": "Watchlist (native)",
+            "categories": [CATEGORY_WATCHLIST],
+        }]
+        for meta in (self._client.get_personal_lists_metadata() or []):
+            out.append({
+                "key": f"list:{meta.get('user')}/{meta.get('slug')}",
+                "label": f"{meta.get('name')} (personal)",
+                "categories": [CATEGORY_WATCHLIST, CATEGORY_COLLECTION],
+            })
+        for meta in (self._client.get_liked_lists_metadata() or []):
+            out.append({
+                "key": f"list:{meta.get('user')}/{meta.get('slug')}",
+                "label": f"{meta.get('name')} (liked)",
+                "categories": [CATEGORY_WATCHLIST, CATEGORY_COLLECTION],
+            })
+        return out
+
+    def _watchlist_items(self, source_lists: list[str] | None) -> list[dict]:
+        """Native watchlist by default, or exactly the custom lists chosen."""
+        selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        items: list[dict] = []
+        seen: set[str] = set()
+
+        def _extend(fetched):
+            for item in fetched or []:
+                key = item_key(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(item)
+
+        if not selected or "watchlist" in selected:
+            _extend(self._client.get_watchlist())
+        for key in selected:
+            if not key.startswith("list:"):
+                continue
+            reference = key.split(":", 1)[1]
+            if "/" not in reference:
+                continue
+            user, slug = reference.split("/", 1)
+            _extend(self._client.get_list_items(user, slug))
+        return items
+
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         if category == CATEGORY_WATCHLIST:
-            return list(self._client.get_watchlist() or [])
+            return self._watchlist_items(source_lists)
         if category == CATEGORY_HISTORY:
             return list(self._client.get_watched_history() or [])
         if category == CATEGORY_COLLECTION:
@@ -277,7 +357,7 @@ class SimklAdapter(ProviderAdapter):
             out.extend(grouped.get(media_type, []) or [])
         return out
 
-    def fetch(self, category: str) -> list[dict]:
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         if category == CATEGORY_WATCHLIST:
             return self._fetch_status("plantowatch")
         if category == CATEGORY_COLLECTION:
@@ -324,7 +404,7 @@ class AniListAdapter(ProviderAdapter):
     def write_blocked_reason(self) -> str:
         return self._client.write_blocked_reason()
 
-    def fetch(self, category: str) -> list[dict]:
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         status = self._STATUS_FOR_CATEGORY.get(category)
         if not status:
             return self._unsupported(category, "read")
@@ -346,6 +426,7 @@ class PmdbAdapter(ProviderAdapter):
     label = "PublicMetaDB"
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY)
+    supports_list_selection = True
 
     def __init__(self, client):
         self._client = client
@@ -384,13 +465,54 @@ class PmdbAdapter(ProviderAdapter):
             "pmdb_item_id": entry.get("id"),
         }
 
-    def fetch(self, category: str) -> list[dict]:
-        if category == CATEGORY_WATCHLIST:
-            list_id = self._watchlist_id()
+    def list_sources(self) -> list[dict]:
+        """PublicMetaDB's own lists, so a pair can read one custom list."""
+        out = [{
+            "key": "watchlist",
+            "label": "Watchlist (native)",
+            "categories": [CATEGORY_WATCHLIST],
+        }]
+        for entry in self._client.get_lists() or []:
+            list_id = entry.get("id")
             if not list_id:
-                return []
-            raw = self._client.get_list_items(list_id) or []
-            return [item for item in (self._normalize_pmdb_entry(e) for e in raw) if item]
+                continue
+            if str(entry.get("list_type") or "").strip().lower() == "watchlist":
+                continue  # already offered above
+            out.append({
+                "key": f"list:{list_id}",
+                "label": str(entry.get("name") or f"List {list_id}"),
+                "categories": [CATEGORY_WATCHLIST],
+            })
+        return out
+
+    def _pmdb_watchlist_items(self, source_lists: list[str] | None) -> list[dict]:
+        selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        list_ids: list[str] = []
+        if not selected or "watchlist" in selected:
+            native = self._watchlist_id()
+            if native:
+                list_ids.append(native)
+        for key in selected:
+            if key.startswith("list:"):
+                list_ids.append(key.split(":", 1)[1])
+
+        items: list[dict] = []
+        seen: set[str] = set()
+        for list_id in list_ids:
+            for raw in self._client.get_list_items(list_id) or []:
+                normalized = self._normalize_pmdb_entry(raw)
+                if not normalized:
+                    continue
+                key = item_key(normalized)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(normalized)
+        return items
+
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        if category == CATEGORY_WATCHLIST:
+            return self._pmdb_watchlist_items(source_lists)
         if category == CATEGORY_HISTORY:
             raw = self._client.get_watched_history() or []
             out: list[dict] = []
@@ -475,11 +597,13 @@ class MdbListAdapter(ProviderAdapter):
     label = "MDBList"
     reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
     writes = ()
+    supports_list_selection = True
 
     def __init__(self, client, selected_lists: list[dict] | None = None):
         self._client = client
         self._selected_lists = list(selected_lists or [])
         self._cache: list[dict] | None = None
+        self._cache_key: str = ""
 
     def can_write(self) -> bool:
         return False
@@ -490,12 +614,31 @@ class MdbListAdapter(ProviderAdapter):
             "can feed other services but cannot be a sync target."
         )
 
-    def _selected_items(self) -> list[dict]:
-        if self._cache is not None:
+    def list_sources(self) -> list[dict]:
+        return [
+            {
+                "key": f"list:{entry.get('id')}",
+                "label": str(entry.get("name") or f"List {entry.get('id')}"),
+                "categories": [CATEGORY_WATCHLIST, CATEGORY_COLLECTION],
+            }
+            for entry in self._selected_lists
+            if entry.get("id")
+        ]
+
+    def _selected_items(self, source_lists: list[str] | None = None) -> list[dict]:
+        chosen = {
+            str(key).split(":", 1)[1]
+            for key in (source_lists or [])
+            if str(key).startswith("list:")
+        }
+        cache_key = ",".join(sorted(chosen))
+        if self._cache is not None and self._cache_key == cache_key:
             return self._cache
         items: list[dict] = []
         seen: set[str] = set()
         for entry in self._selected_lists:
+            if chosen and str(entry.get("id")) not in chosen:
+                continue
             list_id = entry.get("id")
             if not list_id:
                 continue
@@ -514,11 +657,12 @@ class MdbListAdapter(ProviderAdapter):
                 seen.add(key)
                 items.append(item)
         self._cache = items
+        self._cache_key = cache_key
         return items
 
-    def fetch(self, category: str) -> list[dict]:
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
-            return list(self._selected_items())
+            return list(self._selected_items(source_lists))
         return self._unsupported(category, "read")
 
     def add(self, category: str, items: list[dict]) -> dict:

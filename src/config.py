@@ -128,6 +128,9 @@ class SyncPair:
     source: str = ""
     target: str = ""
     categories: list[str] = field(default_factory=list)
+    # Specific named lists on the source to read. Empty means the provider's
+    # default for each category (e.g. Trakt's own watchlist).
+    source_lists: list[str] = field(default_factory=list)
     removal_mode: str = "additive"
     enabled: bool = True
 
@@ -138,6 +141,7 @@ class SyncPair:
             "source": self.source,
             "target": self.target,
             "categories": list(self.categories),
+            "source_lists": list(self.source_lists),
             "removal_mode": self.removal_mode,
             "enabled": bool(self.enabled),
         }
@@ -171,12 +175,19 @@ class SyncPair:
             # inheriting a destructive one.
             removal_mode = REMOVAL_ADDITIVE
 
+        source_lists = [
+            str(value).strip()
+            for value in (raw.get("source_lists") or [])
+            if str(value).strip()
+        ]
+
         return cls(
             pair_id=str(raw.get("pair_id", "") or "").strip(),
             name=str(raw.get("name", "") or "").strip(),
             source=source,
             target=target,
             categories=categories,
+            source_lists=source_lists,
             removal_mode=removal_mode,
             enabled=bool(raw.get("enabled", True)),
         )

@@ -850,8 +850,10 @@ def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) 
         adapters["anilist"] = AniListAdapter(
             AniListClient(config.anilist, cancel_requested_callback=cancel_requested_callback),
         )
-    if config.mdblist.enabled and config.mdblist.api_key:
-        # Source only: MDBList has no write path here.
+    if config.mdblist.api_key:
+        # Gate on the API key alone. mdblist.enabled additionally requires
+        # selected lists, which would make MDBList vanish from the pair editor
+        # with no explanation before any list had been picked.
         adapters["mdblist"] = MdbListAdapter(
             MdbListClient(config.mdblist),
             selected_lists=list(config.mdblist.selected_lists or []),
@@ -873,6 +875,46 @@ def _sync_pairs_from_config(config: AppConfig) -> list:
     return pairs
 
 
+PROVIDER_LABELS = {
+    "trakt": "Trakt",
+    "simkl": "SIMKL",
+    "anilist": "AniList",
+    "mdblist": "MDBList",
+    "pmdb": "PublicMetaDB",
+}
+
+
+def _provider_unavailable_reason(config: AppConfig, key: str) -> str:
+    """Why a provider offers nothing, in the user's terms.
+
+    Returned for providers with no adapter so the pair editor can show them
+    greyed out with a reason instead of omitting them, which leaves no way to
+    tell a missing setting from a bug.
+    """
+    if key == "trakt":
+        if not config.trakt.client_id or not config.trakt.access_token:
+            return "Connect Trakt in Connections first."
+        if not config.trakt.enabled:
+            return "Trakt is connected but disabled."
+    elif key == "simkl":
+        if not config.simkl.client_id or not config.simkl.access_token:
+            return "Connect SIMKL in Connections first."
+    elif key == "anilist":
+        return "Add your AniList username in Connections first."
+    elif key == "mdblist":
+        return "Add your MDBList API key in Connections first."
+    elif key == "pmdb":
+        return "Add your PublicMetaDB API key in Connections first."
+    return "Not configured."
+
+
+def _source_blocked_reason(config: AppConfig, key: str) -> str:
+    """Why a configured provider still cannot act as a source."""
+    if key == "mdblist" and not (config.mdblist.selected_lists or []):
+        return "Choose at least one MDBList list under Lists to use it as a source."
+    return ""
+
+
 def _pair_capabilities(config: AppConfig) -> dict:
     """Provider capability report for the pair editor."""
     adapters = _build_provider_adapters(config)
@@ -882,15 +924,20 @@ def _pair_capabilities(config: AppConfig) -> dict:
         if adapter is None:
             providers.append({
                 "key": key,
-                "label": key,
+                "label": PROVIDER_LABELS.get(key, key),
                 "configured": False,
                 "reads": [],
                 "writes": [],
                 "write_blocked_reason": "",
+                # Same shape as a configured provider so callers never have to
+                # special-case the unconfigured branch.
+                "has_lists": False,
+                "unavailable_reason": _provider_unavailable_reason(config, key),
             })
             continue
         described = adapter.describe()
         described["configured"] = True
+        described["unavailable_reason"] = _source_blocked_reason(config, key)
         providers.append(described)
     return {
         "providers": providers,
@@ -2123,6 +2170,34 @@ def api_profile_pairs():
         pairs.append(entry)
 
     return jsonify({"pairs": pairs, **_pair_capabilities(config)})
+
+
+@app.route("/api/profile/pairs/lists", methods=["POST"])
+def api_profile_pairs_lists():
+    """Named lists for one provider.
+
+    Kept out of the capability response on purpose: enumerating lists calls each
+    provider's API, and doing it for every provider made opening the sync view
+    wait on live network round trips.
+    """
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider", "") or "").strip().lower()
+    if not provider:
+        return _json_error("provider is required", 400)
+
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    adapters = _build_provider_adapters(_config_from_profile(private_profile))
+    adapter = adapters.get(provider)
+    if adapter is None:
+        return jsonify({"provider": provider, "lists": []})
+    return jsonify({"provider": provider, "lists": adapter.safe_list_sources()})
 
 
 @app.route("/api/profile/pairs/save", methods=["POST"])

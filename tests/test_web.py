@@ -768,6 +768,50 @@ class WebTests(unittest.TestCase):
         self.assertEqual(providers["mdblist"]["writes"], [], "MDBList has no write path")
         self.assertIn("only be read from", providers["mdblist"]["write_blocked_reason"])
 
+    def test_capabilities_do_not_enumerate_lists(self) -> None:
+        # Enumerating named lists calls every provider's API. Doing it here made
+        # opening the sync view wait on live network round trips, so the
+        # capability response only advertises *whether* a provider has lists.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        providers = self.client.post("/api/profile/pairs", json={}).get_json()["providers"]
+
+        for provider in providers:
+            self.assertNotIn("lists", provider)
+        by_key = {p["key"]: p for p in providers}
+        self.assertTrue(by_key["pmdb"]["has_lists"])
+        self.assertFalse(by_key["simkl"]["has_lists"], "SIMKL categories are fixed statuses")
+        self.assertFalse(by_key["anilist"]["has_lists"])
+
+    def test_pair_lists_endpoint_requires_a_session(self) -> None:
+        self.assertEqual(self.client.post("/api/profile/pairs/lists", json={}).status_code, 401)
+
+    def test_pair_lists_endpoint_needs_a_provider(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/pairs/lists", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_pair_lists_for_an_unconfigured_provider_is_empty_not_an_error(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/pairs/lists", json={"provider": "trakt"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["lists"], [])
+
+    def test_pair_source_lists_round_trip(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "simkl", "categories": ["watchlist"],
+            "source_lists": ["watchlist", "list:me/faves"],
+        }]})
+        listed = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+
+        self.assertEqual(listed[0]["source_lists"], ["watchlist", "list:me/faves"])
+
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {

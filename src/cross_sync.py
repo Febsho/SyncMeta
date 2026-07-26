@@ -216,7 +216,7 @@ class CrossSyncService:
         self._set_status(f"{pair.display_name()}: reading {category} from {source.label}")
 
         try:
-            source_items = source.fetch(category) or []
+            source_items = source.fetch(category, getattr(pair, "source_lists", None)) or []
         except Exception as exc:
             message = f"Could not read {category} from {source.label}: {exc}"
             result.errors.append(message)
