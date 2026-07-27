@@ -87,6 +87,22 @@ entire list.
 individual episode plays, so `AniListAdapter` advertises no history support at
 either end. Do not add one — it would silently write wrong data.
 
+**Pair sources are the service's own lists, not generic categories.** Each
+adapter's `list_sources()` returns what that service calls its lists (SIMKL
+`status:<name>:<media_type>`, AniList `status:<STATUS>`, Trakt
+watchlist/collection/history plus `list:<user>/<slug>`, PMDB `watchlist` and
+`list:<id>`, MDBList `list:<id>`), each tagged with the neutral category it feeds.
+`SyncPair.source_lists` holds the chosen keys; empty means the provider default.
+An adapter must not fall back to a whole category when the selection names only
+other categories — that would silently sync far more than asked.
+
+**A destination list is only offered where the service supports one.**
+`supports_target_lists` is true for Trakt (`/users/{user}/lists/{slug}/items`) and
+PMDB, false for SIMKL and AniList (no writable custom lists) and MDBList (no
+writes). `SyncPair.target_list` is cleared when the target changes, since list
+keys are provider-specific. Liked Trakt lists are sources only — they belong to
+another user and cannot be written to.
+
 **MDBList is source-only.** `MdbListAdapter` declares `writes = ()` — the client
 has no write path and MDBList's own watch-status sync is handled by its Trakt/Plex
 integrations. It reads the union of `mdblist.selected_lists`, and since an MDBList
