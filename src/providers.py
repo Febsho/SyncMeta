@@ -193,6 +193,11 @@ class ProviderAdapter:
     #: for them at all.
     supports_target_lists: bool = False
 
+    #: Whether ``search_lists`` actually queries the provider. Only Trakt and
+    #: MDBList expose a public list search; offering the box elsewhere invites a
+    #: search that can only ever come back empty.
+    supports_list_search: bool = False
+
     def can_write(self) -> bool:
         """Whether the configured credentials permit writing at all."""
         return True
@@ -272,6 +277,7 @@ class ProviderAdapter:
             # live network calls. They are fetched on demand instead.
             "has_lists": bool(self.reads) and self.supports_list_selection,
             "has_target_lists": self.supports_target_lists and self.can_write(),
+            "has_list_search": bool(self.supports_list_search),
         }
 
     def safe_list_sources(self) -> list[dict]:
@@ -294,6 +300,7 @@ class TraktAdapter(ProviderAdapter):
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = True
+    supports_list_search = True
 
     def __init__(self, client):
         self._client = client
@@ -813,6 +820,7 @@ class MdbListAdapter(ProviderAdapter):
     reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
     writes = ()
     supports_list_selection = True
+    supports_list_search = True
 
     def __init__(self, client, selected_lists: list[dict] | None = None):
         self._client = client

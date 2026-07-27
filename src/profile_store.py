@@ -1335,9 +1335,16 @@ class ProfileStore:
 
     def update_profile(self, profile_id: str, password: str, credentials: dict, options: dict) -> dict:
         normalized_options = normalize_profile_options(options)
+        # See update_profile_by_id: an options payload that omits sync_pairs is
+        # a settings-form save, not a request to delete every pair.
+        keeps_existing_pairs = "sync_pairs" not in (options or {})
 
         with self._lock:
             profile = self._authenticate_locked(profile_id, password)
+            if keeps_existing_pairs:
+                normalized_options["sync_pairs"] = list(
+                    (profile.get("options") or {}).get("sync_pairs") or []
+                )
             previous_auto_sync = bool(profile.get("options", {}).get("auto_sync", True))
             previous_next_sync_at = profile.get("next_sync_at")
             previous_auto_resume_sync = bool(profile.get("options", {}).get("auto_resume_sync", False))
@@ -1382,9 +1389,19 @@ class ProfileStore:
 
     def update_profile_by_id(self, profile_id: str, credentials: dict, options: dict) -> dict:
         normalized_options = normalize_profile_options(options)
+        # Sync pairs are edited on their own screen and are not part of the
+        # settings form, so a submission that never mentions them must leave
+        # them alone. Without this, every "Save Profile" silently deleted every
+        # configured pair, because normalize_profile_options turns a missing
+        # key into an empty list.
+        keeps_existing_pairs = "sync_pairs" not in (options or {})
 
         with self._lock:
             profile = self._get_profile_locked(profile_id)
+            if keeps_existing_pairs:
+                normalized_options["sync_pairs"] = list(
+                    (profile.get("options") or {}).get("sync_pairs") or []
+                )
             previous_auto_sync = bool(profile.get("options", {}).get("auto_sync", True))
             previous_next_sync_at = profile.get("next_sync_at")
             previous_auto_resume_sync = bool(profile.get("options", {}).get("auto_resume_sync", False))

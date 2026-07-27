@@ -431,6 +431,18 @@ class TargetListTests(unittest.TestCase):
         self.assertFalse(AniListAdapter.supports_target_lists)
         self.assertFalse(MdbListAdapter.supports_target_lists)
 
+    def test_only_providers_with_a_public_search_advertise_one(self) -> None:
+        from src.providers import (
+            AniListAdapter, MdbListAdapter, PmdbAdapter, SimklAdapter, TraktAdapter,
+        )
+        # Offering a search box where search_lists can only return an empty list
+        # reads as a broken search rather than an absent feature.
+        self.assertTrue(TraktAdapter.supports_list_search)
+        self.assertTrue(MdbListAdapter.supports_list_search)
+        self.assertFalse(SimklAdapter.supports_list_search)
+        self.assertFalse(AniListAdapter.supports_list_search)
+        self.assertFalse(PmdbAdapter.supports_list_search)
+
     def test_unwritable_provider_reports_no_target_lists(self) -> None:
         from src.providers import AniListAdapter
 
