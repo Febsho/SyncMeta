@@ -311,6 +311,8 @@ def normalize_credentials(credentials: dict | None) -> dict:
         "anilist": {
             "username": str(anilist.get("username", "")).strip(),
             "access_token": str(anilist.get("access_token", "")).strip(),
+            "client_id": str(anilist.get("client_id", "")).strip(),
+            "client_secret": str(anilist.get("client_secret", "")).strip(),
             "selected_statuses": _normalize_anilist_selected_statuses(anilist.get("selected_statuses")),
         },
         "trakt": {
@@ -348,6 +350,8 @@ def public_credentials(credentials: dict | None) -> dict:
         },
         "anilist": {
             "username": raw["anilist"]["username"],
+            "client_id": raw["anilist"]["client_id"],
+            "client_secret_saved": bool(raw["anilist"]["client_secret"]),
             "access_token_saved": bool(raw["anilist"]["access_token"]),
             "selected_statuses": list(raw["anilist"]["selected_statuses"]),
         },
@@ -529,6 +533,8 @@ def merge_credentials(existing: dict | None, updates: dict | None) -> dict:
         },
         "anilist": {
             "username": incoming["anilist"]["username"],
+            "client_id": incoming["anilist"]["client_id"],
+            "client_secret": keep_secret("anilist", "client_secret"),
             "access_token": keep_secret("anilist", "access_token"),
             "selected_statuses": incoming["anilist"]["selected_statuses"],
         },
@@ -2040,6 +2046,26 @@ class ProfileStore:
                 profile["credentials"]["trakt"]["refresh_token"] = refresh_token
             if access_token_expires_at:
                 profile["credentials"]["trakt"]["access_token_expires_at"] = access_token_expires_at
+            self._save_locked()
+
+    def update_anilist_auth(
+        self, profile_id: str, client_id: str, client_secret: str, access_token: str,
+    ) -> None:
+        """Persist AniList OAuth results without touching any other profile state.
+
+        Written as soon as the exchange succeeds so a user who navigates away
+        without pressing Save does not lose a single-use authorization code.
+        """
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            anilist = profile["credentials"]["anilist"]
+            if client_id:
+                anilist["client_id"] = client_id
+            if client_secret:
+                anilist["client_secret"] = client_secret
+            if access_token:
+                anilist["access_token"] = access_token
+            profile["updated_at"] = utc_now_iso()
             self._save_locked()
 
     def _get_profile_locked(self, profile_id: str) -> dict:

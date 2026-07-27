@@ -35,6 +35,11 @@ _PERSISTED_CACHE_VERSION = 1
 _PERSISTED_CACHE_MIN_SAVE_INTERVAL = 2.0
 
 GRAPHQL_URL = "https://graphql.anilist.co"
+OAUTH_TOKEN_URL = "https://anilist.co/api/v2/oauth/token"
+OAUTH_AUTHORIZE_URL = "https://anilist.co/api/v2/oauth/authorize"
+# AniList cannot redirect back to an arbitrary app, so its own "pin" endpoint is
+# used: the user authorises, AniList shows a code, and they paste it back here.
+OAUTH_PIN_REDIRECT_URI = "https://anilist.co/api/v2/oauth/pin"
 REQUEST_TIMEOUT = (5, 12)
 _CANCEL_POLL_INTERVAL = 0.25
 
@@ -154,6 +159,64 @@ _ROOT_FORMAT_PRIORITY = {
     "SPECIAL": 3,
     "MOVIE": 4,
 }
+
+
+def build_authorize_url(client_id: str) -> str:
+    """Authorization-code URL for the pin redirect."""
+    from urllib.parse import urlencode
+
+    query = urlencode({
+        "client_id": str(client_id or "").strip(),
+        "redirect_uri": OAUTH_PIN_REDIRECT_URI,
+        "response_type": "code",
+    })
+    return f"{OAUTH_AUTHORIZE_URL}?{query}"
+
+
+def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> str:
+    """Trade the pin code for a long-lived access token.
+
+    Raises ValueError with a user-facing message when AniList rejects the
+    exchange, which is nearly always a mistyped code or a redirect URL that does
+    not match the one configured on the AniList client.
+    """
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": str(client_id or "").strip(),
+        "client_secret": str(client_secret or "").strip(),
+        "redirect_uri": OAUTH_PIN_REDIRECT_URI,
+        "code": str(code or "").strip(),
+    }
+    try:
+        response = requests.post(
+            OAUTH_TOKEN_URL,
+            json=payload,
+            headers={"Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise ValueError(f"Could not reach AniList: {exc}") from exc
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.status_code >= 400 or not data.get("access_token"):
+        detail = str(
+            data.get("hint")
+            or data.get("message")
+            or data.get("error_description")
+            or data.get("error")
+            or ""
+        ).strip()
+        if not detail:
+            detail = f"AniList returned HTTP {response.status_code}"
+        raise ValueError(
+            f"AniList rejected the authorization code: {detail}. Check the code "
+            f"and that the client's Redirect URL is exactly {OAUTH_PIN_REDIRECT_URI}."
+        )
+    return str(data["access_token"])
 
 
 def _persistent_cache_path() -> Path:

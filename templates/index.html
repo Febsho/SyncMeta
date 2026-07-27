@@ -633,18 +633,35 @@
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
                   <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
+                  <div class="form-row"><label for="anilist-client-id">Client ID <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="text" id="anilist-client-id" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
+                  <div class="form-row"><label for="anilist-client-secret">Client Secret</label><input type="password" id="anilist-client-secret" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
                   <div class="form-row">
-                    <label for="anilist-access-token">Access Token <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label>
-                    <input type="password" id="anilist-access-token" placeholder="Only needed to write to AniList" autocomplete="off">
-                    <div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only required to <strong>write</strong> to AniList &mdash; private lists, or using AniList as a sync-pair target. Stored securely for this profile. Leave blank to keep it.</div>
-                  </div>
-                  <div class="form-row" style="margin-bottom:0">
                     <label for="anilist-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="anilist-redirect-url" readonly value="https://anilist.co/api/v2/oauth/pin">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('anilist-redirect-url')">Copy</button>
                     </div>
-                    <div class="hint">Unlike SIMKL and Trakt, this is a fixed AniList URL, not this site&rsquo;s address. Create a client at <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">anilist.co/settings/developer</a>, set its Redirect URL to the value above, then open<br><code style="font-size:11px;color:var(--z400)">https://anilist.co/api/v2/oauth/authorize?client_id=YOUR_ID&amp;response_type=token</code><br>and paste the token AniList shows you into the field above. No client secret is needed, and the token lasts a year.</div>
+                    <div class="hint">This is a fixed AniList URL, not this site&rsquo;s address. Set it as your client&rsquo;s Redirect URL at <a href="https://anilist.co/settings/developer" target="_blank" rel="noopener">anilist.co/settings/developer</a>.</div>
+                  </div>
+                  <div class="form-row"><label for="anilist-access-token">Access Token</label><input type="password" id="anilist-access-token" placeholder="Filled in after you connect" autocomplete="off"><div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only needed to <strong>write</strong> to AniList &mdash; private lists, or using AniList as a sync-pair target.</div></div>
+                  <div class="actions-bar" style="margin-top:0">
+                    <button class="btn btn-sm" id="btn-anilist-auth" onclick="startAniListAuth()">Connect AniList</button>
+                    <span class="actions-meta" id="anilist-auth-status">Enter your client ID and secret, then connect.</span>
+                  </div>
+                  <div class="auth-box hidden" id="anilist-auth-box">
+                    <div class="actions-meta">Authorize on AniList, then paste the code it shows you.</div>
+                    <div class="actions-bar" style="margin-top:8px">
+                      <button class="btn btn-sm" type="button" onclick="openAniListVerification()">Open AniList</button>
+                      <button class="btn btn-sm" type="button" onclick="copyAniListAuthUrl()">Copy Link</button>
+                    </div>
+                    <div class="form-row" style="margin-top:8px;margin-bottom:0">
+                      <label for="anilist-auth-code">Code from AniList</label>
+                      <input type="text" id="anilist-auth-code" class="mono" placeholder="Paste the code here" autocomplete="off">
+                    </div>
+                    <div class="actions-bar" style="margin-top:8px">
+                      <button class="btn btn-sm btn-primary" type="button" id="btn-anilist-auth-finish" onclick="finishAniListAuth()">Finish Connecting</button>
+                      <button class="btn btn-sm btn-ghost" type="button" onclick="cancelAniListAuth()">Cancel</button>
+                    </div>
                   </div>
                 </div>
                 <div class="conn-card form-section">
@@ -1044,6 +1061,109 @@
       if (traktInput) traktInput.value = value;
     }
 
+    // ── AniList connect flow ───────────────────────────────────────────────
+    // AniList cannot redirect back to this app, so its own pin endpoint is used:
+    // the user authorizes there, AniList shows a code, and that code is exchanged
+    // server-side for a long-lived access token.
+    let anilistAuthUrl = '';
+
+    function setAniListAuthStatus(message, isError) {
+      const node = el('anilist-auth-status');
+      if (!node) return;
+      node.textContent = flattenStatusMessage(message);
+      node.style.color = isError ? 'var(--red)' : '';
+    }
+
+    async function startAniListAuth() {
+      const btn = el('btn-anilist-auth');
+      const clientId = el('anilist-client-id').value.trim();
+      if (!clientId && !hasSavedSecret('anilist', 'client_secret_saved')) {
+        setAniListAuthStatus('Enter your AniList client ID first.', true);
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+      try {
+        const result = await apiPost('/api/anilist/auth/start', { client_id: clientId });
+        if (!result.ok) {
+          setAniListAuthStatus(formatApiError(result.data, 'Could not start AniList auth.'), true);
+          return;
+        }
+        anilistAuthUrl = result.data.authorize_url || '';
+        el('anilist-auth-box').classList.remove('hidden');
+        setAniListAuthStatus('Authorize on AniList, then paste the code below.', false);
+        openAniListVerification();
+      } catch {
+        setAniListAuthStatus('Network error while starting AniList auth.', true);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Connect AniList'; }
+      }
+    }
+
+    function openAniListVerification() {
+      if (anilistAuthUrl) window.open(anilistAuthUrl, '_blank', 'noopener');
+    }
+
+    async function copyAniListAuthUrl() {
+      if (!anilistAuthUrl) return;
+      try {
+        await navigator.clipboard.writeText(anilistAuthUrl);
+        showToast('Copied AniList authorization link', false, true);
+      } catch {
+        showToast('Could not copy the link', true);
+      }
+    }
+
+    function cancelAniListAuth() {
+      anilistAuthUrl = '';
+      el('anilist-auth-code').value = '';
+      el('anilist-auth-box').classList.add('hidden');
+      setAniListAuthStatus('Enter your client ID and secret, then connect.', false);
+    }
+
+    async function finishAniListAuth() {
+      const btn = el('btn-anilist-auth-finish');
+      const code = el('anilist-auth-code').value.trim();
+      if (!code) {
+        setAniListAuthStatus('Paste the code AniList showed you.', true);
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
+      try {
+        const result = await apiPost('/api/anilist/auth/check', {
+          client_id: el('anilist-client-id').value.trim(),
+          client_secret: el('anilist-client-secret').value.trim(),
+          code: code,
+        });
+        if (!result.ok) {
+          setAniListAuthStatus(formatApiError(result.data, 'AniList authentication failed.'), true);
+          return;
+        }
+        // The token is stored server-side already; reflect that in the form so
+        // it reads the same as any other saved secret.
+        if (result.data.saved) {
+          secretState.anilist = Object.assign({}, secretState.anilist, { access_token_saved: true });
+          setSecretInputState('anilist-access-token', 'anilist', 'access_token_saved', 'Filled in after you connect');
+        } else if (result.data.access_token) {
+          el('anilist-access-token').value = result.data.access_token;
+        }
+        el('anilist-auth-box').classList.add('hidden');
+        el('anilist-auth-code').value = '';
+        anilistAuthUrl = '';
+        setAniListAuthStatus(
+          result.data.saved
+            ? 'AniList connected. The token is stored for this profile.'
+            : 'AniList connected. Save the profile to store the token.',
+          false,
+        );
+        showToast('AniList connected.', false, true);
+        updateDots();
+      } catch {
+        setAniListAuthStatus('Network error while connecting AniList.', true);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Finish Connecting'; }
+      }
+    }
+
     async function copyRedirectUrl(inputId) {
       const input = el(inputId);
       if (!input || !input.value) return;
@@ -1060,7 +1180,7 @@
     function emptySecretState() {
       return {
         simkl: { client_secret_saved: false, access_token_saved: false },
-        anilist: { access_token_saved: false },
+        anilist: { client_secret_saved: false, access_token_saved: false },
         trakt: { client_secret_saved: false, access_token_saved: false, refresh_token_saved: false },
         mdblist: { api_key_saved: false },
         pmdb: { api_key_saved: false },
@@ -1282,6 +1402,8 @@
         anilist: {
           username: el('anilist-username').value.trim(),
           access_token: el('anilist-access-token').value.trim(),
+          client_id: el('anilist-client-id').value.trim(),
+          client_secret: el('anilist-client-secret').value.trim(),
           selected_statuses: anilistSelectedStatuses.slice(),
         },
         trakt: {
@@ -1344,6 +1466,7 @@
         },
         anilist: {
           username: el('anilist-username').value.trim(),
+          client_id: el('anilist-client-id').value.trim(),
           selected_statuses: anilistSelectedStatuses.slice(),
         },
         trakt: {
@@ -1393,6 +1516,7 @@
           access_token_saved: !!simkl.access_token_saved,
         },
         anilist: {
+          client_secret_saved: !!anilist.client_secret_saved,
           access_token_saved: !!anilist.access_token_saved,
         },
         trakt: {
@@ -1416,7 +1540,9 @@
       setSecretInputState('simkl-access-token', 'simkl', 'access_token_saved', 'From PIN auth or OAuth');
       simklSelectedStatuses = normalizeSimklSelectedStatuses(simkl.selected_statuses);
       el('anilist-username').value = anilist.username || '';
-      setSecretInputState('anilist-access-token', 'anilist', 'access_token_saved', 'Only needed to write to AniList');
+      el('anilist-client-id').value = anilist.client_id || '';
+      setSecretInputState('anilist-client-secret', 'anilist', 'client_secret_saved', 'From anilist.co/settings/developer');
+      setSecretInputState('anilist-access-token', 'anilist', 'access_token_saved', 'Filled in after you connect');
       anilistSelectedStatuses = normalizeAniListSelectedStatuses(anilist.selected_statuses);
       el('trakt-client-id').value = trakt.client_id || '';
       traktAccessTokenExpiresAt = trakt.access_token_expires_at || '';

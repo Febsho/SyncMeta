@@ -48,10 +48,13 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="simkl-redirect-url"', html)
         self.assertIn('id="trakt-redirect-url"', html)
         self.assertIn('id="anilist-access-token"', html)
+        self.assertIn('id="anilist-client-id"', html)
+        self.assertIn('id="anilist-client-secret"', html)
         # AniList's redirect URL is a fixed AniList endpoint, not this site's
-        # address, and it is what makes the paste-a-token flow work at all.
+        # address, and it is what makes the connect flow work at all.
         self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)
-        self.assertIn("response_type=token", html)
+        self.assertIn("Connect AniList", html)
+        self.assertIn('id="anilist-auth-code"', html)
         self.assertIn("https://github.com/Febsho/SyncMeta-for-PublicMetaDB", html)
         self.assertIn("List Visibility", html)
         self.assertIn('id="opt-simkl-visibility"', html)
@@ -811,6 +814,81 @@ class WebTests(unittest.TestCase):
         listed = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
 
         self.assertEqual(listed[0]["source_lists"], ["watchlist", "list:me/faves"])
+
+    def test_anilist_auth_start_needs_a_client_id(self) -> None:
+        response = self.client.post("/api/anilist/auth/start", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_anilist_auth_start_returns_the_authorize_url(self) -> None:
+        response = self.client.post("/api/anilist/auth/start", json={"client_id": "12345"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("client_id=12345", data["authorize_url"])
+        self.assertIn("response_type=code", data["authorize_url"])
+        # The pin redirect is what lets AniList hand the code back to the user.
+        self.assertEqual(data["redirect_uri"], "https://anilist.co/api/v2/oauth/pin")
+        self.assertIn("oauth%2Fpin", data["authorize_url"])
+
+    def test_anilist_auth_check_validates_its_inputs(self) -> None:
+        missing_secret = self.client.post("/api/anilist/auth/check", json={"client_id": "1", "code": "abc"})
+        self.assertEqual(missing_secret.status_code, 400)
+        missing_code = self.client.post("/api/anilist/auth/check", json={"client_id": "1", "client_secret": "s"})
+        self.assertEqual(missing_code.status_code, 400)
+
+    @patch("web.anilist_exchange_code_for_token")
+    def test_anilist_auth_check_stores_the_token_on_the_profile(self, exchange) -> None:
+        exchange.return_value = "fresh-token"
+        profile = self._make_anilist_profile("")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/anilist/auth/check", json={
+            "client_id": "cid", "client_secret": "csecret", "code": "the-code",
+        })
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], "approved")
+        self.assertTrue(data["saved"], "the code is single-use, so it must persist immediately")
+        exchange.assert_called_once_with("cid", "csecret", "the-code")
+
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["credentials"]["anilist"]
+        self.assertEqual(stored["access_token"], "fresh-token")
+        self.assertEqual(stored["client_id"], "cid")
+        self.assertEqual(stored["client_secret"], "csecret")
+
+        # And AniList immediately becomes a usable sync target.
+        providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+
+    @patch("web.anilist_exchange_code_for_token")
+    def test_anilist_auth_check_reuses_the_saved_secret(self, exchange) -> None:
+        # A saved secret is masked in the form, so the client must be able to
+        # finish connecting without the user retyping it.
+        exchange.return_value = "tok"
+        profile = self._make_anilist_profile("")
+        web._profile_store.update_anilist_auth(profile["profile_id"], "stored-id", "stored-secret", "")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/anilist/auth/check", json={"code": "the-code"})
+
+        self.assertEqual(response.status_code, 200)
+        exchange.assert_called_once_with("stored-id", "stored-secret", "the-code")
+
+    @patch("web.anilist_exchange_code_for_token")
+    def test_anilist_auth_check_surfaces_a_rejected_code(self, exchange) -> None:
+        exchange.side_effect = ValueError("AniList rejected the authorization code: invalid_grant.")
+        profile = self._make_anilist_profile("")
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/anilist/auth/check", json={
+            "client_id": "cid", "client_secret": "csecret", "code": "bad",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rejected the authorization code", response.get_json()["error"])
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["credentials"]["anilist"]
+        self.assertEqual(stored["access_token"], "", "a failed exchange must not store anything")
 
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {

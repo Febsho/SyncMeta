@@ -98,10 +98,17 @@ actually supports them.
 and SIMKL's PIN token already permit `/sync` writes. AniList mutations require an
 access token that existing username-only profiles do not have, so
 `can_write()` / `write_blocked_reason()` report it and the UI offers AniList as a
-source but not a target until a token is added via the optional Access Token field
-in Connections. That field is optional by design: a username alone still reads a
-public list, and `merge_credentials` preserves a blank submission so leaving it
-empty keeps the stored token rather than revoking write access.
+source but not a target until one is obtained. All of it stays optional: a
+username alone still reads a public list, and `merge_credentials` preserves a
+blank submission so leaving a secret empty keeps the stored one.
+
+**AniList connect flow.** AniList cannot redirect back to this app, so its own pin
+endpoint is used: `redirect_uri` is always the fixed
+`https://anilist.co/api/v2/oauth/pin` (not the site root, unlike SIMKL/Trakt), the
+user authorizes with `response_type=code`, and the code they paste is exchanged
+server-side by `anilist_client.exchange_code_for_token`. The code is single-use and
+short-lived, so `/api/anilist/auth/check` persists the token immediately via
+`ProfileStore.update_anilist_auth` rather than waiting for a profile save.
 
 **Fribb feed shapes — do not assume scalars.** Verified against the live
 `Fribb/anime-lists` feed (42,868 entries). Reading these as plain values is what

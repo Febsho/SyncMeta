@@ -37,6 +37,10 @@ class SimklConfig:
 class AniListConfig:
     username: str = ""
     access_token: str = ""  # Optional, only needed for private lists
+    # Only needed to obtain an access token through the Connect flow. Profiles
+    # that paste a token directly, or only read a public list, never set these.
+    client_id: str = ""
+    client_secret: str = ""
     enabled: bool = False
     selected_statuses: list[str] = field(default_factory=lambda: list(ANILIST_DEFAULT_SELECTED_STATUSES))
 

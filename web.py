@@ -32,7 +32,12 @@ from src.config import (
     TraktConfig,
     validate_config,
 )
-from src.anilist_client import AniListClient
+from src.anilist_client import (
+    OAUTH_PIN_REDIRECT_URI as ANILIST_PIN_REDIRECT_URI,
+    AniListClient,
+    build_authorize_url as anilist_build_authorize_url,
+    exchange_code_for_token as anilist_exchange_code_for_token,
+)
 from src.matcher import ItemMatcher
 from src.mdblist_client import MdbListClient
 from src.publicmetadb_client import PublicMetaDBClient
@@ -1634,6 +1639,71 @@ def api_simkl_pin_check():
         "status": "pending",
         "message": check.get("message", ""),
     })
+
+
+@app.route("/api/anilist/auth/start", methods=["POST"])
+def api_anilist_auth_start():
+    """Return the AniList authorize URL for the pin flow."""
+    body = request.get_json(silent=True) or {}
+    private_profile = _current_private_profile()
+    client_id = str(body.get("client_id", "")).strip()
+    if not client_id and private_profile:
+        client_id = private_profile["credentials"]["anilist"]["client_id"]
+    if not client_id:
+        return _json_error("AniList client ID is required", 400)
+
+    return jsonify({
+        "authorize_url": anilist_build_authorize_url(client_id),
+        "redirect_uri": ANILIST_PIN_REDIRECT_URI,
+    })
+
+
+@app.route("/api/anilist/auth/check", methods=["POST"])
+def api_anilist_auth_check():
+    """Exchange the pasted AniList code for an access token."""
+    body = request.get_json(silent=True) or {}
+    private_profile = _current_private_profile()
+    client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
+    code = str(body.get("code", "")).strip()
+
+    # Fall back to the stored credentials so a saved secret need not be retyped.
+    if private_profile:
+        stored = private_profile["credentials"]["anilist"]
+        client_id = client_id or stored["client_id"]
+        client_secret = client_secret or stored["client_secret"]
+
+    if not client_id:
+        return _json_error("AniList client ID is required", 400)
+    if not client_secret:
+        return _json_error("AniList client secret is required", 400)
+    if not code:
+        return _json_error("Paste the code AniList showed you", 400)
+
+    try:
+        access_token = anilist_exchange_code_for_token(client_id, client_secret, code)
+    except ValueError as exc:
+        return _json_error(
+            str(exc), 400,
+            provider="AniList",
+            hint="The code is single-use and short-lived — start the connect flow again if in doubt.",
+        )
+    except Exception as exc:
+        logger.exception("AniList token exchange failed")
+        return _json_error(f"AniList authentication failed: {exc}", 400, provider="AniList")
+
+    saved = False
+    profile_id = _current_profile_id()
+    if profile_id:
+        # Persist immediately so the token survives even if the user navigates
+        # away without pressing Save.
+        try:
+            _profile_store.update_anilist_auth(profile_id, client_id, client_secret, access_token)
+            saved = True
+        except KeyError:
+            saved = False
+
+    return jsonify({"status": "approved", "access_token": access_token, "saved": saved})
 
 
 @app.route("/api/trakt/device/start", methods=["POST"])
