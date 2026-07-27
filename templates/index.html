@@ -4791,7 +4791,42 @@
     // provider key -> list_sources(), fetched lazily. Enumerating lists calls
     // each provider's API, so it must not block opening the view.
     let pairListsByProvider = {};
+    let pairTargetListsByProvider = {};
+    let pairListSearchResults = {};
     const pairListsLoading = new Set();
+    const pairTargetListsLoading = new Set();
+
+    async function ensurePairTargetLists(providerKey) {
+      if (!providerKey || pairTargetListsByProvider[providerKey] || pairTargetListsLoading.has(providerKey)) return;
+      const provider = pairsState.providers.find(p => p.key === providerKey);
+      if (!provider || !provider.configured || !provider.has_target_lists) return;
+      pairTargetListsLoading.add(providerKey);
+      try {
+        const result = await apiPost('/api/profile/pairs/lists', { provider: providerKey, role: 'target' });
+        pairTargetListsByProvider[providerKey] = (result.ok && Array.isArray(result.data.lists)) ? result.data.lists : [];
+      } catch {
+        pairTargetListsByProvider[providerKey] = [];
+      } finally {
+        pairTargetListsLoading.delete(providerKey);
+        renderPairs();
+      }
+    }
+
+    async function searchPairLists(providerKey, query) {
+      const term = String(query || '').trim();
+      if (!providerKey || !term) return;
+      try {
+        const result = await apiPost('/api/profile/pairs/lists', { provider: providerKey, search: term });
+        pairListSearchResults[providerKey] = (result.ok && Array.isArray(result.data.results)) ? result.data.results : [];
+        if (!pairListSearchResults[providerKey].length) {
+          showToast('No public lists matched that search.', false, false);
+        }
+      } catch {
+        showToast('Could not search lists.', true);
+      } finally {
+        renderPairs();
+      }
+    }
 
     async function ensurePairLists(providerKey) {
       if (!providerKey || pairListsByProvider[providerKey] || pairListsLoading.has(providerKey)) return;
@@ -4887,30 +4922,71 @@
                    ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
             ${esc(category.label)}
           </label>`).join('');
-        // Which named lists on the source feed this pair. Providers whose
-        // categories are single fixed lists (SIMKL/AniList statuses) offer none,
-        // and the pair simply syncs the whole category.
+        // What on the source feeds this pair: the service's own lists and
+        // statuses, named the way that service names them, plus any public list
+        // found by search.
         const sourceProvider = pairsState.providers.find(p => p.key === pair.source);
-        const availableLists = pairListsByProvider[pair.source] || [];
+        const found = pairListSearchResults[pair.source] || [];
+        const knownLists = pairListsByProvider[pair.source] || [];
+        const foundKeys = new Set(knownLists.map(e => e.key));
+        const availableLists = knownLists.concat(found.filter(e => !foundKeys.has(e.key)));
         const listsPending = !!(sourceProvider && sourceProvider.has_lists && !pairListsByProvider[pair.source]);
         if (listsPending) ensurePairLists(pair.source);
+
         const chosenLists = pair.source_lists || [];
+        // Only offer entries for categories this pair actually syncs.
+        const chosenCategories = new Set(pair.categories || []);
+        const relevant = availableLists.filter(e => !e.category || chosenCategories.has(e.category));
+        const grouped = pairsState.categories
+          .filter(cat => chosenCategories.has(cat.key))
+          .map(cat => ({ cat: cat, entries: relevant.filter(e => e.category === cat.key) }))
+          .filter(group => group.entries.length);
+
+        const searchRow = (sourceProvider && sourceProvider.has_lists) ? `
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <input type="text" class="pair-list-search" data-pair-index="${index}"
+                   placeholder="Search public ${escAttr(providerLabel(pair.source))} lists"
+                   aria-label="Search public lists on ${escAttr(providerLabel(pair.source))}"
+                   style="flex:1;min-width:160px">
+            <button class="btn btn-sm" type="button" data-pair-search="${index}">Search</button>
+          </div>` : '';
+
         const listPicker = listsPending ? `
           <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label>Which lists</label>
+            <label>What to sync</label>
             <div class="catalog-note">Loading lists from ${esc(providerLabel(pair.source))}...</div>
-          </div>` : availableLists.length ? `
+          </div>` : (sourceProvider && sourceProvider.has_lists) ? `
           <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label id="pair-lists-label-${index}">Which lists</label>
+            <label id="pair-lists-label-${index}">What to sync</label>
             <div role="group" aria-labelledby="pair-lists-label-${index}">
-              ${availableLists.map(entry => `
-                <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
-                  <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
-                         ${chosenLists.includes(entry.key) ? 'checked' : ''}>
-                  ${esc(entry.label)}
-                </label>`).join('')}
+              ${grouped.map(group => `
+                <div style="margin-bottom:6px">
+                  <div class="catalog-note" style="color:var(--z500);margin-bottom:2px">${esc(group.cat.label)}</div>
+                  ${group.entries.map(entry => `
+                    <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
+                      <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
+                             ${chosenLists.includes(entry.key) ? 'checked' : ''}>
+                      ${esc(entry.label)}
+                    </label>`).join('')}
+                </div>`).join('') || '<div class="catalog-note">Nothing selectable for the chosen categories.</div>'}
             </div>
-            <div class="hint">${chosenLists.length ? 'Only the ticked lists are read.' : `Nothing ticked &mdash; ${esc(providerLabel(pair.source))}'s default for each category is used.`}</div>
+            ${searchRow}
+            <div class="hint">${chosenLists.length ? 'Only the ticked entries are read.' : `Nothing ticked &mdash; ${esc(providerLabel(pair.source))}'s default for each category is used.`}</div>
+          </div>` : '';
+
+        // A destination list is only offered where the service can actually be
+        // written into one — SIMKL and AniList have no writable custom lists.
+        const targetProvider = pairsState.providers.find(p => p.key === pair.target);
+        const canTargetList = !!(targetProvider && targetProvider.has_target_lists);
+        if (canTargetList) ensurePairTargetLists(pair.target);
+        const targetLists = pairTargetListsByProvider[pair.target] || [];
+        const targetListPicker = canTargetList ? `
+          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+            <label for="pair-target-list-${index}">Write into</label>
+            <select id="pair-target-list-${index}" data-pair-index="${index}" data-pair-field="target_list">
+              <option value="">${esc(providerLabel(pair.target))} default for each category</option>
+              ${targetLists.map(entry => `<option value="${escAttr(entry.key)}" ${entry.key === pair.target_list ? 'selected' : ''}>${esc(entry.label)}</option>`).join('')}
+            </select>
           </div>` : '';
 
         const removalOptions = pairsState.removal_modes.map(mode =>
@@ -4944,6 +5020,7 @@
             <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
           </div>
           ${listPicker}
+          ${targetListPicker}
           <div class="form-row" style="margin-bottom:0">
             <label for="pair-removal-${index}">Removals</label>
             <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
@@ -4973,6 +5050,10 @@
             // filter the new source down to nothing.
             pair.source_lists = [];
           }
+          if (field === 'target' && previous !== pair[field]) {
+            // Likewise a destination list belonging to the previous target.
+            pair.target_list = '';
+          }
           // Re-render so the destructive-mode warning and names track the change.
           if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairs();
           renderSyncCards();
@@ -4986,6 +5067,7 @@
           const categories = new Set(pair.categories || []);
           if (input.checked) categories.add(category); else categories.delete(category);
           pair.categories = Array.from(categories);
+          renderPairs();
         });
       });
       node.querySelectorAll('[data-pair-list]').forEach(input => {
@@ -4997,6 +5079,22 @@
           else chosen.delete(input.dataset.pairList);
           pair.source_lists = Array.from(chosen);
           renderPairs();
+        });
+      });
+      node.querySelectorAll('[data-pair-search]').forEach(btn => {
+        const runSearch = () => {
+          const pair = pairsState.pairs[Number(btn.dataset.pairSearch)];
+          const input = node.querySelector(`.pair-list-search[data-pair-index="${btn.dataset.pairSearch}"]`);
+          if (pair && input) searchPairLists(pair.source, input.value);
+        };
+        btn.addEventListener('click', runSearch);
+      });
+      node.querySelectorAll('.pair-list-search').forEach(input => {
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
+          if (pair) searchPairLists(pair.source, input.value);
         });
       });
       node.querySelectorAll('[data-pair-remove]').forEach(btn => {
@@ -5053,6 +5151,7 @@
         target: target,
         categories: ['watchlist'],
         source_lists: [],
+        target_list: '',
         removal_mode: 'additive',
         enabled: true,
       });
@@ -5070,6 +5169,7 @@
           target: pair.target,
           categories: pair.categories || [],
           source_lists: pair.source_lists || [],
+          target_list: pair.target_list || '',
           removal_mode: pair.removal_mode || 'additive',
           enabled: pair.enabled !== false,
         }));

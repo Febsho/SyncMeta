@@ -758,3 +758,10 @@ class TraktClient:
 
     def remove_from_history(self, items: list[dict]) -> dict:
         return self._sync_write("/sync/history/remove", items)
+
+    def add_to_custom_list(self, user: str, slug: str, items: list[dict]) -> dict:
+        """Add items to one of the user's own Trakt lists."""
+        return self._sync_write(f"/users/{user}/lists/{slug}/items", items)
+
+    def remove_from_custom_list(self, user: str, slug: str, items: list[dict]) -> dict:
+        return self._sync_write(f"/users/{user}/lists/{slug}/items/remove", items)

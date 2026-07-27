@@ -268,7 +268,7 @@ class CrossSyncService:
                 result.added = len(to_add)
             else:
                 try:
-                    totals = target.add(category, to_add) or {}
+                    totals = target.add(category, to_add, getattr(pair, "target_list", "")) or {}
                     result.added = int(totals.get("added") or 0)
                     result.unmapped += int(totals.get("not_found") or 0)
                 except Exception as exc:
@@ -281,7 +281,7 @@ class CrossSyncService:
                 result.removed = len(to_remove)
             else:
                 try:
-                    totals = target.remove(category, to_remove) or {}
+                    totals = target.remove(category, to_remove, getattr(pair, "target_list", "")) or {}
                     result.removed = int(totals.get("deleted") or 0)
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {exc}"

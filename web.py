@@ -937,6 +937,7 @@ def _pair_capabilities(config: AppConfig) -> dict:
                 # Same shape as a configured provider so callers never have to
                 # special-case the unconfigured branch.
                 "has_lists": False,
+                "has_target_lists": False,
                 "unavailable_reason": _provider_unavailable_reason(config, key),
             })
             continue
@@ -2266,8 +2267,20 @@ def api_profile_pairs_lists():
     adapters = _build_provider_adapters(_config_from_profile(private_profile))
     adapter = adapters.get(provider)
     if adapter is None:
-        return jsonify({"provider": provider, "lists": []})
-    return jsonify({"provider": provider, "lists": adapter.safe_list_sources()})
+        return jsonify({"provider": provider, "lists": [], "results": []})
+
+    role = str(body.get("role", "source") or "source").strip().lower()
+    search = str(body.get("search", "") or "").strip()
+
+    if role == "target":
+        # Only providers that can genuinely write into a named list offer one.
+        return jsonify({"provider": provider, "lists": adapter.safe_target_lists(), "results": []})
+
+    return jsonify({
+        "provider": provider,
+        "lists": adapter.safe_list_sources(),
+        "results": adapter.safe_search_lists(search),
+    })
 
 
 @app.route("/api/profile/pairs/save", methods=["POST"])

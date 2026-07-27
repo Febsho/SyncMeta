@@ -890,6 +890,49 @@ class WebTests(unittest.TestCase):
         stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["credentials"]["anilist"]
         self.assertEqual(stored["access_token"], "", "a failed exchange must not store anything")
 
+    def test_capabilities_report_target_list_support(self) -> None:
+        # Writing into a named list is a real capability. SIMKL and AniList have
+        # no writable custom lists, so the destination picker must not appear.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        by_key = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
+
+        self.assertTrue(by_key["pmdb"]["has_target_lists"])
+        self.assertFalse(by_key["simkl"]["has_target_lists"])
+        self.assertFalse(by_key["anilist"]["has_target_lists"])
+        self.assertFalse(by_key["mdblist"]["has_target_lists"])
+
+    def test_pair_lists_target_role_returns_writable_lists_only(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/lists", json={"provider": "simkl", "role": "target"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["lists"], [])
+
+    def test_pair_target_list_round_trips(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "pmdb", "categories": ["watchlist"],
+            "target_list": "list:42",
+        }]})
+        listed = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+
+        self.assertEqual(listed[0]["target_list"], "list:42")
+
+    def test_pair_lists_search_returns_a_results_field(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/lists", json={"provider": "trakt", "search": "top"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("results", response.get_json())
+
     def test_status_can_recover_readonly_profile_from_uuid_without_session(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {

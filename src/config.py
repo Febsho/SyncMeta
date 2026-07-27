@@ -135,6 +135,10 @@ class SyncPair:
     # Specific named lists on the source to read. Empty means the provider's
     # default for each category (e.g. Trakt's own watchlist).
     source_lists: list[str] = field(default_factory=list)
+    # Named list on the target to write into. Empty means the target's own
+    # watchlist/collection for the category. Only meaningful for providers that
+    # declare supports_target_lists.
+    target_list: str = ""
     removal_mode: str = "additive"
     enabled: bool = True
 
@@ -146,6 +150,7 @@ class SyncPair:
             "target": self.target,
             "categories": list(self.categories),
             "source_lists": list(self.source_lists),
+            "target_list": self.target_list,
             "removal_mode": self.removal_mode,
             "enabled": bool(self.enabled),
         }
@@ -192,6 +197,7 @@ class SyncPair:
             target=target,
             categories=categories,
             source_lists=source_lists,
+            target_list=str(raw.get("target_list", "") or "").strip(),
             removal_mode=removal_mode,
             enabled=bool(raw.get("enabled", True)),
         )

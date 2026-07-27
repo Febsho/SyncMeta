@@ -49,6 +49,7 @@ class FakeAdapter(ProviderAdapter):
         self.added: list[tuple[str, list[dict]]] = []
         self.removed: list[tuple[str, list[dict]]] = []
         self.fetched: list[tuple[str, list[str]]] = []
+        self.target_lists_used: list[str] = []
 
     def can_write(self) -> bool:
         return self._writable
@@ -62,12 +63,13 @@ class FakeAdapter(ProviderAdapter):
             raise RuntimeError(self._fetch_error)
         return list(self._contents.get(category, []))
 
-    def add(self, category: str, items: list[dict]) -> dict:
+    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
         self.added.append((category, list(items)))
+        self.target_lists_used.append(target_list)
         self._contents.setdefault(category, []).extend(items)
         return {"added": len(items), "not_found": 0}
 
-    def remove(self, category: str, items: list[dict]) -> dict:
+    def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
         self.removed.append((category, list(items)))
         keys = {item_key(i) for i in items}
         self._contents[category] = [
@@ -395,6 +397,48 @@ class SourceListSelectionTests(unittest.TestCase):
         service.run_pair(_pair(source_lists=["list:me/faves"]))
 
         self.assertEqual(target.fetched[0][1], [])
+
+
+class TargetListTests(unittest.TestCase):
+    def test_target_list_is_passed_to_the_target(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("pmdb", {})
+        service = CrossSyncService({"trakt": source, "pmdb": target})
+
+        service.run_pair(_pair(target="pmdb", target_list="list:42"))
+
+        self.assertEqual(target.target_lists_used, ["list:42"])
+
+    def test_no_target_list_means_the_providers_default(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pair(_pair())
+
+        self.assertEqual(target.target_lists_used, [""])
+
+    def test_only_providers_that_support_it_advertise_target_lists(self) -> None:
+        from src.providers import (
+            AniListAdapter, MdbListAdapter, PmdbAdapter, SimklAdapter, TraktAdapter,
+        )
+        # Writing into a named list is a real capability, not a UI nicety: SIMKL
+        # and AniList have no writable custom lists and MDBList has no writes at
+        # all, so offering a destination list for them would be a lie.
+        self.assertTrue(TraktAdapter.supports_target_lists)
+        self.assertTrue(PmdbAdapter.supports_target_lists)
+        self.assertFalse(SimklAdapter.supports_target_lists)
+        self.assertFalse(AniListAdapter.supports_target_lists)
+        self.assertFalse(MdbListAdapter.supports_target_lists)
+
+    def test_unwritable_provider_reports_no_target_lists(self) -> None:
+        from src.providers import AniListAdapter
+
+        class _Client:
+            def can_write(self): return False
+            def write_blocked_reason(self): return "needs a token"
+
+        self.assertEqual(AniListAdapter(_Client()).safe_target_lists(), [])
 
 
 class MdbListSourceTests(unittest.TestCase):
