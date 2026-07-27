@@ -549,6 +549,48 @@ class ProfileStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded["options"]["activity_resume_source"], "off")
 
+    def _pair(self) -> dict:
+        return {
+            "pair_id": "trakt-simkl-1",
+            "name": "",
+            "source": "trakt",
+            "target": "simkl",
+            "categories": ["watchlist"],
+            "source_lists": ["list:someone/top-100"],
+            "target_list": "",
+            "removal_mode": "additive",
+            "enabled": True,
+        }
+
+    def test_saving_settings_does_not_delete_sync_pairs(self) -> None:
+        # The settings form never submits sync_pairs — they live on their own
+        # screen — so a save from it must leave them alone.
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        self.store.update_sync_pairs(created["profile_id"], [self._pair()])
+
+        updated = self.store.update_profile_by_id(created["profile_id"], self.credentials, self.options)
+
+        self.assertEqual(len(updated["options"]["sync_pairs"]), 1)
+        self.assertEqual(updated["options"]["sync_pairs"][0]["source_lists"], ["list:someone/top-100"])
+
+    def test_update_profile_with_password_does_not_delete_sync_pairs(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        self.store.update_sync_pairs(created["profile_id"], [self._pair()])
+
+        updated = self.store.update_profile(created["profile_id"], "secret", self.credentials, self.options)
+
+        self.assertEqual(len(updated["options"]["sync_pairs"]), 1)
+
+    def test_explicit_empty_sync_pairs_still_clears_them(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        self.store.update_sync_pairs(created["profile_id"], [self._pair()])
+
+        updated = self.store.update_profile_by_id(
+            created["profile_id"], self.credentials, {**self.options, "sync_pairs": []},
+        )
+
+        self.assertEqual(updated["options"]["sync_pairs"], [])
+
     def test_update_profile_by_id_preserves_existing_next_list_sync_time(self) -> None:
         created = self.store.create_profile("secret", self.credentials, self.options)
         self.store.claim_profile_for_sync(created["profile_id"], "secret")

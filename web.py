@@ -938,6 +938,7 @@ def _pair_capabilities(config: AppConfig) -> dict:
                 # special-case the unconfigured branch.
                 "has_lists": False,
                 "has_target_lists": False,
+                "has_list_search": False,
                 "unavailable_reason": _provider_unavailable_reason(config, key),
             })
             continue

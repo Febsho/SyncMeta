@@ -103,6 +103,37 @@ writes). `SyncPair.target_list` is cleared when the target changes, since list
 keys are provider-specific. Liked Trakt lists are sources only — they belong to
 another user and cannot be written to.
 
+**An options payload that omits `sync_pairs` must not delete them.** Pairs are
+edited on their own screen and the settings form never submits them, but
+`normalize_profile_options` turns a missing key into `[]` — so
+`update_profile`/`update_profile_by_id` carry the stored pairs forward whenever
+`"sync_pairs" not in options`, and every "Save Profile" used to wipe every pair.
+An explicitly supplied empty list still clears them.
+
+**A public list search is only offered where one exists.**
+`supports_list_search` is true for Trakt (`/search/list`) and MDBList only;
+`search_lists` returns `[]` everywhere else, and a search box that can only ever
+come back empty reads as a broken feature. It rides to the UI as
+`has_list_search` in `describe()` — the unconfigured-provider stub in
+`_pair_capabilities` must keep answering the same shape.
+
+**The pair editor renders scoped, not wholesale.** A provider can offer a
+hundred lists, so rebuilding every card on every keystroke is what made the
+editor lag. Events are delegated once onto `#pairs-list`; `renderPairs()`
+(all cards) is only for add/remove, `renderPairCard(i)` for source/target/
+category/removal changes, and `renderPairListOptions(i)` / 
+`renderPairListSelection(i)` for filtering and ticking — the narrower two leave
+the filter field focused and the caret in place. Per-card editor state lives in
+a `WeakMap` keyed on the pair object, never on its index, which shifts.
+
+**A chosen list must stay visible even when its entry is gone.** Saved pairs
+carry list *keys* only, and a list picked from a search is not in
+`list_sources()`. Selections are therefore rendered as chips from
+`pair.source_lists` itself — labels resolved through `pairListLabels` and falling
+back to the key — independent of the filter, the category boxes, and whether the
+provider's lists have loaded. Rendering only the ticked checkboxes made a saved
+selection look lost.
+
 **MDBList is source-only.** `MdbListAdapter` declares `writes = ()` — the client
 has no write path and MDBList's own watch-status sync is handled by its Trakt/Plex
 integrations. It reads the union of `mdblist.selected_lists`, and since an MDBList

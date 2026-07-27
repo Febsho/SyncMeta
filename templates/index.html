@@ -128,6 +128,27 @@
     .catalog-search{display:flex;gap:10px;margin-bottom:12px}
     .catalog-search input{flex:1;padding:9px 12px;border-radius:8px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:13px;font-family:inherit}
     .catalog-list{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:auto;padding-right:4px}
+    /* Sync-pair list picker: a provider can offer a hundred lists, so the
+       selection is shown as chips and the choices are filtered and scrolled
+       instead of being spilled across the page. */
+    .pair-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+    .pair-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.45);background:rgba(20,83,45,.26);color:var(--z100);font-size:12px;font-family:inherit;cursor:pointer;max-width:100%;text-transform:none;letter-spacing:normal}
+    .pair-chip:hover{border-color:var(--red);color:var(--white)}
+    .pair-chip span{color:var(--z500);font-weight:700}
+    .pair-list-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+    .pair-list-toolbar input{flex:1;min-width:150px;padding:7px 10px;border-radius:8px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:12px;font-family:inherit}
+    .pair-list-toolbar .catalog-note{margin-top:0;white-space:nowrap}
+    .pair-list-options{max-height:220px;overflow:auto;border:1px solid var(--z800);border-radius:8px;background:var(--z900);padding:8px}
+    .pair-list-group + .pair-list-group{margin-top:8px}
+    .pair-list-group-title{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--z600);margin-bottom:4px}
+    /* Real list names, so they stay recognisable — the form-row label rule
+       would otherwise upper-case them. */
+    .pair-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px}
+    .form-row label.pair-list-option,.pair-list-option{display:flex;align-items:center;gap:7px;padding:3px 4px;border-radius:6px;font-size:12px;color:var(--z400);cursor:pointer;text-transform:none;letter-spacing:normal;font-weight:400;min-width:0}
+    .pair-list-option:hover{background:var(--z850,var(--z800));color:var(--z100)}
+    .pair-list-option span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .pair-list-search-row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+    .pair-list-search-row input{flex:1;min-width:180px;padding:7px 10px;border-radius:8px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:12px;font-family:inherit}
     .catalog-row{display:flex;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--z800);border-radius:10px;background:var(--z900);cursor:pointer;transition:border-color .2s,background .2s}
     .catalog-row:hover{border-color:var(--z600)}
     .catalog-row.selected{border-color:rgba(52,211,153,.45);background:rgba(20,83,45,.26)}
@@ -4793,8 +4814,46 @@
     let pairListsByProvider = {};
     let pairTargetListsByProvider = {};
     let pairListSearchResults = {};
+    // provider key -> { list key: label }. A saved pair only carries list keys,
+    // so without this a list picked from a search result came back after a
+    // reload as an opaque key — or, before chips existed, as nothing at all,
+    // which looked exactly like the selection had not been saved.
+    let pairListLabels = {};
     const pairListsLoading = new Set();
     const pairTargetListsLoading = new Set();
+    // Per-card editor state (filter text, search box, in-flight search) that has
+    // to survive re-renders. Keyed on the pair object rather than its index so
+    // removing a pair cannot shift someone else's typing onto another card.
+    const pairUiByPair = new WeakMap();
+    let pairsDelegated = false;
+
+    function pairUi(pair) {
+      let state = pairUiByPair.get(pair);
+      if (!state) {
+        state = { filter: '', search: '', searching: false };
+        pairUiByPair.set(pair, state);
+      }
+      return state;
+    }
+
+    function rememberPairListLabels(providerKey, entries) {
+      const store = pairListLabels[providerKey] || (pairListLabels[providerKey] = {});
+      (entries || []).forEach(entry => {
+        if (entry && entry.key) store[entry.key] = entry.label || entry.key;
+      });
+    }
+
+    function pairListLabel(providerKey, key) {
+      const known = (pairListLabels[providerKey] || {})[key];
+      if (known) return known;
+      // Fall back to something readable derived from the key itself, so a
+      // selection made before a provider's lists finished loading is never
+      // shown as a raw internal string.
+      const raw = String(key || '');
+      if (raw.startsWith('list:')) return raw.slice(5);
+      if (raw.startsWith('status:')) return raw.slice(7).split(':').join(' — ');
+      return raw;
+    }
 
     async function ensurePairTargetLists(providerKey) {
       if (!providerKey || pairTargetListsByProvider[providerKey] || pairTargetListsLoading.has(providerKey)) return;
@@ -4812,19 +4871,35 @@
       }
     }
 
-    async function searchPairLists(providerKey, query) {
-      const term = String(query || '').trim();
-      if (!providerKey || !term) return;
+    async function searchPairLists(index) {
+      const pair = pairsState.pairs[index];
+      if (!pair) return;
+      const ui = pairUi(pair);
+      const term = String(ui.search || '').trim();
+      if (!term || ui.searching) return;
+      ui.searching = true;
+      renderPairCard(index);
       try {
-        const result = await apiPost('/api/profile/pairs/lists', { provider: providerKey, search: term });
-        pairListSearchResults[providerKey] = (result.ok && Array.isArray(result.data.results)) ? result.data.results : [];
-        if (!pairListSearchResults[providerKey].length) {
+        const result = await apiPost('/api/profile/pairs/lists', { provider: pair.source, search: term });
+        const found = (result.ok && Array.isArray(result.data.results)) ? result.data.results : [];
+        // Merge rather than replace: a second search must not hide a list the
+        // user found — and possibly already ticked — with the first one.
+        const existing = pairListSearchResults[pair.source] || [];
+        const seen = new Set(existing.map(e => e.key));
+        pairListSearchResults[pair.source] = existing.concat(found.filter(e => e && e.key && !seen.has(e.key)));
+        rememberPairListLabels(pair.source, found);
+        if (found.length) {
+          // The local filter would otherwise hide the very lists just fetched,
+          // making a successful search look like it returned nothing.
+          ui.filter = '';
+        } else {
           showToast('No public lists matched that search.', false, false);
         }
       } catch {
         showToast('Could not search lists.', true);
       } finally {
-        renderPairs();
+        ui.searching = false;
+        renderPairCard(index);
       }
     }
 
@@ -4840,6 +4915,7 @@
         pairListsByProvider[providerKey] = [];
       } finally {
         pairListsLoading.delete(providerKey);
+        rememberPairListLabels(providerKey, pairListsByProvider[providerKey]);
         renderPairs();
       }
     }
@@ -4881,167 +4957,269 @@
       node.innerHTML = parts.join('<br>');
     }
 
+    // Every provider is listed in the From/To pickers, but ones that cannot
+    // fill the role are disabled with the reason attached. Omitting them
+    // entirely gave no way to tell a missing setting from a bug.
+    function pairProviderOptions(role, selectedKey) {
+      return pairsState.providers.map(provider => {
+        const usable = role === 'source'
+          ? (provider.configured && provider.reads.length && !provider.unavailable_reason)
+          : (provider.configured && provider.writes.length);
+        let why = '';
+        if (!usable) {
+          // For a target, an inability to write is the truthful reason and
+          // outranks any source-side note.
+          why = role === 'target'
+            ? (provider.write_blocked_reason || provider.unavailable_reason || 'Not available')
+            : (provider.unavailable_reason || 'Not available');
+        }
+        const label = usable ? provider.label : `${provider.label} — ${why}`;
+        return `<option value="${escAttr(provider.key)}" ${provider.key === selectedKey ? 'selected' : ''} ${usable ? '' : 'disabled'}>${esc(label)}</option>`;
+      }).join('');
+    }
+
+    // The source's own lists and statuses, plus anything found by search that
+    // is not already among them.
+    function pairListEntries(pair) {
+      const known = pairListsByProvider[pair.source] || [];
+      const found = pairListSearchResults[pair.source] || [];
+      const seen = new Set(known.map(entry => entry.key));
+      return known.concat(found.filter(entry => entry && entry.key && !seen.has(entry.key)));
+    }
+
+    function pairVisibleListEntries(pair) {
+      const filter = pairUi(pair).filter.trim().toLowerCase();
+      const chosenCategories = new Set(pair.categories || []);
+      return pairListEntries(pair).filter(entry => {
+        // Only entries feeding a category this pair actually syncs.
+        if (entry.category && !chosenCategories.has(entry.category)) return false;
+        if (!filter) return true;
+        return String(entry.label || '').toLowerCase().includes(filter)
+          || String(entry.key || '').toLowerCase().includes(filter);
+      });
+    }
+
+    // Selections are shown as chips, independent of the filter and of whether
+    // the entry is currently loaded. A ticked list scrolled out of view — or one
+    // picked from a search whose results are gone — stays visible and removable.
+    function pairChipsHtml(pair, index) {
+      const chosen = pair.source_lists || [];
+      if (!chosen.length) {
+        return `<div class="catalog-note">Nothing selected — ${esc(providerLabel(pair.source))}'s default for each category is used.</div>`;
+      }
+      return chosen.map(key => `
+        <button type="button" class="pair-chip" data-pair-unpick="${index}" data-list-key="${escAttr(key)}"
+                title="Stop syncing ${escAttr(pairListLabel(pair.source, key))}">
+          ${esc(pairListLabel(pair.source, key))}<span aria-hidden="true">×</span>
+        </button>`).join('');
+    }
+
+    function pairOptionsHtml(pair, index) {
+      const visible = pairVisibleListEntries(pair);
+      const chosen = new Set(pair.source_lists || []);
+      const groups = pairsState.categories
+        .filter(cat => (pair.categories || []).includes(cat.key))
+        .map(cat => ({ cat: cat, entries: visible.filter(entry => entry.category === cat.key) }))
+        .filter(group => group.entries.length);
+      if (!groups.length) {
+        return `<div class="catalog-note">${pairUi(pair).filter.trim()
+          ? 'No list matches this filter.'
+          : 'Nothing selectable for the chosen categories.'}</div>`;
+      }
+      return groups.map(group => `
+        <div class="pair-list-group">
+          <div class="pair-list-group-title">${esc(group.cat.label)}</div>
+          <div class="pair-list-grid">
+            ${group.entries.map(entry => `
+              <label class="pair-list-option" title="${escAttr(entry.label || entry.key)}">
+                <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
+                       ${chosen.has(entry.key) ? 'checked' : ''}>
+                <span>${esc(entry.label || entry.key)}</span>
+              </label>`).join('')}
+          </div>
+        </div>`).join('');
+    }
+
+    function pairListCountText(pair) {
+      const total = pairListEntries(pair).length;
+      const shown = pairVisibleListEntries(pair).length;
+      const chosen = (pair.source_lists || []).length;
+      const shownText = shown === total ? `${total} list(s)` : `${shown} of ${total} shown`;
+      return `${shownText} · ${chosen} selected`;
+    }
+
+    function pairListPickerHtml(pair, index) {
+      const sourceProvider = pairsState.providers.find(p => p.key === pair.source);
+      if (!sourceProvider || !sourceProvider.has_lists) return '';
+      if (!pairListsByProvider[pair.source]) {
+        ensurePairLists(pair.source);
+        return `
+          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+            <label>Which lists</label>
+            <div class="catalog-note">Loading lists from ${esc(providerLabel(pair.source))}...</div>
+          </div>`;
+      }
+      const ui = pairUi(pair);
+      // The search box is only offered where the provider actually has a public
+      // list search; elsewhere it could only ever come back empty.
+      const searchRow = sourceProvider.has_list_search ? `
+        <div class="pair-list-search-row">
+          <input type="text" class="pair-list-search" data-pair-index="${index}"
+                 value="${escAttr(ui.search)}"
+                 placeholder="Search public ${escAttr(providerLabel(pair.source))} lists and add them"
+                 aria-label="Search public lists on ${escAttr(providerLabel(pair.source))}">
+          <button class="btn btn-sm" type="button" data-pair-search="${index}" ${ui.searching ? 'disabled' : ''}>${ui.searching ? 'Searching...' : 'Search'}</button>
+        </div>` : '';
+      return `
+        <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+          <label id="pair-lists-label-${index}">Which lists</label>
+          <div role="group" aria-labelledby="pair-lists-label-${index}">
+            <div class="pair-chips" id="pair-list-chips-${index}">${pairChipsHtml(pair, index)}</div>
+            <div class="pair-list-toolbar">
+              <input type="text" class="pair-list-filter" data-pair-index="${index}"
+                     value="${escAttr(ui.filter)}" placeholder="Filter these lists"
+                     aria-label="Filter ${escAttr(providerLabel(pair.source))} lists">
+              <button class="btn btn-sm" type="button" data-pair-select-shown="${index}">Select shown</button>
+              <button class="btn btn-sm" type="button" data-pair-clear-lists="${index}">Clear</button>
+              <span class="catalog-note" id="pair-list-count-${index}">${esc(pairListCountText(pair))}</span>
+            </div>
+            <div class="pair-list-options" id="pair-list-options-${index}">${pairOptionsHtml(pair, index)}</div>
+            ${searchRow}
+          </div>
+        </div>`;
+    }
+
+    function pairTargetListPickerHtml(pair, index) {
+      // A destination list is only offered where the service can actually be
+      // written into one — SIMKL and AniList have no writable custom lists.
+      const targetProvider = pairsState.providers.find(p => p.key === pair.target);
+      if (!targetProvider || !targetProvider.has_target_lists) return '';
+      ensurePairTargetLists(pair.target);
+      const targetLists = pairTargetListsByProvider[pair.target] || [];
+      return `
+        <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+          <label for="pair-target-list-${index}">Write into</label>
+          <select id="pair-target-list-${index}" data-pair-index="${index}" data-pair-field="target_list">
+            <option value="">${esc(providerLabel(pair.target))} default for each category</option>
+            ${targetLists.map(entry => `<option value="${escAttr(entry.key)}" ${entry.key === pair.target_list ? 'selected' : ''}>${esc(entry.label)}</option>`).join('')}
+          </select>
+        </div>`;
+    }
+
+    function pairCardHtml(pair, index) {
+      const categoryBoxes = pairsState.categories.map(category => `
+        <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
+          <input type="checkbox" data-pair-index="${index}" data-pair-category="${escAttr(category.key)}"
+                 ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
+          ${esc(category.label)}
+        </label>`).join('');
+      const removalOptions = pairsState.removal_modes.map(mode =>
+        `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(mode.label)}</option>`
+      ).join('');
+      const problem = pair.problem
+        ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
+        : '';
+      const destructive = pair.removal_mode && pair.removal_mode !== 'additive'
+        ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> This pair may delete items from ${esc(providerLabel(pair.target))}.</div>`
+        : '';
+
+      return `<div class="guide-box" data-pair-card="${index}" style="margin-bottom:10px">
+        <div class="form-row" style="margin-bottom:8px">
+          <label for="pair-name-${index}">Name</label>
+          <input type="text" id="pair-name-${index}" data-pair-index="${index}" data-pair-field="name"
+                 value="${escAttr(pair.name || '')}" placeholder="${escAttr(providerLabel(pair.source) + ' to ' + providerLabel(pair.target))}">
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
+            <label for="pair-source-${index}">From</label>
+            <select id="pair-source-${index}" data-pair-index="${index}" data-pair-field="source">${pairProviderOptions('source', pair.source)}</select>
+          </div>
+          <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
+            <label for="pair-target-${index}">To</label>
+            <select id="pair-target-${index}" data-pair-index="${index}" data-pair-field="target">${pairProviderOptions('target', pair.target)}</select>
+          </div>
+        </div>
+        <div class="form-row" style="margin-top:10px;margin-bottom:8px">
+          <label id="pair-cats-label-${index}">What to sync</label>
+          <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
+        </div>
+        ${pairListPickerHtml(pair, index)}
+        ${pairTargetListPickerHtml(pair, index)}
+        <div class="form-row" style="margin-bottom:0">
+          <label for="pair-removal-${index}">Removals</label>
+          <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
+        </div>
+        ${destructive}
+        ${problem}
+        <div class="inline-actions" style="justify-content:flex-start;margin-top:10px">
+          <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px">
+            <input type="checkbox" data-pair-index="${index}" data-pair-field="enabled" ${pair.enabled ? 'checked' : ''}>
+            Enabled
+          </label>
+          <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
+          <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
+        </div>
+      </div>`;
+    }
+
+    // Re-rendering every card on every keystroke or tick is what made the editor
+    // feel slow — with a provider like Trakt each pass rebuilt hundreds of list
+    // rows. These three are ordered smallest-first; use the narrowest one that
+    // covers what actually changed.
+    function renderPairListSelection(index) {
+      const pair = pairsState.pairs[index];
+      if (!pair) return;
+      const chips = el(`pair-list-chips-${index}`);
+      if (chips) chips.innerHTML = pairChipsHtml(pair, index);
+      const count = el(`pair-list-count-${index}`);
+      if (count) count.textContent = pairListCountText(pair);
+    }
+
+    function renderPairListOptions(index) {
+      const pair = pairsState.pairs[index];
+      if (!pair) return;
+      const options = el(`pair-list-options-${index}`);
+      if (!options) { renderPairCard(index); return; }
+      options.innerHTML = pairOptionsHtml(pair, index);
+      const count = el(`pair-list-count-${index}`);
+      if (count) count.textContent = pairListCountText(pair);
+    }
+
+    function renderPairCard(index) {
+      const node = el('pairs-list');
+      const pair = pairsState.pairs[index];
+      const card = node && node.querySelector(`[data-pair-card="${index}"]`);
+      if (!node || !pair || !card) { renderPairs(); return; }
+      card.outerHTML = pairCardHtml(pair, index);
+    }
+
     function renderPairs() {
       const node = el('pairs-list');
       if (!node) return;
+      bindPairEvents(node);
       if (!pairsState.pairs.length) {
         node.innerHTML = '<div class="empty">No sync pairs yet. Add one to copy a list from one service to another.</div>';
         return;
       }
+      node.innerHTML = pairsState.pairs.map((pair, index) => pairCardHtml(pair, index)).join('');
+    }
 
-      // Every provider is listed, but ones that cannot fill the role are
-      // disabled with the reason attached. Omitting them entirely gave no way
-      // to tell a missing setting from a bug.
-      const sources = pairsState.providers.filter(p => p.configured && p.reads.length && !p.unavailable_reason);
-      const targets = pairsState.providers.filter(p => p.configured && p.writes.length);
+    // Bound once on the container: per-element listeners had to be re-attached
+    // for every control on every render, which is the other half of the lag.
+    function bindPairEvents(node) {
+      if (pairsDelegated) return;
+      pairsDelegated = true;
 
-      function optionsFor(role, selectedKey) {
-        return pairsState.providers.map(provider => {
-          const usable = role === 'source'
-            ? (provider.configured && provider.reads.length && !provider.unavailable_reason)
-            : (provider.configured && provider.writes.length);
-          let why = '';
-          if (!usable) {
-            // For a target, an inability to write is the truthful reason and
-            // outranks any source-side note.
-            why = role === 'target'
-              ? (provider.write_blocked_reason || provider.unavailable_reason || 'Not available')
-              : (provider.unavailable_reason || 'Not available');
-          }
-          const label = usable ? provider.label : `${provider.label} — ${why}`;
-          return `<option value="${escAttr(provider.key)}" ${provider.key === selectedKey ? 'selected' : ''} ${usable ? '' : 'disabled'}>${esc(label)}</option>`;
-        }).join('');
-      }
+      const pairAt = (value) => pairsState.pairs[Number(value)];
 
-      node.innerHTML = pairsState.pairs.map((pair, index) => {
-        const sourceOptions = optionsFor('source', pair.source);
-        const targetOptions = optionsFor('target', pair.target);
-        const categoryBoxes = pairsState.categories.map(category => `
-          <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
-            <input type="checkbox" data-pair-index="${index}" data-pair-category="${escAttr(category.key)}"
-                   ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
-            ${esc(category.label)}
-          </label>`).join('');
-        // What on the source feeds this pair: the service's own lists and
-        // statuses, named the way that service names them, plus any public list
-        // found by search.
-        const sourceProvider = pairsState.providers.find(p => p.key === pair.source);
-        const found = pairListSearchResults[pair.source] || [];
-        const knownLists = pairListsByProvider[pair.source] || [];
-        const foundKeys = new Set(knownLists.map(e => e.key));
-        const availableLists = knownLists.concat(found.filter(e => !foundKeys.has(e.key)));
-        const listsPending = !!(sourceProvider && sourceProvider.has_lists && !pairListsByProvider[pair.source]);
-        if (listsPending) ensurePairLists(pair.source);
+      node.addEventListener('change', (event) => {
+        const input = event.target;
+        if (!input || !input.dataset) return;
+        const index = Number(input.dataset.pairIndex);
+        const pair = pairAt(input.dataset.pairIndex);
+        if (!pair) return;
 
-        const chosenLists = pair.source_lists || [];
-        // Only offer entries for categories this pair actually syncs.
-        const chosenCategories = new Set(pair.categories || []);
-        const relevant = availableLists.filter(e => !e.category || chosenCategories.has(e.category));
-        const grouped = pairsState.categories
-          .filter(cat => chosenCategories.has(cat.key))
-          .map(cat => ({ cat: cat, entries: relevant.filter(e => e.category === cat.key) }))
-          .filter(group => group.entries.length);
-
-        const searchRow = (sourceProvider && sourceProvider.has_lists) ? `
-          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
-            <input type="text" class="pair-list-search" data-pair-index="${index}"
-                   placeholder="Search public ${escAttr(providerLabel(pair.source))} lists"
-                   aria-label="Search public lists on ${escAttr(providerLabel(pair.source))}"
-                   style="flex:1;min-width:160px">
-            <button class="btn btn-sm" type="button" data-pair-search="${index}">Search</button>
-          </div>` : '';
-
-        const listPicker = listsPending ? `
-          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label>What to sync</label>
-            <div class="catalog-note">Loading lists from ${esc(providerLabel(pair.source))}...</div>
-          </div>` : (sourceProvider && sourceProvider.has_lists) ? `
-          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label id="pair-lists-label-${index}">What to sync</label>
-            <div role="group" aria-labelledby="pair-lists-label-${index}">
-              ${grouped.map(group => `
-                <div style="margin-bottom:6px">
-                  <div class="catalog-note" style="color:var(--z500);margin-bottom:2px">${esc(group.cat.label)}</div>
-                  ${group.entries.map(entry => `
-                    <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
-                      <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
-                             ${chosenLists.includes(entry.key) ? 'checked' : ''}>
-                      ${esc(entry.label)}
-                    </label>`).join('')}
-                </div>`).join('') || '<div class="catalog-note">Nothing selectable for the chosen categories.</div>'}
-            </div>
-            ${searchRow}
-            <div class="hint">${chosenLists.length ? 'Only the ticked entries are read.' : `Nothing ticked &mdash; ${esc(providerLabel(pair.source))}'s default for each category is used.`}</div>
-          </div>` : '';
-
-        // A destination list is only offered where the service can actually be
-        // written into one — SIMKL and AniList have no writable custom lists.
-        const targetProvider = pairsState.providers.find(p => p.key === pair.target);
-        const canTargetList = !!(targetProvider && targetProvider.has_target_lists);
-        if (canTargetList) ensurePairTargetLists(pair.target);
-        const targetLists = pairTargetListsByProvider[pair.target] || [];
-        const targetListPicker = canTargetList ? `
-          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label for="pair-target-list-${index}">Write into</label>
-            <select id="pair-target-list-${index}" data-pair-index="${index}" data-pair-field="target_list">
-              <option value="">${esc(providerLabel(pair.target))} default for each category</option>
-              ${targetLists.map(entry => `<option value="${escAttr(entry.key)}" ${entry.key === pair.target_list ? 'selected' : ''}>${esc(entry.label)}</option>`).join('')}
-            </select>
-          </div>` : '';
-
-        const removalOptions = pairsState.removal_modes.map(mode =>
-          `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(mode.label)}</option>`
-        ).join('');
-        const problem = pair.problem
-          ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
-          : '';
-        const destructive = pair.removal_mode && pair.removal_mode !== 'additive'
-          ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> This pair may delete items from ${esc(providerLabel(pair.target))}.</div>`
-          : '';
-
-        return `<div class="guide-box" style="margin-bottom:10px">
-          <div class="form-row" style="margin-bottom:8px">
-            <label for="pair-name-${index}">Name</label>
-            <input type="text" id="pair-name-${index}" data-pair-index="${index}" data-pair-field="name"
-                   value="${escAttr(pair.name || '')}" placeholder="${escAttr(providerLabel(pair.source) + ' to ' + providerLabel(pair.target))}">
-          </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-            <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
-              <label for="pair-source-${index}">From</label>
-              <select id="pair-source-${index}" data-pair-index="${index}" data-pair-field="source">${sourceOptions}</select>
-            </div>
-            <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
-              <label for="pair-target-${index}">To</label>
-              <select id="pair-target-${index}" data-pair-index="${index}" data-pair-field="target">${targetOptions}</select>
-            </div>
-          </div>
-          <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-            <label id="pair-cats-label-${index}">What to sync</label>
-            <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
-          </div>
-          ${listPicker}
-          ${targetListPicker}
-          <div class="form-row" style="margin-bottom:0">
-            <label for="pair-removal-${index}">Removals</label>
-            <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
-          </div>
-          ${destructive}
-          ${problem}
-          <div class="inline-actions" style="justify-content:flex-start;margin-top:10px">
-            <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px">
-              <input type="checkbox" data-pair-index="${index}" data-pair-field="enabled" ${pair.enabled ? 'checked' : ''}>
-              Enabled
-            </label>
-            <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
-            <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
-          </div>
-        </div>`;
-      }).join('');
-
-      node.querySelectorAll('[data-pair-field]').forEach(input => {
-        input.addEventListener('change', () => {
-          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
-          if (!pair) return;
+        if (input.dataset.pairField) {
           const field = input.dataset.pairField;
           const previous = pair[field];
           pair[field] = input.type === 'checkbox' ? input.checked : input.value;
@@ -5049,65 +5227,112 @@
             // List keys are provider-specific, so a stale pick would silently
             // filter the new source down to nothing.
             pair.source_lists = [];
+            pairUi(pair).filter = '';
+            pairUi(pair).search = '';
           }
           if (field === 'target' && previous !== pair[field]) {
             // Likewise a destination list belonging to the previous target.
             pair.target_list = '';
           }
-          // Re-render so the destructive-mode warning and names track the change.
-          if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairs();
+          if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairCard(index);
           renderSyncCards();
-        });
-      });
-      node.querySelectorAll('[data-pair-category]').forEach(input => {
-        input.addEventListener('change', () => {
-          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
-          if (!pair) return;
-          const category = input.dataset.pairCategory;
+          return;
+        }
+
+        if (input.dataset.pairCategory) {
           const categories = new Set(pair.categories || []);
-          if (input.checked) categories.add(category); else categories.delete(category);
+          if (input.checked) categories.add(input.dataset.pairCategory);
+          else categories.delete(input.dataset.pairCategory);
           pair.categories = Array.from(categories);
-          renderPairs();
-        });
-      });
-      node.querySelectorAll('[data-pair-list]').forEach(input => {
-        input.addEventListener('change', () => {
-          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
-          if (!pair) return;
+          // Which lists are offered depends on the categories, so this one card
+          // has to be rebuilt.
+          renderPairCard(index);
+          return;
+        }
+
+        if (input.dataset.pairList) {
           const chosen = new Set(pair.source_lists || []);
           if (input.checked) chosen.add(input.dataset.pairList);
           else chosen.delete(input.dataset.pairList);
           pair.source_lists = Array.from(chosen);
+          // The checkbox already shows its own new state; only the chips and
+          // the counter need updating, so the list itself never flickers.
+          renderPairListSelection(index);
+        }
+      });
+
+      node.addEventListener('input', (event) => {
+        const input = event.target;
+        if (!input || !input.classList) return;
+        const index = Number(input.dataset.pairIndex);
+        const pair = pairAt(input.dataset.pairIndex);
+        if (!pair) return;
+        if (input.classList.contains('pair-list-filter')) {
+          pairUi(pair).filter = input.value;
+          // Only the options box is replaced, so the filter field keeps focus
+          // and the caret position while typing.
+          renderPairListOptions(index);
+        } else if (input.classList.contains('pair-list-search')) {
+          pairUi(pair).search = input.value;
+        }
+      });
+
+      node.addEventListener('keydown', (event) => {
+        const input = event.target;
+        if (!input || !input.classList || event.key !== 'Enter') return;
+        if (!input.classList.contains('pair-list-search') && !input.classList.contains('pair-list-filter')) return;
+        event.preventDefault();
+        if (input.classList.contains('pair-list-search')) searchPairLists(Number(input.dataset.pairIndex));
+      });
+
+      node.addEventListener('click', (event) => {
+        const button = event.target.closest && event.target.closest('button');
+        if (!button || !button.dataset) return;
+
+        if (button.dataset.pairSearch !== undefined) {
+          searchPairLists(Number(button.dataset.pairSearch));
+          return;
+        }
+        if (button.dataset.pairUnpick !== undefined) {
+          const index = Number(button.dataset.pairUnpick);
+          const pair = pairAt(button.dataset.pairUnpick);
+          if (!pair) return;
+          pair.source_lists = (pair.source_lists || []).filter(key => key !== button.dataset.listKey);
+          renderPairListSelection(index);
+          renderPairListOptions(index);
+          return;
+        }
+        if (button.dataset.pairSelectShown !== undefined) {
+          const index = Number(button.dataset.pairSelectShown);
+          const pair = pairAt(button.dataset.pairSelectShown);
+          if (!pair) return;
+          const chosen = new Set(pair.source_lists || []);
+          pairVisibleListEntries(pair).forEach(entry => chosen.add(entry.key));
+          pair.source_lists = Array.from(chosen);
+          renderPairListSelection(index);
+          renderPairListOptions(index);
+          return;
+        }
+        if (button.dataset.pairClearLists !== undefined) {
+          const index = Number(button.dataset.pairClearLists);
+          const pair = pairAt(button.dataset.pairClearLists);
+          if (!pair) return;
+          pair.source_lists = [];
+          renderPairListSelection(index);
+          renderPairListOptions(index);
+          return;
+        }
+        if (button.dataset.pairRemove !== undefined) {
+          pairsState.pairs.splice(Number(button.dataset.pairRemove), 1);
+          // Indices shift, so this is the one edit that needs a full rebuild.
           renderPairs();
-        });
-      });
-      node.querySelectorAll('[data-pair-search]').forEach(btn => {
-        const runSearch = () => {
-          const pair = pairsState.pairs[Number(btn.dataset.pairSearch)];
-          const input = node.querySelector(`.pair-list-search[data-pair-index="${btn.dataset.pairSearch}"]`);
-          if (pair && input) searchPairLists(pair.source, input.value);
-        };
-        btn.addEventListener('click', runSearch);
-      });
-      node.querySelectorAll('.pair-list-search').forEach(input => {
-        input.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter') return;
-          event.preventDefault();
-          const pair = pairsState.pairs[Number(input.dataset.pairIndex)];
-          if (pair) searchPairLists(pair.source, input.value);
-        });
-      });
-      node.querySelectorAll('[data-pair-remove]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          pairsState.pairs.splice(Number(btn.dataset.pairRemove), 1);
-          renderPairs();
-        });
-      });
-      node.querySelectorAll('[data-pair-run]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const pair = pairsState.pairs[Number(btn.dataset.pairRun)];
+          renderSyncCards();
+          return;
+        }
+        if (button.dataset.pairRun !== undefined) {
+          const pair = pairAt(button.dataset.pairRun);
           if (pair) runPairs(pair.pair_id, false);
-        });
+        }
       });
     }
 

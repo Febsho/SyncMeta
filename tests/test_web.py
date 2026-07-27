@@ -902,6 +902,33 @@ class WebTests(unittest.TestCase):
         self.assertFalse(by_key["simkl"]["has_target_lists"])
         self.assertFalse(by_key["anilist"]["has_target_lists"])
         self.assertFalse(by_key["mdblist"]["has_target_lists"])
+        # Every provider answers the same shape, configured or not, so the UI
+        # never has to special-case the unconfigured branch.
+        for provider in by_key.values():
+            self.assertIn("has_list_search", provider)
+
+    def test_saving_settings_keeps_configured_sync_pairs(self) -> None:
+        # The settings form does not carry sync_pairs, and it used to wipe them.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        saved = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt",
+            "target": "pmdb",
+            "categories": ["watchlist"],
+            "source_lists": ["list:someone/top-100"],
+        }]})
+        self.assertEqual(saved.status_code, 200)
+
+        self.client.post("/api/profile/save", json={
+            "profile_id": profile["profile_id"],
+            "password": "secret",
+            "credentials": {},
+            "options": {"interval_seconds": 3600},
+        })
+
+        pairs = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]["source_lists"], ["list:someone/top-100"])
 
     def test_pair_lists_target_role_returns_writable_lists_only(self) -> None:
         profile = self._make_bare_profile()
