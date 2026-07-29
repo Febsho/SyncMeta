@@ -814,6 +814,7 @@ class ProfileStore:
             "activity_results": _normalize_activity_results(raw_profile.get("activity_results")),
             "activity_state": _normalize_activity_state(raw_profile.get("activity_state")),
             "managed_lists": _normalize_managed_lists(raw_profile.get("managed_lists", [])),
+            "last_pair_results": copy.deepcopy(raw_profile.get("last_pair_results", {})) if isinstance(raw_profile.get("last_pair_results"), dict) else {},
             "anime_manual_overrides": copy.deepcopy(raw_profile.get("anime_manual_overrides", {})) if isinstance(raw_profile.get("anime_manual_overrides"), dict) else {},
             "anime_review_decisions": copy.deepcopy(raw_profile.get("anime_review_decisions", {})) if isinstance(raw_profile.get("anime_review_decisions"), dict) else {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(raw_profile.get("last_sync_job_snapshot")),
@@ -864,6 +865,7 @@ class ProfileStore:
             "activity_results": copy.deepcopy(profile.get("activity_results", {})),
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "managed_lists": copy.deepcopy(profile.get("managed_lists", [])),
+            "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
             "anime_manual_overrides": copy.deepcopy(profile.get("anime_manual_overrides", {})),
             "anime_review_decisions": copy.deepcopy(profile.get("anime_review_decisions", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
@@ -1161,6 +1163,7 @@ class ProfileStore:
             "activity_results": copy.deepcopy(profile.get("activity_results", {})),
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "options": copy.deepcopy(profile.get("options", {})),
+            "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
             "sync_job_id": profile.get("sync_job_id"),
             "latest_run_id": str(profile.get("sync_runs_detailed", [{}])[0].get("run_id", "") if profile.get("sync_runs_detailed") else ""),
@@ -1311,6 +1314,7 @@ class ProfileStore:
             "activity_results": {},
             "activity_state": _normalize_activity_state(None),
             "managed_lists": [],
+            "last_pair_results": {},
             "anime_manual_overrides": {},
             "anime_review_decisions": {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(None),
@@ -1886,6 +1890,31 @@ class ProfileStore:
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
+
+    def update_pair_last_results(self, profile_id: str, results: list[dict], dry_run: bool = False) -> None:
+        """Remember the outcome of the latest cross-service pair run per pair.
+
+        Merged by pair_id rather than replaced, so running a single pair keeps
+        the other pairs' last outcomes visible on the dashboard.
+        """
+        with self._lock:
+            normalized_id = self._normalize_profile_id(profile_id)
+            profile = self._profiles[normalized_id]
+            stored = profile.get("last_pair_results")
+            merged = dict(stored) if isinstance(stored, dict) else {}
+            now = utc_now_iso()
+            for result in results or []:
+                if not isinstance(result, dict):
+                    continue
+                pair_id = str(result.get("pair_id", "") or "").strip()
+                if not pair_id:
+                    continue
+                entry = copy.deepcopy(result)
+                entry["timestamp"] = now
+                entry["dry_run"] = bool(dry_run)
+                merged[pair_id] = entry
+            profile["last_pair_results"] = merged
+            self._save_locked()
 
     def update_pair_managed_keys(self, profile_id: str, managed_keys: dict) -> None:
         """Persist which target keys each pair owns, for the managed removal mode.

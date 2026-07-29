@@ -168,6 +168,14 @@ def enrich_identity(item: dict) -> dict:
     enriched["tmdb_id"] = str(tmdb_id)
     enriched_ids = dict(ids)
     enriched_ids.setdefault("tmdb", str(tmdb_id))
+    # The same Fribb entry usually carries the IMDB id too. Trakt and SIMKL
+    # match on IMDB more reliably than on a TMDB tv id, so an anime-native item
+    # gains the id the target's writer actually wants.
+    if not str(item.get("imdb_id") or ids.get("imdb") or "").strip():
+        imdb_id = fribb_client.single_imdb_id(entry.get("imdb_id"))
+        if imdb_id:
+            enriched["imdb_id"] = imdb_id
+            enriched_ids.setdefault("imdb", imdb_id)
     enriched["ids"] = enriched_ids
     return enriched
 

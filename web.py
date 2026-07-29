@@ -2055,21 +2055,21 @@ def api_profile_logs_clear():
     return jsonify({"status": "cleared"})
 
 
-def _library_context() -> tuple[PublicMetaDBClient | None, str, object | None]:
-    """Resolve the signed-in profile's PMDB client and TMDB key.
+def _library_context() -> tuple[PublicMetaDBClient | None, str, dict | None, object | None]:
+    """Resolve the signed-in profile's PMDB client, TMDB key and profile.
 
-    Returns (pmdb_client, tmdb_api_key, error_response). When error_response is
-    not None the caller must return it directly.
+    Returns (pmdb_client, tmdb_api_key, private_profile, error_response). When
+    error_response is not None the caller must return it directly.
     """
     private_profile = _current_private_profile()
     if not private_profile:
-        return None, "", (_clear_session_cookie(_json_error("Sign in first", 401)[0]), 401)
+        return None, "", None, (_clear_session_cookie(_json_error("Sign in first", 401)[0]), 401)
     credentials = normalize_credentials(private_profile.get("credentials"))
     pmdb_key = credentials["pmdb"]["api_key"]
     if not pmdb_key:
-        return None, "", _json_error("Add your PublicMetaDB API key in Settings first", 409)
+        return None, "", None, _json_error("Add your PublicMetaDB API key in Settings first", 409)
     pmdb = PublicMetaDBClient(PublicMetaDBConfig(api_key=pmdb_key))
-    return pmdb, credentials["tmdb"]["api_key"], None
+    return pmdb, credentials["tmdb"]["api_key"], private_profile, None
 
 
 def _enrich_library_items(items: list[dict], tmdb_api_key: str) -> tuple[list[dict], str]:
@@ -2101,7 +2101,7 @@ def _enrich_library_items(items: list[dict], tmdb_api_key: str) -> tuple[list[di
 
 @app.route("/api/profile/library/overview", methods=["POST"])
 def api_profile_library_overview():
-    pmdb, tmdb_key, error_response = _library_context()
+    pmdb, tmdb_key, private_profile, error_response = _library_context()
     if error_response is not None:
         return error_response
     try:
@@ -2109,12 +2109,26 @@ def api_profile_library_overview():
     except Exception as exc:
         logger.warning("Library overview: PMDB list fetch failed: %s", exc)
         return _json_error("Could not load your PublicMetaDB lists", 502)
+    # SyncMeta-managed lists know which service wrote them; join on list id
+    # first, falling back to the list name, so the UI can filter per service.
+    managed = (private_profile or {}).get("managed_lists") or []
+    source_by_id = {
+        str(item.get("list_id", "")).strip(): str(item.get("source_name", "")).strip()
+        for item in managed if str(item.get("list_id", "")).strip()
+    }
+    source_by_name = {
+        str(item.get("list_name", "")).strip(): str(item.get("source_name", "")).strip()
+        for item in managed if str(item.get("list_name", "")).strip()
+    }
     lists = [{
         "id": str(entry.get("id", "")),
         "name": str(entry.get("name", "") or "Unnamed list"),
         "type": str(entry.get("type", "") or "custom"),
         "item_count": entry.get("item_count") or entry.get("itemCount"),
         "is_public": bool(entry.get("is_public") or entry.get("isPublic")),
+        "source": source_by_id.get(str(entry.get("id", "")))
+            or source_by_name.get(str(entry.get("name", "") or "").strip())
+            or "",
     } for entry in raw_lists if entry.get("id")]
     lists.sort(key=lambda entry: (entry["type"] != "watchlist", entry["name"].lower()))
     return jsonify({"lists": lists, "tmdb_configured": bool(tmdb_key)})
@@ -2122,7 +2136,7 @@ def api_profile_library_overview():
 
 @app.route("/api/profile/library/items", methods=["POST"])
 def api_profile_library_items():
-    pmdb, tmdb_key, error_response = _library_context()
+    pmdb, tmdb_key, private_profile, error_response = _library_context()
     if error_response is not None:
         return error_response
     body = request.get_json(silent=True) or {}
@@ -2177,7 +2191,7 @@ def api_profile_library_history():
     Raw plays would render a wall of duplicate posters for a binged show; the
     per-episode breakdown lives behind /library/history/title instead.
     """
-    pmdb, tmdb_key, error_response = _library_context()
+    pmdb, tmdb_key, private_profile, error_response = _library_context()
     if error_response is not None:
         return error_response
     body = request.get_json(silent=True) or {}
@@ -2240,7 +2254,7 @@ def api_profile_library_history():
 def api_profile_library_history_title():
     """Per-title watch history: every episode watched (with TMDB episode names
     and thumbnails when a TMDB key is saved) or, for movies, every play."""
-    pmdb, tmdb_key, error_response = _library_context()
+    pmdb, tmdb_key, private_profile, error_response = _library_context()
     if error_response is not None:
         return error_response
     body = request.get_json(silent=True) or {}
@@ -2647,6 +2661,12 @@ def api_profile_pairs_run():
         # something to reason about on the next run.
         try:
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
+        except KeyError:
+            pass
+        # Remember the outcome so the dashboard can show pair status alongside
+        # the main pipeline results.
+        try:
+            _profile_store.update_pair_last_results(profile_id, [r.to_dict() for r in results], dry_run=dry_run)
         except KeyError:
             pass
 

@@ -284,7 +284,18 @@
     .tmdb-notice{display:flex;gap:10px;align-items:center;padding:12px 16px;margin-bottom:14px;border:1px solid rgba(124,109,247,.35);border-radius:10px;background:rgba(124,109,247,.08);font-size:13px;color:var(--z300)}
     .tmdb-notice a{color:var(--accent)}
     .tmdb-notice.tmdb-notice-error{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
-    .library-chips{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:14px}
+    .library-chips{display:block;padding-bottom:14px}
+    .library-pinned{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .library-filterbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+    .library-source-pills{display:flex;gap:4px;flex-wrap:wrap}
+    .library-source-pill{padding:4px 11px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z500);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+    .library-source-pill.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
+    #library-filter-input{padding:6px 10px;border:1px solid var(--z800);border-radius:6px;background:var(--z900);color:var(--z100);font-size:12px;min-width:170px;margin-left:auto}
+    .library-chip-items{display:flex;gap:8px;flex-wrap:wrap;max-height:190px;overflow-y:auto}
+    .library-more{border-style:dashed;color:var(--z500)}
+    .pair-list-group-search{border-top:1px dashed var(--z800);padding-top:10px;margin-top:10px}
+    .pair-list-group-search .pair-list-group-title{color:var(--accent)}
+    .library-chip-empty{color:var(--z600);font-size:12px;padding:4px 0}
     .library-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z400);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
     .library-chip:hover{border-color:var(--z600);color:var(--z200)}
     .library-chip.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
@@ -2306,7 +2317,8 @@
       const body = el('pipelines-body');
       if (!panel || !body) return;
       const rows = Array.isArray(results) ? results.filter(row => row.source_name) : [];
-      if (!rows.length) {
+      const pairResults = Object.values((profile && profile.last_pair_results) || {});
+      if (!rows.length && !pairResults.length) {
         panel.classList.add('hidden');
         body.innerHTML = '';
         return;
@@ -2330,7 +2342,7 @@
           ? 'Live — updating during sync'
           : (profile.last_sync ? `Last run ${timeAgo(profile.last_sync)}` : '');
       }
-      body.innerHTML = Array.from(groups.entries()).map(([source, group]) => {
+      const serviceRows = Array.from(groups.entries()).map(([source, group]) => {
         const state = group.errors
           ? '<span class="c-red">errors</span>'
           : group.unresolved
@@ -2348,7 +2360,34 @@
           </span>
           <span class="pipe-status-meta">${state}</span>
         </div>`;
-      }).join('');
+      });
+
+      // Custom cross-service pairs show alongside the built-in pipelines with
+      // their last recorded run.
+      const pairRows = pairResults
+        .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+        .map(result => {
+          const errorCount = (result.errors || []).length
+            + (result.categories || []).reduce((acc, cat) => acc + ((cat.errors || []).length), 0);
+          const state = errorCount
+            ? '<span class="c-red">errors</span>'
+            : '<span class="c-green">ok</span>';
+          const when = result.timestamp ? timeAgo(result.timestamp) : '';
+          const firstError = (result.errors || [])[0]
+            || ((result.categories || []).flatMap(cat => cat.errors || [])[0] || '');
+          return `<div class="pipe-status-row" ${firstError ? `title="${escAttr(firstError)}"` : ''}>
+            <span class="pipe-status-name">${esc(result.name || `${result.source} → ${result.target}`)} <span class="catalog-note">pair</span></span>
+            <span class="pipe-status-stats">
+              ${result.added ? `<span class="c-green">+${result.added}</span>` : '<span>+0</span>'}
+              ${result.removed ? `<span class="c-red">−${result.removed}</span>` : ''}
+              ${result.unmapped ? `<span class="c-orange">${result.unmapped} unmapped</span>` : ''}
+              ${errorCount ? `<span class="c-red">${errorCount} error${errorCount === 1 ? '' : 's'}</span>` : ''}
+            </span>
+            <span class="pipe-status-meta">${result.dry_run ? 'dry run · ' : ''}${when ? `ran ${esc(when)} · ` : ''}${state}</span>
+          </div>`;
+        });
+
+      body.innerHTML = serviceRows.concat(pairRows).join('');
     }
 
     // ── Library (poster browser) ────────────────────────────────────────
@@ -2406,22 +2445,126 @@
       }
     }
 
+    // Browse controls state. Some profiles have a hundred synced lists, so the
+    // chip wall is filtered per source service, searchable, sorted, and
+    // collapsed to a first page instead of covering the whole screen.
+    let librarySourceFilter = 'all';
+    let libraryTextFilter = '';
+    let libraryShowAllLists = false;
+    const LIBRARY_CHIP_LIMIT = 24;
+
+    function libraryChipHtml(entry) {
+      const count = entry.item_count != null ? `<span class="library-chip-count">${Number(entry.item_count) || 0}</span>` : '';
+      return `<button class="library-chip${librarySelection === entry.id ? ' active' : ''}" type="button" data-library-target="${escAttr(entry.id)}">${esc(entry.name)}${count}</button>`;
+    }
+
+    function bindLibraryChip(node) {
+      node.addEventListener('click', () => {
+        librarySelection = node.dataset.libraryTarget;
+        renderLibraryChips();
+        loadLibrarySelection();
+      });
+    }
+
+    function libraryListSources() {
+      const sources = new Set();
+      let hasOther = false;
+      for (const entry of libraryLists) {
+        if (entry.type === 'watchlist') continue;
+        if (entry.source) sources.add(entry.source);
+        else hasOther = true;
+      }
+      return { sources: Array.from(sources).sort(), hasOther };
+    }
+
+    function libraryFilteredLists() {
+      const text = libraryTextFilter.trim().toLowerCase();
+      return libraryLists
+        .filter(entry => entry.type !== 'watchlist')
+        .filter(entry => {
+          if (librarySourceFilter === 'all') return true;
+          if (librarySourceFilter === 'other') return !entry.source;
+          return entry.source === librarySourceFilter;
+        })
+        .filter(entry => !text || entry.name.toLowerCase().includes(text))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     function renderLibraryChips() {
       const container = el('library-chips');
       if (!container) return;
-      const chips = [`<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`];
-      for (const entry of libraryLists) {
-        const count = entry.item_count != null ? `<span class="library-chip-count">${Number(entry.item_count) || 0}</span>` : '';
-        chips.push(`<button class="library-chip${librarySelection === entry.id ? ' active' : ''}" type="button" data-library-target="${escAttr(entry.id)}">${esc(entry.name)}${count}</button>`);
+      const watchlists = libraryLists.filter(entry => entry.type === 'watchlist');
+      const regularCount = libraryLists.length - watchlists.length;
+      const { sources, hasOther } = libraryListSources();
+      const pinned = [
+        `<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`,
+        ...watchlists.map(entry => libraryChipHtml(entry)),
+      ].join('');
+      const showFilters = regularCount > 8 || sources.length > 1;
+      container.innerHTML = `
+        <div class="library-pinned">${pinned}</div>
+        ${showFilters ? `<div class="library-filterbar">
+          <div class="library-source-pills" id="library-source-pills"></div>
+          <input type="text" id="library-filter-input" placeholder="Filter lists…" autocomplete="off" value="${escAttr(libraryTextFilter)}">
+        </div>` : ''}
+        <div class="library-chip-items" id="library-chip-items"></div>
+      `;
+      container.querySelectorAll('.library-pinned [data-library-target]').forEach(bindLibraryChip);
+      const input = el('library-filter-input');
+      if (input) {
+        input.addEventListener('input', () => {
+          libraryTextFilter = input.value;
+          libraryShowAllLists = false;
+          // Only the chip list re-renders, so the filter field keeps focus.
+          renderLibraryChipItems();
+        });
       }
-      container.innerHTML = chips.join('');
-      container.querySelectorAll('[data-library-target]').forEach(node => {
-        node.addEventListener('click', () => {
-          librarySelection = node.dataset.libraryTarget;
-          renderLibraryChips();
-          loadLibrarySelection();
+      renderLibrarySourcePills();
+      renderLibraryChipItems();
+    }
+
+    function renderLibrarySourcePills() {
+      const node = el('library-source-pills');
+      if (!node) return;
+      const { sources, hasOther } = libraryListSources();
+      if (sources.length < 1) { node.innerHTML = ''; return; }
+      const pills = [['all', 'All services'], ...sources.map(source => [source, source])];
+      if (hasOther) pills.push(['other', 'Other']);
+      node.innerHTML = pills.map(([key, label]) =>
+        `<button type="button" class="library-source-pill${librarySourceFilter === key ? ' active' : ''}" data-library-source="${escAttr(key)}">${esc(label)}</button>`
+      ).join('');
+      node.querySelectorAll('[data-library-source]').forEach(pill => {
+        pill.addEventListener('click', () => {
+          librarySourceFilter = pill.dataset.librarySource;
+          libraryShowAllLists = false;
+          renderLibrarySourcePills();
+          renderLibraryChipItems();
         });
       });
+    }
+
+    function renderLibraryChipItems() {
+      const node = el('library-chip-items');
+      if (!node) return;
+      const filtered = libraryFilteredLists();
+      if (!filtered.length) {
+        node.innerHTML = libraryLists.length ? '<div class="library-chip-empty">No lists match this filter.</div>' : '';
+        return;
+      }
+      const visible = libraryShowAllLists ? filtered : filtered.slice(0, LIBRARY_CHIP_LIMIT);
+      const chips = visible.map(entry => libraryChipHtml(entry));
+      if (filtered.length > visible.length) {
+        chips.push(`<button class="library-chip library-more" type="button" id="library-show-all">Show all ${filtered.length} lists…</button>`);
+      }
+      node.innerHTML = chips.join('');
+      node.querySelectorAll('[data-library-target]').forEach(bindLibraryChip);
+      const more = el('library-show-all');
+      if (more) {
+        more.addEventListener('click', () => {
+          libraryShowAllLists = true;
+          renderLibraryChipItems();
+        });
+      }
     }
 
     async function loadLibrarySelection() {
@@ -5577,30 +5720,66 @@
         </button>`).join('');
     }
 
-    function pairOptionsHtml(pair, index) {
-      const visible = pairVisibleListEntries(pair);
+    function pairOptionCheckboxHtml(pair, index, entry) {
       const chosen = new Set(pair.source_lists || []);
+      return `
+        <label class="pair-list-option" title="${escAttr(entry.label || entry.key)}">
+          <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
+                 ${chosen.has(entry.key) ? 'checked' : ''}>
+          <span>${esc(entry.label || entry.key)}</span>
+        </label>`;
+    }
+
+    function pairEntryMatchesUi(pair, entry) {
+      const chosenCategories = new Set(pair.categories || []);
+      if (entry.category && !chosenCategories.has(entry.category)) return false;
+      const filter = pairUi(pair).filter.trim().toLowerCase();
+      if (!filter) return true;
+      return String(entry.label || '').toLowerCase().includes(filter)
+        || String(entry.key || '').toLowerCase().includes(filter);
+    }
+
+    function pairOptionsHtml(pair, index) {
+      // The user's own lists (personal, liked, statuses) and public lists found
+      // via search render as separate sections — mixed together it was
+      // impossible to tell what belonged to the account and what was a search
+      // hit from a stranger's profile.
+      const known = pairListsByProvider[pair.source] || [];
+      const knownKeys = new Set(known.map(entry => entry.key));
+      const searchOnly = (pairListSearchResults[pair.source] || [])
+        .filter(entry => entry && entry.key && !knownKeys.has(entry.key))
+        .filter(entry => pairEntryMatchesUi(pair, entry));
+      const visibleKnown = known.filter(entry => pairEntryMatchesUi(pair, entry));
+
       const groups = pairsState.categories
         .filter(cat => (pair.categories || []).includes(cat.key))
-        .map(cat => ({ cat: cat, entries: visible.filter(entry => entry.category === cat.key) }))
+        .map(cat => ({ cat: cat, entries: visibleKnown.filter(entry => entry.category === cat.key) }))
         .filter(group => group.entries.length);
-      if (!groups.length) {
+
+      const sections = groups.map(group => `
+        <div class="pair-list-group">
+          <div class="pair-list-group-title">${esc(group.cat.label)}</div>
+          <div class="pair-list-grid">
+            ${group.entries.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+
+      if (searchOnly.length) {
+        sections.push(`
+        <div class="pair-list-group pair-list-group-search">
+          <div class="pair-list-group-title">Search results — public lists</div>
+          <div class="pair-list-grid">
+            ${searchOnly.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+      }
+
+      if (!sections.length) {
         return `<div class="catalog-note">${pairUi(pair).filter.trim()
           ? 'No list matches this filter.'
           : 'Nothing selectable for the chosen categories.'}</div>`;
       }
-      return groups.map(group => `
-        <div class="pair-list-group">
-          <div class="pair-list-group-title">${esc(group.cat.label)}</div>
-          <div class="pair-list-grid">
-            ${group.entries.map(entry => `
-              <label class="pair-list-option" title="${escAttr(entry.label || entry.key)}">
-                <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
-                       ${chosen.has(entry.key) ? 'checked' : ''}>
-                <span>${esc(entry.label || entry.key)}</span>
-              </label>`).join('')}
-          </div>
-        </div>`).join('');
+      return sections.join('');
     }
 
     function pairListCountText(pair) {
