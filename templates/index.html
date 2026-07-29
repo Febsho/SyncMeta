@@ -293,6 +293,8 @@
     #library-filter-input{padding:6px 10px;border:1px solid var(--z800);border-radius:6px;background:var(--z900);color:var(--z100);font-size:12px;min-width:170px;margin-left:auto}
     .library-chip-items{display:flex;gap:8px;flex-wrap:wrap;max-height:190px;overflow-y:auto}
     .library-more{border-style:dashed;color:var(--z500)}
+    .pair-list-group-search{border-top:1px dashed var(--z800);padding-top:10px;margin-top:10px}
+    .pair-list-group-search .pair-list-group-title{color:var(--accent)}
     .library-chip-empty{color:var(--z600);font-size:12px;padding:4px 0}
     .library-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z400);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
     .library-chip:hover{border-color:var(--z600);color:var(--z200)}
@@ -2315,7 +2317,8 @@
       const body = el('pipelines-body');
       if (!panel || !body) return;
       const rows = Array.isArray(results) ? results.filter(row => row.source_name) : [];
-      if (!rows.length) {
+      const pairResults = Object.values((profile && profile.last_pair_results) || {});
+      if (!rows.length && !pairResults.length) {
         panel.classList.add('hidden');
         body.innerHTML = '';
         return;
@@ -2339,7 +2342,7 @@
           ? 'Live — updating during sync'
           : (profile.last_sync ? `Last run ${timeAgo(profile.last_sync)}` : '');
       }
-      body.innerHTML = Array.from(groups.entries()).map(([source, group]) => {
+      const serviceRows = Array.from(groups.entries()).map(([source, group]) => {
         const state = group.errors
           ? '<span class="c-red">errors</span>'
           : group.unresolved
@@ -2357,7 +2360,34 @@
           </span>
           <span class="pipe-status-meta">${state}</span>
         </div>`;
-      }).join('');
+      });
+
+      // Custom cross-service pairs show alongside the built-in pipelines with
+      // their last recorded run.
+      const pairRows = pairResults
+        .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+        .map(result => {
+          const errorCount = (result.errors || []).length
+            + (result.categories || []).reduce((acc, cat) => acc + ((cat.errors || []).length), 0);
+          const state = errorCount
+            ? '<span class="c-red">errors</span>'
+            : '<span class="c-green">ok</span>';
+          const when = result.timestamp ? timeAgo(result.timestamp) : '';
+          const firstError = (result.errors || [])[0]
+            || ((result.categories || []).flatMap(cat => cat.errors || [])[0] || '');
+          return `<div class="pipe-status-row" ${firstError ? `title="${escAttr(firstError)}"` : ''}>
+            <span class="pipe-status-name">${esc(result.name || `${result.source} → ${result.target}`)} <span class="catalog-note">pair</span></span>
+            <span class="pipe-status-stats">
+              ${result.added ? `<span class="c-green">+${result.added}</span>` : '<span>+0</span>'}
+              ${result.removed ? `<span class="c-red">−${result.removed}</span>` : ''}
+              ${result.unmapped ? `<span class="c-orange">${result.unmapped} unmapped</span>` : ''}
+              ${errorCount ? `<span class="c-red">${errorCount} error${errorCount === 1 ? '' : 's'}</span>` : ''}
+            </span>
+            <span class="pipe-status-meta">${result.dry_run ? 'dry run · ' : ''}${when ? `ran ${esc(when)} · ` : ''}${state}</span>
+          </div>`;
+        });
+
+      body.innerHTML = serviceRows.concat(pairRows).join('');
     }
 
     // ── Library (poster browser) ────────────────────────────────────────
@@ -5690,30 +5720,66 @@
         </button>`).join('');
     }
 
-    function pairOptionsHtml(pair, index) {
-      const visible = pairVisibleListEntries(pair);
+    function pairOptionCheckboxHtml(pair, index, entry) {
       const chosen = new Set(pair.source_lists || []);
+      return `
+        <label class="pair-list-option" title="${escAttr(entry.label || entry.key)}">
+          <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
+                 ${chosen.has(entry.key) ? 'checked' : ''}>
+          <span>${esc(entry.label || entry.key)}</span>
+        </label>`;
+    }
+
+    function pairEntryMatchesUi(pair, entry) {
+      const chosenCategories = new Set(pair.categories || []);
+      if (entry.category && !chosenCategories.has(entry.category)) return false;
+      const filter = pairUi(pair).filter.trim().toLowerCase();
+      if (!filter) return true;
+      return String(entry.label || '').toLowerCase().includes(filter)
+        || String(entry.key || '').toLowerCase().includes(filter);
+    }
+
+    function pairOptionsHtml(pair, index) {
+      // The user's own lists (personal, liked, statuses) and public lists found
+      // via search render as separate sections — mixed together it was
+      // impossible to tell what belonged to the account and what was a search
+      // hit from a stranger's profile.
+      const known = pairListsByProvider[pair.source] || [];
+      const knownKeys = new Set(known.map(entry => entry.key));
+      const searchOnly = (pairListSearchResults[pair.source] || [])
+        .filter(entry => entry && entry.key && !knownKeys.has(entry.key))
+        .filter(entry => pairEntryMatchesUi(pair, entry));
+      const visibleKnown = known.filter(entry => pairEntryMatchesUi(pair, entry));
+
       const groups = pairsState.categories
         .filter(cat => (pair.categories || []).includes(cat.key))
-        .map(cat => ({ cat: cat, entries: visible.filter(entry => entry.category === cat.key) }))
+        .map(cat => ({ cat: cat, entries: visibleKnown.filter(entry => entry.category === cat.key) }))
         .filter(group => group.entries.length);
-      if (!groups.length) {
+
+      const sections = groups.map(group => `
+        <div class="pair-list-group">
+          <div class="pair-list-group-title">${esc(group.cat.label)}</div>
+          <div class="pair-list-grid">
+            ${group.entries.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+
+      if (searchOnly.length) {
+        sections.push(`
+        <div class="pair-list-group pair-list-group-search">
+          <div class="pair-list-group-title">Search results — public lists</div>
+          <div class="pair-list-grid">
+            ${searchOnly.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+      }
+
+      if (!sections.length) {
         return `<div class="catalog-note">${pairUi(pair).filter.trim()
           ? 'No list matches this filter.'
           : 'Nothing selectable for the chosen categories.'}</div>`;
       }
-      return groups.map(group => `
-        <div class="pair-list-group">
-          <div class="pair-list-group-title">${esc(group.cat.label)}</div>
-          <div class="pair-list-grid">
-            ${group.entries.map(entry => `
-              <label class="pair-list-option" title="${escAttr(entry.label || entry.key)}">
-                <input type="checkbox" data-pair-index="${index}" data-pair-list="${escAttr(entry.key)}"
-                       ${chosen.has(entry.key) ? 'checked' : ''}>
-                <span>${esc(entry.label || entry.key)}</span>
-              </label>`).join('')}
-          </div>
-        </div>`).join('');
+      return sections.join('');
     }
 
     function pairListCountText(pair) {

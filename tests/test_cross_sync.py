@@ -352,6 +352,40 @@ class IdentityTests(unittest.TestCase):
         self.assertNotIn("tmdb_id", enriched)
 
     @patch("src.fribb_client.lookup_by_anilist")
+    def test_enrichment_also_attaches_the_fribb_imdb_id(self, lookup_by_anilist) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 164,
+            "themoviedb_id": {"movie": [128]},
+            "imdb_id": ["tt0119698"],
+        }
+        enriched = enrich_identity({"media_type": "movie", "anilist_id": "164"})
+        self.assertEqual(enriched["tmdb_id"], "128")
+        self.assertEqual(enriched["imdb_id"], "tt0119698")
+        self.assertEqual(enriched["ids"]["imdb"], "tt0119698")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_enrichment_keeps_an_existing_imdb_id(self, lookup_by_anilist) -> None:
+        lookup_by_anilist.return_value = {
+            "themoviedb_id": {"movie": [128]},
+            "imdb_id": ["tt9999999"],
+        }
+        enriched = enrich_identity({"media_type": "movie", "anilist_id": "164", "imdb_id": "tt0119698"})
+        self.assertEqual(enriched["imdb_id"], "tt0119698")
+
+    def test_describe_error_translates_trakt_account_limit(self) -> None:
+        class _Response:
+            status_code = 420
+
+        class _HttpError(Exception):
+            response = _Response()
+
+        message = CrossSyncService._describe_error(_HttpError("420 Client Error: <none> for url: x"))
+        self.assertIn("account limit reached", message)
+        self.assertIn("VIP", message)
+        # Anything else passes through untouched.
+        self.assertEqual(CrossSyncService._describe_error(ValueError("boom")), "boom")
+
+    @patch("src.fribb_client.lookup_by_anilist")
     def test_an_anilist_target_matches_a_tmdb_source(self, lookup_by_anilist) -> None:
         # End to end: Trakt (TMDB) -> AniList (AniList ids). The item is already
         # on AniList, so nothing should be written.

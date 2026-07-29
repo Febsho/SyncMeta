@@ -2663,6 +2663,12 @@ def api_profile_pairs_run():
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
         except KeyError:
             pass
+        # Remember the outcome so the dashboard can show pair status alongside
+        # the main pipeline results.
+        try:
+            _profile_store.update_pair_last_results(profile_id, [r.to_dict() for r in results], dry_run=dry_run)
+        except KeyError:
+            pass
 
     return jsonify({
         "status": "completed",

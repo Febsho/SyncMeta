@@ -211,6 +211,20 @@ class CrossSyncService:
 
         return stats
 
+    @staticmethod
+    def _describe_error(exc: Exception) -> str:
+        """Turn provider HTTP failures into something a user can act on."""
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 420:
+            return (
+                "account limit reached (HTTP 420) — the target account cannot hold "
+                "more items; on Trakt this usually means the collection/list is over "
+                "the free-tier size and needs Trakt VIP"
+            )
+        if status == 429:
+            return "rate limited (HTTP 429) — the service asked us to slow down; try again later"
+        return str(exc)
+
     def _run_category(self, pair, source, target, category: str) -> PairCategoryStats:
         result = PairCategoryStats(category=category)
         self._set_status(f"{pair.display_name()}: reading {category} from {source.label}")
@@ -218,7 +232,7 @@ class CrossSyncService:
         try:
             source_items = source.fetch(category, getattr(pair, "source_lists", None)) or []
         except Exception as exc:
-            message = f"Could not read {category} from {source.label}: {exc}"
+            message = f"Could not read {category} from {source.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
             return result
@@ -228,7 +242,7 @@ class CrossSyncService:
         except Exception as exc:
             # Without the target's current contents everything would look new and
             # be rewritten, so this is fatal for the category rather than ignored.
-            message = f"Could not read {category} from {target.label}: {exc}"
+            message = f"Could not read {category} from {target.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
             return result
@@ -272,7 +286,7 @@ class CrossSyncService:
                     result.added = int(totals.get("added") or 0)
                     result.unmapped += int(totals.get("not_found") or 0)
                 except Exception as exc:
-                    message = f"Could not write {category} to {target.label}: {exc}"
+                    message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
 
@@ -284,7 +298,7 @@ class CrossSyncService:
                     totals = target.remove(category, to_remove, getattr(pair, "target_list", "")) or {}
                     result.removed = int(totals.get("deleted") or 0)
                 except Exception as exc:
-                    message = f"Could not remove {category} from {target.label}: {exc}"
+                    message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
 

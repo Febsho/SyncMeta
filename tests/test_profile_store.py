@@ -762,6 +762,26 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(updated["activity_results"]["watch_history"]["row"]["history_cursor"], "2026-04-05T12:00:00Z")
         self.assertEqual(private_loaded["activity_state"]["simkl_history_cursor"], "2026-04-05T12:00:00Z")
 
+    def test_update_pair_last_results_merges_per_pair(self) -> None:
+        created = self.store.create_profile("pw", self.credentials, self.options)
+        profile_id = created["profile_id"]
+
+        self.store.update_pair_last_results(profile_id, [
+            {"pair_id": "a-b-1", "name": "anilist → trakt", "added": 19, "removed": 0},
+            {"pair_id": "c-d-2", "name": "trakt → simkl", "added": 3, "removed": 1},
+        ])
+        # Running only one pair later must not discard the other's outcome.
+        self.store.update_pair_last_results(profile_id, [
+            {"pair_id": "a-b-1", "name": "anilist → trakt", "added": 2, "removed": 0},
+        ])
+
+        loaded = self.store.get_private_profile_by_id(profile_id)
+        results = loaded["last_pair_results"]
+        self.assertEqual(results["a-b-1"]["added"], 2)
+        self.assertEqual(results["c-d-2"]["added"], 3)
+        self.assertTrue(results["a-b-1"]["timestamp"])
+        self.assertFalse(results["a-b-1"]["dry_run"])
+
 
 if __name__ == "__main__":
     unittest.main()
