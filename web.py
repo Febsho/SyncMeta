@@ -2149,8 +2149,34 @@ def api_profile_library_items():
     })
 
 
+def _normalized_history_entries(pmdb: PublicMetaDBClient) -> list[dict]:
+    raw_entries = pmdb.get_watched_history()
+    entries = []
+    for entry in raw_entries:
+        try:
+            numeric_id = int(entry.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if numeric_id <= 0:
+            continue
+        entries.append({
+            "tmdb_id": numeric_id,
+            "media_type": str(entry.get("media_type", "") or ""),
+            "season": entry.get("season"),
+            "episode": entry.get("episode"),
+            "watched_at": str(entry.get("watched_at") or entry.get("watchedAt") or ""),
+            "title": str(entry.get("title") or "").strip(),
+        })
+    return entries
+
+
 @app.route("/api/profile/library/history", methods=["POST"])
 def api_profile_library_history():
+    """Watch history grouped one row per title, newest activity first.
+
+    Raw plays would render a wall of duplicate posters for a binged show; the
+    per-episode breakdown lives behind /library/history/title instead.
+    """
     pmdb, tmdb_key, error_response = _library_context()
     if error_response is not None:
         return error_response
@@ -2160,29 +2186,151 @@ def api_profile_library_history():
     except (TypeError, ValueError):
         return _json_error("Invalid limit", 400)
     try:
-        raw_entries = pmdb.get_watched_history()
+        entries = _normalized_history_entries(pmdb)
     except Exception as exc:
         logger.warning("Library history: PMDB fetch failed: %s", exc)
         return _json_error("Could not load your watch history", 502)
-    entries = [{
-        "id": str(entry.get("id", "")),
-        "tmdb_id": entry.get("tmdb_id"),
-        "media_type": str(entry.get("media_type", "") or ""),
-        "season": entry.get("season"),
-        "episode": entry.get("episode"),
-        "watched_at": str(entry.get("watched_at") or entry.get("watchedAt") or ""),
-        "title": str(entry.get("title") or "").strip(),
-    } for entry in raw_entries]
-    entries.sort(key=lambda entry: entry["watched_at"], reverse=True)
-    total = len(entries)
-    entries = entries[:limit]
-    entries, tmdb_error = _enrich_library_items(entries, tmdb_key)
+
+    groups: dict[tuple[str, int], dict] = {}
+    for entry in entries:
+        kind = tmdb_media_kind(entry["media_type"])
+        key = (kind, entry["tmdb_id"])
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "tmdb_id": entry["tmdb_id"],
+                "media_type": kind,
+                "title": entry["title"],
+                "play_count": 0,
+                "episode_keys": set(),
+                "last_watched_at": "",
+            }
+        group["play_count"] += 1
+        if not group["title"] and entry["title"]:
+            group["title"] = entry["title"]
+        if entry["season"] is not None and entry["episode"] is not None:
+            group["episode_keys"].add((entry["season"], entry["episode"]))
+        if entry["watched_at"] > group["last_watched_at"]:
+            group["last_watched_at"] = entry["watched_at"]
+
+    items = []
+    for group in groups.values():
+        items.append({
+            "tmdb_id": group["tmdb_id"],
+            "media_type": group["media_type"],
+            "title": group["title"],
+            "play_count": group["play_count"],
+            "episodes_watched": len(group["episode_keys"]),
+            "last_watched_at": group["last_watched_at"],
+        })
+    items.sort(key=lambda item: item["last_watched_at"], reverse=True)
+    total = len(items)
+    items = items[:limit]
+    items, tmdb_error = _enrich_library_items(items, tmdb_key)
     return jsonify({
-        "items": entries,
+        "items": items,
         "total": total,
+        "total_plays": len(entries),
         "tmdb_configured": bool(tmdb_key),
         "tmdb_error": tmdb_error,
     })
+
+
+@app.route("/api/profile/library/history/title", methods=["POST"])
+def api_profile_library_history_title():
+    """Per-title watch history: every episode watched (with TMDB episode names
+    and thumbnails when a TMDB key is saved) or, for movies, every play."""
+    pmdb, tmdb_key, error_response = _library_context()
+    if error_response is not None:
+        return error_response
+    body = request.get_json(silent=True) or {}
+    try:
+        tmdb_id = int(body.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        return _json_error("tmdb_id is required", 400)
+    if tmdb_id <= 0:
+        return _json_error("tmdb_id is required", 400)
+    kind = tmdb_media_kind(body.get("media_type", ""))
+
+    try:
+        entries = _normalized_history_entries(pmdb)
+    except Exception as exc:
+        logger.warning("Library history title: PMDB fetch failed: %s", exc)
+        return _json_error("Could not load your watch history", 502)
+    entries = [
+        entry for entry in entries
+        if entry["tmdb_id"] == tmdb_id and tmdb_media_kind(entry["media_type"]) == kind
+    ]
+
+    fallback_title = next((entry["title"] for entry in entries if entry["title"]), "")
+    result = {
+        "tmdb_id": tmdb_id,
+        "media_type": kind,
+        "title": fallback_title,
+        "year": "",
+        "poster_url": "",
+        "episodes": [],
+        "plays": [],
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": "",
+    }
+
+    if kind == "movie":
+        result["plays"] = sorted((entry["watched_at"] for entry in entries), reverse=True)
+    else:
+        # Collapse repeat plays of the same episode; keep the latest date.
+        by_episode: dict[tuple, dict] = {}
+        for entry in entries:
+            episode_key = (entry["season"], entry["episode"])
+            row = by_episode.get(episode_key)
+            if row is None:
+                row = by_episode[episode_key] = {
+                    "season": entry["season"],
+                    "episode": entry["episode"],
+                    "plays": 0,
+                    "watched_at": "",
+                }
+            row["plays"] += 1
+            if entry["watched_at"] > row["watched_at"]:
+                row["watched_at"] = entry["watched_at"]
+        episodes = list(by_episode.values())
+        # Whole-show plays (no season/episode) sort last; numbered ones by S/E.
+        episodes.sort(key=lambda row: (
+            row["season"] is None,
+            row["season"] if row["season"] is not None else 0,
+            row["episode"] if row["episode"] is not None else 0,
+        ))
+        result["episodes"] = episodes
+
+    if tmdb_key:
+        client = TmdbClient(tmdb_key)
+        try:
+            details = client.get_details(tmdb_id, kind)
+            if details:
+                result["title"] = details["title"] or result["title"]
+                result["year"] = details["year"]
+                result["poster_url"] = details["poster_url"]
+            seasons = sorted({
+                int(row["season"]) for row in result["episodes"]
+                if row["season"] is not None
+            })
+            for season in seasons:
+                season_map = client.get_season_episodes(tmdb_id, season)
+                for row in result["episodes"]:
+                    if row["season"] != season or row["episode"] is None:
+                        continue
+                    try:
+                        episode_details = season_map.get(int(row["episode"]))
+                    except (TypeError, ValueError):
+                        episode_details = None
+                    if episode_details:
+                        row["name"] = episode_details["name"]
+                        row["still_url"] = episode_details["still_url"]
+                        row["air_date"] = episode_details["air_date"]
+        except TmdbError as exc:
+            result["tmdb_error"] = str(exc)
+
+    return jsonify(result)
 
 
 @app.route("/api/profile/list/delete", methods=["POST"])

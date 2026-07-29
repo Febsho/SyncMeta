@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 POSTER_BASE_URL = "https://image.tmdb.org/t/p/w342"
+STILL_BASE_URL = "https://image.tmdb.org/t/p/w300"
 REQUEST_TIMEOUT = 15
 _CACHE_TTL_SECONDS = 24 * 3600
 _MAX_CACHE_ENTRIES = 20000
@@ -30,6 +31,8 @@ _BATCH_WORKERS = 8
 _cache_lock = threading.Lock()
 # (media_type, tmdb_id) -> (expires_at_monotonic, details dict | None)
 _cache: dict[tuple[str, int], tuple[float, dict | None]] = {}
+# (tmdb_id, season) -> (expires_at_monotonic, {episode_number: details})
+_season_cache: dict[tuple[int, int], tuple[float, dict[int, dict]]] = {}
 
 
 def normalize_media_type(media_type: str) -> str:
@@ -42,6 +45,7 @@ def normalize_media_type(media_type: str) -> str:
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _season_cache.clear()
 
 
 class TmdbError(RuntimeError):
@@ -137,6 +141,52 @@ class TmdbClient:
                 _cache.clear()
             _cache[cache_key] = (now + _CACHE_TTL_SECONDS, dict(details) if details else None)
         return details
+
+    def get_season_episodes(self, tmdb_id: int, season: int) -> dict[int, dict]:
+        """Return {episode_number: {name, still_url, air_date}} for one TV season.
+
+        One request covers every episode of the season, so callers resolving a
+        whole watch history never fetch episode-by-episode. An unknown season
+        caches as empty rather than erroring — old history rows can reference
+        seasons TMDB has since renumbered.
+        """
+        try:
+            tmdb_id = int(tmdb_id)
+            season = int(season)
+        except (TypeError, ValueError):
+            return {}
+        if tmdb_id <= 0 or season < 0:
+            return {}
+        cache_key = (tmdb_id, season)
+        now = time.monotonic()
+        with _cache_lock:
+            cached = _season_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return {number: dict(entry) for number, entry in cached[1].items()}
+
+        episodes: dict[int, dict] = {}
+        try:
+            raw = self._request(f"/tv/{tmdb_id}/season/{season}")
+            for entry in raw.get("episodes") or []:
+                try:
+                    number = int(entry.get("episode_number"))
+                except (TypeError, ValueError):
+                    continue
+                still_path = str(entry.get("still_path") or "").strip()
+                episodes[number] = {
+                    "name": str(entry.get("name") or "").strip(),
+                    "still_url": f"{STILL_BASE_URL}{still_path}" if still_path else "",
+                    "air_date": str(entry.get("air_date") or "").strip(),
+                }
+        except TmdbError as exc:
+            if exc.status_code != 404:
+                raise
+
+        with _cache_lock:
+            if len(_season_cache) >= _MAX_CACHE_ENTRIES:
+                _season_cache.clear()
+            _season_cache[cache_key] = (now + _CACHE_TTL_SECONDS, {number: dict(entry) for number, entry in episodes.items()})
+        return episodes
 
     def get_details_batch(self, refs: list[tuple[int, str]]) -> dict[tuple[str, int], dict]:
         """Fetch details for many (tmdb_id, media_type) pairs concurrently.
