@@ -1869,6 +1869,27 @@ class WebTests(unittest.TestCase):
         # The watchlist sorts first, entries without an id are dropped.
         self.assertEqual([entry["id"] for entry in data["lists"]], ["l1", "l2"])
 
+    def test_library_overview_attaches_source_service(self) -> None:
+        profile = self._make_library_profile(tmdb_key="")
+        web._profile_store.record_sync_success(profile["profile_id"], [], managed_lists=[
+            {"list_name": "Watching - Anime", "list_id": "l2", "display_name": "Watching - Anime", "source_name": "SIMKL", "selection": {}},
+            {"list_name": "Action", "list_id": "", "display_name": "Action", "source_name": "Trakt", "selection": {}},
+        ])
+        self._login(profile)
+        with patch.object(web.PublicMetaDBClient, "get_lists", return_value=[
+            {"id": "l2", "name": "Watching - Anime", "type": "custom"},
+            {"id": "l9", "name": "Action", "type": "custom"},
+            {"id": "l5", "name": "Manually made", "type": "custom"},
+        ]):
+            response = self.client.post("/api/profile/library/overview", json={})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        by_id = {entry["id"]: entry["source"] for entry in data["lists"]}
+        self.assertEqual(by_id["l2"], "SIMKL")   # joined on list id
+        self.assertEqual(by_id["l9"], "Trakt")   # joined on list name
+        self.assertEqual(by_id["l5"], "")        # not SyncMeta-managed
+
     def test_library_items_enrich_with_tmdb_details(self) -> None:
         self._login(self._make_library_profile())
         with patch.object(web.PublicMetaDBClient, "get_list_items", return_value=[

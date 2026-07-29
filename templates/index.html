@@ -284,7 +284,16 @@
     .tmdb-notice{display:flex;gap:10px;align-items:center;padding:12px 16px;margin-bottom:14px;border:1px solid rgba(124,109,247,.35);border-radius:10px;background:rgba(124,109,247,.08);font-size:13px;color:var(--z300)}
     .tmdb-notice a{color:var(--accent)}
     .tmdb-notice.tmdb-notice-error{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
-    .library-chips{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:14px}
+    .library-chips{display:block;padding-bottom:14px}
+    .library-pinned{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .library-filterbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+    .library-source-pills{display:flex;gap:4px;flex-wrap:wrap}
+    .library-source-pill{padding:4px 11px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z500);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+    .library-source-pill.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
+    #library-filter-input{padding:6px 10px;border:1px solid var(--z800);border-radius:6px;background:var(--z900);color:var(--z100);font-size:12px;min-width:170px;margin-left:auto}
+    .library-chip-items{display:flex;gap:8px;flex-wrap:wrap;max-height:190px;overflow-y:auto}
+    .library-more{border-style:dashed;color:var(--z500)}
+    .library-chip-empty{color:var(--z600);font-size:12px;padding:4px 0}
     .library-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z400);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
     .library-chip:hover{border-color:var(--z600);color:var(--z200)}
     .library-chip.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
@@ -2406,22 +2415,126 @@
       }
     }
 
+    // Browse controls state. Some profiles have a hundred synced lists, so the
+    // chip wall is filtered per source service, searchable, sorted, and
+    // collapsed to a first page instead of covering the whole screen.
+    let librarySourceFilter = 'all';
+    let libraryTextFilter = '';
+    let libraryShowAllLists = false;
+    const LIBRARY_CHIP_LIMIT = 24;
+
+    function libraryChipHtml(entry) {
+      const count = entry.item_count != null ? `<span class="library-chip-count">${Number(entry.item_count) || 0}</span>` : '';
+      return `<button class="library-chip${librarySelection === entry.id ? ' active' : ''}" type="button" data-library-target="${escAttr(entry.id)}">${esc(entry.name)}${count}</button>`;
+    }
+
+    function bindLibraryChip(node) {
+      node.addEventListener('click', () => {
+        librarySelection = node.dataset.libraryTarget;
+        renderLibraryChips();
+        loadLibrarySelection();
+      });
+    }
+
+    function libraryListSources() {
+      const sources = new Set();
+      let hasOther = false;
+      for (const entry of libraryLists) {
+        if (entry.type === 'watchlist') continue;
+        if (entry.source) sources.add(entry.source);
+        else hasOther = true;
+      }
+      return { sources: Array.from(sources).sort(), hasOther };
+    }
+
+    function libraryFilteredLists() {
+      const text = libraryTextFilter.trim().toLowerCase();
+      return libraryLists
+        .filter(entry => entry.type !== 'watchlist')
+        .filter(entry => {
+          if (librarySourceFilter === 'all') return true;
+          if (librarySourceFilter === 'other') return !entry.source;
+          return entry.source === librarySourceFilter;
+        })
+        .filter(entry => !text || entry.name.toLowerCase().includes(text))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     function renderLibraryChips() {
       const container = el('library-chips');
       if (!container) return;
-      const chips = [`<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`];
-      for (const entry of libraryLists) {
-        const count = entry.item_count != null ? `<span class="library-chip-count">${Number(entry.item_count) || 0}</span>` : '';
-        chips.push(`<button class="library-chip${librarySelection === entry.id ? ' active' : ''}" type="button" data-library-target="${escAttr(entry.id)}">${esc(entry.name)}${count}</button>`);
+      const watchlists = libraryLists.filter(entry => entry.type === 'watchlist');
+      const regularCount = libraryLists.length - watchlists.length;
+      const { sources, hasOther } = libraryListSources();
+      const pinned = [
+        `<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`,
+        ...watchlists.map(entry => libraryChipHtml(entry)),
+      ].join('');
+      const showFilters = regularCount > 8 || sources.length > 1;
+      container.innerHTML = `
+        <div class="library-pinned">${pinned}</div>
+        ${showFilters ? `<div class="library-filterbar">
+          <div class="library-source-pills" id="library-source-pills"></div>
+          <input type="text" id="library-filter-input" placeholder="Filter lists…" autocomplete="off" value="${escAttr(libraryTextFilter)}">
+        </div>` : ''}
+        <div class="library-chip-items" id="library-chip-items"></div>
+      `;
+      container.querySelectorAll('.library-pinned [data-library-target]').forEach(bindLibraryChip);
+      const input = el('library-filter-input');
+      if (input) {
+        input.addEventListener('input', () => {
+          libraryTextFilter = input.value;
+          libraryShowAllLists = false;
+          // Only the chip list re-renders, so the filter field keeps focus.
+          renderLibraryChipItems();
+        });
       }
-      container.innerHTML = chips.join('');
-      container.querySelectorAll('[data-library-target]').forEach(node => {
-        node.addEventListener('click', () => {
-          librarySelection = node.dataset.libraryTarget;
-          renderLibraryChips();
-          loadLibrarySelection();
+      renderLibrarySourcePills();
+      renderLibraryChipItems();
+    }
+
+    function renderLibrarySourcePills() {
+      const node = el('library-source-pills');
+      if (!node) return;
+      const { sources, hasOther } = libraryListSources();
+      if (sources.length < 1) { node.innerHTML = ''; return; }
+      const pills = [['all', 'All services'], ...sources.map(source => [source, source])];
+      if (hasOther) pills.push(['other', 'Other']);
+      node.innerHTML = pills.map(([key, label]) =>
+        `<button type="button" class="library-source-pill${librarySourceFilter === key ? ' active' : ''}" data-library-source="${escAttr(key)}">${esc(label)}</button>`
+      ).join('');
+      node.querySelectorAll('[data-library-source]').forEach(pill => {
+        pill.addEventListener('click', () => {
+          librarySourceFilter = pill.dataset.librarySource;
+          libraryShowAllLists = false;
+          renderLibrarySourcePills();
+          renderLibraryChipItems();
         });
       });
+    }
+
+    function renderLibraryChipItems() {
+      const node = el('library-chip-items');
+      if (!node) return;
+      const filtered = libraryFilteredLists();
+      if (!filtered.length) {
+        node.innerHTML = libraryLists.length ? '<div class="library-chip-empty">No lists match this filter.</div>' : '';
+        return;
+      }
+      const visible = libraryShowAllLists ? filtered : filtered.slice(0, LIBRARY_CHIP_LIMIT);
+      const chips = visible.map(entry => libraryChipHtml(entry));
+      if (filtered.length > visible.length) {
+        chips.push(`<button class="library-chip library-more" type="button" id="library-show-all">Show all ${filtered.length} lists…</button>`);
+      }
+      node.innerHTML = chips.join('');
+      node.querySelectorAll('[data-library-target]').forEach(bindLibraryChip);
+      const more = el('library-show-all');
+      if (more) {
+        more.addEventListener('click', () => {
+          libraryShowAllLists = true;
+          renderLibraryChipItems();
+        });
+      }
     }
 
     async function loadLibrarySelection() {
