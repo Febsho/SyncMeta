@@ -110,6 +110,28 @@ class TmdbClientTests(unittest.TestCase):
         self.assertEqual(mock_request.call_count, 1)
         self.assertIn(("tv", 5), results)
 
+    def test_get_season_episodes_parses_and_caches(self) -> None:
+        with patch.object(TmdbClient, "_request", return_value={
+            "episodes": [
+                {"episode_number": 1, "name": "Pilot", "still_path": "/e1.jpg", "air_date": "2022-02-20"},
+                {"episode_number": "not-a-number", "name": "Dropped"},
+            ],
+        }) as mock_request:
+            first = TmdbClient("key").get_season_episodes(1, 1)
+            second = TmdbClient("other-key").get_season_episodes(1, 1)
+        mock_request.assert_called_once_with("/tv/1/season/1")
+        self.assertEqual(first[1]["name"], "Pilot")
+        self.assertEqual(first[1]["still_url"], f"{tmdb_client.STILL_BASE_URL}/e1.jpg")
+        self.assertNotIn("not-a-number", first)
+        self.assertEqual(second, first)
+
+    def test_get_season_episodes_caches_missing_season_as_empty(self) -> None:
+        with patch.object(TmdbClient, "_request", side_effect=TmdbError("gone", status_code=404)) as mock_request:
+            client = TmdbClient("key")
+            self.assertEqual(client.get_season_episodes(1, 99), {})
+            self.assertEqual(client.get_season_episodes(1, 99), {})
+        self.assertEqual(mock_request.call_count, 1)
+
     def test_batch_raises_auth_error_when_nothing_resolves(self) -> None:
         client = TmdbClient("bad-key")
         with patch.object(TmdbClient, "_request", side_effect=TmdbError("denied", status_code=401)):

@@ -281,6 +281,24 @@
     .poster-meta{padding:8px 10px 10px}
     .poster-title{font-size:12px;font-weight:600;color:var(--z100);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .poster-sub{font-size:11px;color:var(--z500);margin-top:2px}
+    .poster-card-clickable{cursor:pointer;transition:border-color .15s,transform .15s}
+    .poster-card-clickable:hover{border-color:var(--accent);transform:translateY(-2px)}
+    .library-detail{padding:16px 18px}
+    .library-detail-header{display:flex;gap:14px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+    .library-detail-poster{width:56px;flex:none;aspect-ratio:2/3;border-radius:8px;overflow:hidden;background:var(--z900);position:relative}
+    .library-detail-poster img{width:100%;height:100%;object-fit:cover;display:block}
+    .library-detail-poster .poster-fallback{font-size:9px}
+    .library-detail-title{font-size:16px;font-weight:700;color:var(--z100)}
+    .episode-list{display:flex;flex-direction:column;gap:8px}
+    .episode-row{display:flex;gap:12px;align-items:center;background:var(--z950);border:1px solid rgba(39,39,46,.5);border-radius:10px;padding:8px}
+    .episode-thumb{width:106px;flex:none;aspect-ratio:16/9;border-radius:6px;overflow:hidden;background:var(--z900)}
+    .episode-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+    .episode-thumb-empty{display:flex;align-items:center;justify-content:center;color:var(--z700)}
+    .episode-thumb-empty svg{width:22px;height:22px}
+    .episode-info{min-width:0}
+    .episode-name{font-size:13px;font-weight:600;color:var(--z100);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .episode-tag{padding:1px 7px;border-radius:6px;background:rgba(124,109,247,.15);color:var(--accent);font-size:10px;font-weight:700;letter-spacing:.4px}
+    .episode-sub{font-size:11px;color:var(--z500);margin-top:2px}
     @media (max-width:700px){
       .hero h1{font-size:28px}.hero-card{padding:36px 24px 32px}
       .form-grid{grid-template-columns:1fr}.settings-columns{grid-template-columns:1fr}.options-grid{grid-template-columns:1fr}.source-card{min-height:0}
@@ -331,6 +349,7 @@
       .hero-cta{padding:11px 28px;font-size:14px}
       .cards{grid-template-columns:1fr 1fr}
       .poster-grid{grid-template-columns:repeat(auto-fill,minmax(102px,1fr));gap:10px;padding:12px}
+      .episode-thumb{width:84px}
       .card{padding:14px}.card-value{font-size:18px}
       .activity-stats{grid-template-columns:1fr 1fr}
       .btn{padding:8px 14px;font-size:12px}.btn-sm{padding:5px 10px;font-size:11px}
@@ -2288,10 +2307,19 @@
       updateLibraryTmdbNotice(result.data.tmdb_error || '');
       const items = Array.isArray(result.data.items) ? result.data.items : [];
       const total = Number(result.data.total || items.length);
-      el('library-count').textContent = isHistory
-        ? `${total} play${total === 1 ? '' : 's'}${items.length < total ? ` — showing latest ${items.length}` : ''}`
-        : `${items.length} item${items.length === 1 ? '' : 's'}`;
+      if (isHistory) {
+        const plays = Number(result.data.total_plays || 0);
+        el('library-count').textContent = `${total} title${total === 1 ? '' : 's'}${plays ? ` · ${plays} play${plays === 1 ? '' : 's'}` : ''}${items.length < total ? ` — showing latest ${items.length}` : ''}`;
+      } else {
+        el('library-count').textContent = `${items.length} item${items.length === 1 ? '' : 's'}`;
+      }
       renderLibraryGrid(items, isHistory);
+    }
+
+    function libraryPosterHtml(item, title) {
+      return item.poster_url
+        ? `<img src="${escAttr(item.poster_url)}" alt="${escAttr(title)}" loading="lazy">`
+        : `<div class="poster-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M8 4v4"/><path d="M16 4v4"/></svg><span>${esc(title)}</span></div>`;
     }
 
     function renderLibraryGrid(items, isHistory) {
@@ -2301,27 +2329,124 @@
         body.innerHTML = `<div class="empty">${isHistory ? 'No watch history in PublicMetaDB yet.' : 'This list is empty.'}</div>`;
         return;
       }
-      const cards = items.map(item => {
-        const mediaBadge = String(item.media_type || '').toLowerCase() === 'movie' ? 'Movie' : 'TV';
+      const cards = items.map((item, index) => {
+        const isMovie = String(item.media_type || '').toLowerCase() === 'movie';
+        const mediaBadge = isMovie ? 'Movie' : 'TV';
         const title = item.title || `TMDB ${item.tmdb_id || '?'}`;
-        const episode = isHistory && item.season != null && item.episode != null
-          ? `<span class="poster-episode">S${esc(String(item.season))}E${esc(String(item.episode))}</span>` : '';
-        const poster = item.poster_url
-          ? `<img src="${escAttr(item.poster_url)}" alt="${escAttr(title)}" loading="lazy">`
-          : `<div class="poster-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M8 4v4"/><path d="M16 4v4"/></svg><span>${esc(title)}</span></div>`;
+        // History is grouped: one card per title, the badge summarises how
+        // much of it was watched; clicking opens the episode breakdown.
+        let cornerBadge = '';
         let sub = '';
-        if (isHistory && item.watched_at) {
-          const when = new Date(item.watched_at);
-          sub = Number.isFinite(when.getTime()) ? when.toLocaleDateString() : '';
+        if (isHistory) {
+          if (!isMovie && item.episodes_watched) {
+            cornerBadge = `<span class="poster-episode">${Number(item.episodes_watched)} ep${Number(item.episodes_watched) === 1 ? '' : 's'}</span>`;
+          } else if (isMovie && Number(item.play_count) > 1) {
+            cornerBadge = `<span class="poster-episode">${Number(item.play_count)}×</span>`;
+          }
+          if (item.last_watched_at) {
+            const when = new Date(item.last_watched_at);
+            sub = Number.isFinite(when.getTime()) ? when.toLocaleDateString() : '';
+          }
         } else if (item.year) {
           sub = item.year;
         }
-        return `<div class="poster-card">
-          <div class="poster-frame">${poster}<span class="poster-badge">${mediaBadge}</span>${episode}</div>
+        const clickable = isHistory ? ` data-library-title="${index}" role="button" tabindex="0" title="${escAttr('Show watch details for ' + title)}"` : '';
+        return `<div class="poster-card${isHistory ? ' poster-card-clickable' : ''}"${clickable}>
+          <div class="poster-frame">${libraryPosterHtml(item, title)}<span class="poster-badge">${mediaBadge}</span>${cornerBadge}</div>
           <div class="poster-meta"><div class="poster-title" title="${escAttr(title)}">${esc(title)}</div>${sub ? `<div class="poster-sub">${esc(sub)}</div>` : ''}</div>
         </div>`;
       }).join('');
       body.innerHTML = `<div class="poster-grid">${cards}</div>`;
+      if (isHistory) {
+        body.querySelectorAll('[data-library-title]').forEach(node => {
+          const item = items[Number(node.dataset.libraryTitle)];
+          if (!item) return;
+          const open = () => loadLibraryTitle(item);
+          node.addEventListener('click', open);
+          node.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+          });
+        });
+      }
+    }
+
+    async function loadLibraryTitle(item) {
+      const body = el('library-body');
+      if (!body) return;
+      const token = ++libraryLoadToken;
+      body.innerHTML = '<div class="empty"><span class="spinner" style="vertical-align:middle;margin-right:8px"></span>Loading watch details…</div>';
+      const result = await apiPost('/api/profile/library/history/title', {
+        tmdb_id: item.tmdb_id,
+        media_type: item.media_type,
+      });
+      if (token !== libraryLoadToken) return;
+      if (!result.ok) {
+        body.innerHTML = `<div class="empty">${esc((result.data && result.data.error) || 'Could not load watch details.')}</div>`;
+        return;
+      }
+      renderLibraryTitleDetail(result.data);
+    }
+
+    function renderLibraryTitleDetail(data) {
+      const body = el('library-body');
+      if (!body) return;
+      libraryTmdbConfigured = !!data.tmdb_configured;
+      updateLibraryTmdbNotice(data.tmdb_error || '');
+      const title = data.title || `TMDB ${data.tmdb_id}`;
+      const isMovie = String(data.media_type || '').toLowerCase() === 'movie';
+      const headline = `${esc(title)}${data.year ? ` <span class="poster-sub" style="font-size:13px">(${esc(data.year)})</span>` : ''}`;
+
+      let rows = '';
+      if (isMovie) {
+        const plays = Array.isArray(data.plays) ? data.plays : [];
+        rows = plays.map(watchedAt => {
+          const when = new Date(watchedAt);
+          const stamp = Number.isFinite(when.getTime()) ? when.toLocaleString() : esc(watchedAt);
+          return `<div class="episode-row">
+            <div class="episode-thumb episode-thumb-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M10 8l6 4-6 4z"/></svg></div>
+            <div class="episode-info"><div class="episode-name">Watched</div><div class="episode-sub">${esc(stamp)}</div></div>
+          </div>`;
+        }).join('') || '<div class="empty">No plays recorded.</div>';
+      } else {
+        const episodes = Array.isArray(data.episodes) ? data.episodes : [];
+        rows = episodes.map(row => {
+          const tag = row.season != null && row.episode != null
+            ? `S${row.season}E${row.episode}`
+            : 'Show';
+          const name = row.name || (row.season != null && row.episode != null ? `Episode ${row.episode}` : 'Watched (no episode recorded)');
+          const when = row.watched_at ? new Date(row.watched_at) : null;
+          const stamp = when && Number.isFinite(when.getTime()) ? when.toLocaleDateString() : '';
+          const plays = Number(row.plays || 0) > 1 ? ` · ${row.plays}× watched` : '';
+          const thumb = row.still_url
+            ? `<img src="${escAttr(row.still_url)}" alt="" loading="lazy">`
+            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/></svg>';
+          return `<div class="episode-row">
+            <div class="episode-thumb${row.still_url ? '' : ' episode-thumb-empty'}">${thumb}</div>
+            <div class="episode-info">
+              <div class="episode-name"><span class="episode-tag">${esc(tag)}</span>${esc(name)}</div>
+              <div class="episode-sub">${stamp ? `Watched ${esc(stamp)}` : ''}${esc(plays)}</div>
+            </div>
+          </div>`;
+        }).join('') || '<div class="empty">No episodes recorded.</div>';
+      }
+
+      const summary = isMovie
+        ? `${(data.plays || []).length} play${(data.plays || []).length === 1 ? '' : 's'}`
+        : `${(data.episodes || []).length} episode${(data.episodes || []).length === 1 ? '' : 's'} watched`;
+
+      body.innerHTML = `<div class="library-detail">
+        <div class="library-detail-header">
+          <button class="btn btn-sm" type="button" id="btn-library-back">‹ Back</button>
+          <div class="library-detail-poster">${libraryPosterHtml(data, title)}</div>
+          <div>
+            <div class="library-detail-title">${headline}</div>
+            <div class="poster-sub">${esc(summary)}</div>
+          </div>
+        </div>
+        <div class="episode-list">${rows}</div>
+      </div>`;
+      const back = el('btn-library-back');
+      if (back) back.addEventListener('click', () => loadLibrarySelection());
     }
 
     function formatApiError(data, fallback) {

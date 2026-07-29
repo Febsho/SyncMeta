@@ -1905,20 +1905,72 @@ class WebTests(unittest.TestCase):
         self.assertIn("rejected", data["tmdb_error"])
         self.assertEqual(data["items"][0]["tmdb_id"], 100)
 
-    def test_library_history_sorts_newest_first_and_respects_limit(self) -> None:
+    def test_library_history_groups_plays_per_title(self) -> None:
         self._login(self._make_library_profile(tmdb_key=""))
         with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
-            {"id": "w1", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-01T10:00:00Z"},
-            {"id": "w2", "tmdb_id": 2, "media_type": "movie", "watched_at": "2026-03-01T10:00:00Z"},
-            {"id": "w3", "tmdb_id": 3, "media_type": "movie", "watched_at": "2026-02-01T10:00:00Z"},
+            {"id": "w1", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 1, "watched_at": "2026-01-01T10:00:00Z"},
+            {"id": "w2", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-02T10:00:00Z"},
+            {"id": "w3", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-03T10:00:00Z"},
+            {"id": "w4", "tmdb_id": 2, "media_type": "movie", "watched_at": "2026-03-01T10:00:00Z"},
         ]):
-            response = self.client.post("/api/profile/library/history", json={"limit": 2})
+            response = self.client.post("/api/profile/library/history", json={})
         data = response.get_json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(data["total"], 3)
-        self.assertEqual([entry["id"] for entry in data["items"]], ["w2", "w3"])
-        self.assertEqual(data["items"][1]["season"], None)
+        # One row per title, not one per play, newest activity first.
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["total_plays"], 4)
+        self.assertEqual(data["items"][0]["tmdb_id"], 2)
+        show = data["items"][1]
+        self.assertEqual(show["play_count"], 3)
+        self.assertEqual(show["episodes_watched"], 2)
+        self.assertEqual(show["last_watched_at"], "2026-01-03T10:00:00Z")
+
+    def test_library_history_title_returns_episode_breakdown(self) -> None:
+        self._login(self._make_library_profile())
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
+            {"id": "w1", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-02T10:00:00Z"},
+            {"id": "w2", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 1, "watched_at": "2026-01-01T10:00:00Z"},
+            {"id": "w3", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 1, "watched_at": "2026-01-05T10:00:00Z"},
+            {"id": "w4", "tmdb_id": 9, "media_type": "movie", "watched_at": "2026-03-01T10:00:00Z"},
+        ]), patch.object(web.TmdbClient, "get_details", return_value={
+            "title": "FROM", "year": "2022", "poster_url": "https://img/from.jpg",
+            "tmdb_id": 1, "media_type": "tv", "overview": "",
+        }), patch.object(web.TmdbClient, "get_season_episodes", return_value={
+            1: {"name": "Long Day's Journey Into Night", "still_url": "https://img/e1.jpg", "air_date": "2022-02-20"},
+            2: {"name": "The Way Things Are Now", "still_url": "https://img/e2.jpg", "air_date": "2022-02-20"},
+        }):
+            response = self.client.post("/api/profile/library/history/title", json={"tmdb_id": 1, "media_type": "tv"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["title"], "FROM")
+        # Repeat plays collapse into one row per episode, ordered by S/E.
+        self.assertEqual(len(data["episodes"]), 2)
+        first = data["episodes"][0]
+        self.assertEqual((first["season"], first["episode"]), (1, 1))
+        self.assertEqual(first["plays"], 2)
+        self.assertEqual(first["watched_at"], "2026-01-05T10:00:00Z")
+        self.assertEqual(first["name"], "Long Day's Journey Into Night")
+        self.assertEqual(first["still_url"], "https://img/e1.jpg")
+
+    def test_library_history_title_movie_returns_plays(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
+            {"id": "w1", "tmdb_id": 9, "media_type": "movie", "watched_at": "2026-01-01T10:00:00Z"},
+            {"id": "w2", "tmdb_id": 9, "media_type": "movie", "watched_at": "2026-02-01T10:00:00Z"},
+        ]):
+            response = self.client.post("/api/profile/library/history/title", json={"tmdb_id": 9, "media_type": "movie"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["plays"], ["2026-02-01T10:00:00Z", "2026-01-01T10:00:00Z"])
+        self.assertEqual(data["episodes"], [])
+
+    def test_library_history_title_requires_tmdb_id(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+        response = self.client.post("/api/profile/library/history/title", json={"media_type": "tv"})
+        self.assertEqual(response.status_code, 400)
 
     def test_library_requires_a_pmdb_key(self) -> None:
         profile = web._profile_store.create_profile("secret", {
