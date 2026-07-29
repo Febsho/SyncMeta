@@ -59,6 +59,8 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
+- Sync settings (per-service list/status pickers, visibility, watchlist toggles, schedule, history/resume) live in the **Sync view** as collapsible per-service "pipeline" cards (`#sync-settings`, `togglePipelineCard`/`updatePipelineSummaries`), not in Settings — Settings keeps only Profile/Connections/Danger Zone. The inputs kept their original ids when they moved, so `gatherOptions`/`gatherCreds`/`populateForm` are unchanged; old `lists`/`behavior`/`rules` deep links redirect to the Sync view. The pipeline cards are *virtual* representations of the existing main pipeline (each service → PMDB) — they are not `options.sync_pairs` and no migration happens
+- The dashboard's Sync Pipelines panel (`renderPipelinesPanel`) aggregates `last_results`/`sync_live_results` per `source_name` into one status row per service
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
 ## Key Invariants

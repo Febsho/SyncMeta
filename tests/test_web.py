@@ -1998,6 +1998,29 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="live-activity-panel"', html)
         self.assertIn("Live Sync Activity", html)
 
+    def test_index_moves_sync_settings_into_pipeline_cards(self) -> None:
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        # Per-service pipeline cards in the Sync view carry the old
+        # Lists/Behavior settings; the Settings tabs themselves are gone.
+        self.assertIn('id="sync-settings"', html)
+        for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
+            self.assertIn(f'id="pipe-{key}"', html)
+        self.assertIn("Service Pipelines → PublicMetaDB", html)
+        self.assertNotIn('id="stab-lists"', html)
+        self.assertNotIn('id="stab-behavior"', html)
+        self.assertNotIn('id="snav-lists"', html)
+        self.assertNotIn('id="snav-behavior"', html)
+        # The moved inputs must exist exactly once — duplicated ids would make
+        # the save logic read whichever copy came first.
+        for element_id in ('id="opt-auto-sync"', 'id="opt-simkl-visibility"', 'id="simkl-status-groups"',
+                           'id="trakt-catalog-list"', 'id="mdblist-list"', 'id="opt-activity-history-source"'):
+            self.assertEqual(html.count(element_id), 1, element_id)
+        self.assertIn('id="pipelines-panel"', html)
+        self.assertIn("Sync Pipelines", html)
+
 
 if __name__ == "__main__":
     unittest.main()

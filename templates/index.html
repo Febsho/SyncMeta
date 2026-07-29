@@ -223,10 +223,6 @@
     .conn-card-title{font-size:15px;font-weight:700;color:var(--z100);margin-bottom:4px;display:flex;align-items:center;gap:8px}
     .conn-card-desc{font-size:12px;color:var(--z500);margin-bottom:14px}
     .conn-card.full{grid-column:1 / -1;margin-bottom:0}
-    .lists-inner-tabs{display:flex;gap:6px;padding:5px;background:var(--z900);border:1px solid var(--z800);border-radius:10px;margin-bottom:16px}
-    .lists-inner-tab{flex:1;padding:9px 12px;border:none;border-radius:7px;background:transparent;color:var(--z400);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-    .lists-inner-tab.active{background:var(--z800);color:var(--white)}
-    .lists-subtab{display:none}.lists-subtab.active{display:block}
     .result-list{display:flex;flex-direction:column;gap:1px;background:var(--z900)}
     .result-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:12px 18px;background:var(--z950);cursor:default;transition:background .15s}
     .result-row:hover{background:rgba(255,255,255,.02)}
@@ -254,6 +250,29 @@
     .log-filter-pill.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
     #btn-log-auto.paused{color:var(--z500);border-color:var(--z800)}
     #btn-log-auto:not(.paused){color:var(--green);border-color:rgba(52,211,153,.4)}
+    /* Service pipelines (Sync view) */
+    .pipeline-list{display:flex;flex-direction:column}
+    .pipeline-card{border-top:1px solid rgba(39,39,46,.5)}
+    .pipeline-card:first-child{border-top:none}
+    .pipeline-head{display:flex;align-items:center;gap:12px;width:100%;padding:14px 18px;background:transparent;border:none;color:var(--z100);font-family:inherit;font-size:14px;cursor:pointer;text-align:left}
+    .pipeline-head:hover{background:var(--z950)}
+    .pipeline-title{font-weight:700;white-space:nowrap}
+    .pipeline-arrow{color:var(--z600);font-weight:400;margin:0 2px}
+    .pipeline-summary{color:var(--z500);font-size:12px;margin-left:auto;text-align:right}
+    .pipeline-chevron{color:var(--z600);font-size:12px;transition:transform .15s;flex:none}
+    .pipeline-card.open .pipeline-chevron{transform:rotate(180deg)}
+    .pipeline-body{display:none;padding:4px 18px 16px}
+    .pipeline-card.open .pipeline-body{display:block}
+    .pipeline-body .settings-group{margin-bottom:14px}
+    .pipeline-body .settings-group:last-child{margin-bottom:0}
+    /* Dashboard pipeline status */
+    .pipe-status-row{display:flex;align-items:center;gap:12px;padding:10px 18px;border-bottom:1px solid rgba(39,39,46,.3);font-size:13px;flex-wrap:wrap}
+    .pipe-status-row:last-child{border-bottom:none}
+    .pipe-status-name{font-weight:600;color:var(--z100);min-width:170px}
+    .pipe-status-name .pipeline-arrow{font-size:12px}
+    .pipe-status-stats{display:flex;gap:14px;color:var(--z400);font-variant-numeric:tabular-nums;flex-wrap:wrap}
+    .pipe-status-stats .c-green{color:var(--green)}.pipe-status-stats .c-red{color:var(--red)}.pipe-status-stats .c-orange{color:var(--orange)}
+    .pipe-status-meta{margin-left:auto;color:var(--z500);font-size:12px}
     /* Live sync activity */
     .live-activity-status{padding:10px 18px;border-bottom:1px solid var(--z900);font-size:13px;color:var(--z300);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .live-activity-status .live-step{color:var(--z100);font-weight:600}
@@ -432,6 +451,12 @@
           <div class="live-activity-console" id="live-activity-body"><div class="empty">Waiting for sync activity…</div></div>
         </div>
 
+        <!-- Per-pipeline status (one row per service feeding PublicMetaDB) -->
+        <div class="panel hidden" id="pipelines-panel">
+          <div class="panel-header"><span>Sync Pipelines</span><span class="history-time" id="pipelines-meta"></span></div>
+          <div id="pipelines-body"></div>
+        </div>
+
         <!-- Activity sync (hidden until configured) -->
         <div class="panel hidden" id="activity-panel">
           <div class="panel-header">
@@ -497,8 +522,8 @@
       <div id="view-sync" style="display:none">
         <div class="topbar">
           <div>
-            <h1 class="page-title">Cross-Service Sync</h1>
-            <div class="page-sub" id="sync-pairs-sub">Copy lists between Trakt, SIMKL, AniList, MDBList and PublicMetaDB.</div>
+            <h1 class="page-title">Sync</h1>
+            <div class="page-sub" id="sync-pairs-sub">Your service pipelines into PublicMetaDB, plus custom pairs between any services.</div>
           </div>
           <div class="inline-actions">
             <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
@@ -506,6 +531,245 @@
           </div>
         </div>
         <div class="cards" id="sync-cards"></div>
+
+        <div id="sync-settings">
+          <div class="panel">
+            <div class="panel-header">
+              <span>Service Pipelines → PublicMetaDB</span>
+              <span class="catalog-note">The built-in sync — every connected service sends into PublicMetaDB. Your existing setup lives here unchanged.</span>
+            </div>
+            <div class="pipeline-list">
+
+              <div class="pipeline-card" id="pipe-simkl">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('simkl')">
+                  <span class="dot" id="dot-pipe-simkl"></span>
+                  <span class="pipeline-title">SIMKL <span class="pipeline-arrow">→</span> PublicMetaDB</span>
+                  <span class="pipeline-summary" id="pipe-summary-simkl"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">SIMKL Lists</div>
+                    <div class="settings-group-desc">Choose which movie, show, and anime statuses should sync from SIMKL.</div>
+                    <div class="status-groups" id="simkl-status-groups"></div>
+                  </div>
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">SIMKL Options</div>
+                    <div class="toggle-row"><label for="opt-simkl-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label for="opt-simkl-pmdb-watchlist">SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
+                    <div class="form-row" style="margin-bottom:0">
+                      <label for="opt-simkl-visibility">List Visibility in PublicMetaDB</label>
+                      <select id="opt-simkl-visibility">
+                        <option value="private">Private</option>
+                        <option value="public">Public</option>
+                      </select>
+                      <div class="hint">Recommended: private — these are your personal SIMKL status lists.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pipeline-card" id="pipe-anilist">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('anilist')">
+                  <span class="dot" id="dot-pipe-anilist"></span>
+                  <span class="pipeline-title">AniList <span class="pipeline-arrow">→</span> PublicMetaDB</span>
+                  <span class="pipeline-summary" id="pipe-summary-anilist"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">AniList Lists</div>
+                    <div class="settings-group-desc">Choose which anime lists should sync into PublicMetaDB.</div>
+                    <div class="status-group">
+                      <div class="pill-row" id="anilist-status-list"></div>
+                    </div>
+                  </div>
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">AniList Options</div>
+                    <div class="toggle-row"><label for="opt-anilist-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label for="opt-anilist-pmdb-watchlist">AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
+                    <div class="form-row" style="margin-bottom:0">
+                      <label for="opt-anilist-visibility">List Visibility in PublicMetaDB</label>
+                      <select id="opt-anilist-visibility">
+                        <option value="private">Private</option>
+                        <option value="public">Public</option>
+                      </select>
+                      <div class="hint">Recommended: private — these reflect your personal AniList activity.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pipeline-card" id="pipe-trakt">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('trakt')">
+                  <span class="dot" id="dot-pipe-trakt"></span>
+                  <span class="pipeline-title">Trakt <span class="pipeline-arrow">→</span> PublicMetaDB</span>
+                  <span class="pipeline-summary" id="pipe-summary-trakt"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">Trakt Catalogs</div>
+                    <div class="settings-group-desc">Primary sync rules are Trakt watchlists and watched history. Recommendation, personal, liked, and public lists remain available as legacy list imports.</div>
+                    <div class="catalog-tabs">
+                      <button class="catalog-tab active" type="button" data-trakt-tab="default" onclick="switchTraktTab('default')">Default</button>
+                      <button class="catalog-tab" type="button" data-trakt-tab="enabled" onclick="switchTraktTab('enabled')">Enabled</button>
+                      <button class="catalog-tab" type="button" data-trakt-tab="my-lists" onclick="switchTraktTab('my-lists')">My Lists</button>
+                      <button class="catalog-tab" type="button" data-trakt-tab="discover" onclick="switchTraktTab('discover')">Discover</button>
+                    </div>
+                    <div class="catalog-toolbar">
+                      <span class="actions-meta" id="trakt-catalog-status">Connect Trakt to load your personal and liked lists, or search public lists.</span>
+                      <div class="actions-bar" style="margin-top:0">
+                        <button class="btn btn-sm hidden" id="btn-trakt-refresh" type="button" onclick="refreshTraktLists()">Refresh My Lists</button>
+                        <button class="btn btn-sm hidden" id="btn-trakt-sync-all" type="button" onclick="enableAllLikedTraktLists()">Sync All Liked</button>
+                        <button class="btn btn-sm" id="btn-trakt-select-all" type="button" onclick="selectAllVisibleTraktLists()">Select All</button>
+                        <button class="btn btn-sm" id="btn-trakt-deselect-all" type="button" onclick="deselectAllVisibleTraktLists()">Deselect All</button>
+                      </div>
+                    </div>
+                    <div class="catalog-search hidden" id="trakt-discover-search">
+                      <input type="text" id="trakt-discover-query" placeholder="Search public Trakt lists..." autocomplete="off">
+                      <button class="btn btn-sm" type="button" onclick="searchTraktLists()">Search</button>
+                    </div>
+                    <div class="catalog-list" id="trakt-catalog-list" role="listbox" aria-multiselectable="true" aria-label="Trakt lists to sync"></div>
+                  </div>
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">Trakt Options</div>
+                    <div class="toggle-row"><label for="opt-trakt-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label for="opt-trakt-pmdb-watchlist">Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
+                    <div class="form-row">
+                      <label for="opt-trakt-personal-visibility">Trakt Personal Lists</label>
+                      <select id="opt-trakt-personal-visibility">
+                        <option value="private">Private</option>
+                        <option value="public">Public</option>
+                      </select>
+                      <div class="hint">Applies to your Trakt watchlist and personal-style catalogs.</div>
+                    </div>
+                    <div class="form-row" style="margin-bottom:0">
+                      <label for="opt-trakt-public-visibility">Trakt Public Lists</label>
+                      <select id="opt-trakt-public-visibility">
+                        <option value="public">Public</option>
+                        <option value="private">Private</option>
+                      </select>
+                      <div class="hint">Applies to liked Trakt lists and Discover/public Trakt lists.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pipeline-card" id="pipe-mdblist">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('mdblist')">
+                  <span class="dot" id="dot-pipe-mdblist"></span>
+                  <span class="pipeline-title">MDBList <span class="pipeline-arrow">→</span> PublicMetaDB</span>
+                  <span class="pipeline-summary" id="pipe-summary-mdblist"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">MDBList Lists</div>
+                    <div class="settings-group-desc">Imports selected MDBList catalog lists into PublicMetaDB. Native MDBList watchlist/history writes are not exposed by this app; use MDBList's Trakt integration for that path.</div>
+                    <div class="catalog-tabs">
+                      <button class="catalog-tab active" type="button" data-mdblist-tab="my-lists" onclick="switchMdbListTab('my-lists')">My Lists</button>
+                      <button class="catalog-tab" type="button" data-mdblist-tab="discover" onclick="switchMdbListTab('discover')">Discover</button>
+                    </div>
+                    <div class="catalog-toolbar">
+                      <span class="actions-meta" id="mdblist-status">Enter your MDBList API key in Connections, then refresh your lists.</span>
+                      <div class="actions-bar" style="margin-top:0">
+                        <button class="btn btn-sm" id="btn-mdblist-refresh" type="button" onclick="refreshMdbListLists(false)">Refresh MDBList Lists</button>
+                        <button class="btn btn-sm" type="button" onclick="selectAllVisibleMdbListLists()">Select All</button>
+                        <button class="btn btn-sm" type="button" onclick="deselectAllVisibleMdbListLists()">Deselect All</button>
+                      </div>
+                    </div>
+                    <div class="catalog-search hidden" id="mdblist-discover-search">
+                      <input type="text" id="mdblist-discover-query" placeholder="Search public MDBList lists..." autocomplete="off">
+                      <button class="btn btn-sm" type="button" onclick="searchMdbListLists()">Search</button>
+                    </div>
+                    <div class="catalog-list" id="mdblist-list" role="listbox" aria-multiselectable="true" aria-label="MDBList lists to sync"></div>
+                  </div>
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">MDBList Options</div>
+                    <div class="form-row" style="margin-bottom:0">
+                      <label for="opt-mdblist-visibility">List Visibility in PublicMetaDB</label>
+                      <select id="opt-mdblist-visibility">
+                        <option value="public">Public</option>
+                        <option value="private">Private</option>
+                      </select>
+                      <div class="hint">Recommended: public — MDBList selections are usually shared/public-style catalogs.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pipeline-card" id="pipe-schedule">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('schedule')">
+                  <span class="dot dot-ok"></span>
+                  <span class="pipeline-title">Schedule &amp; Behavior</span>
+                  <span class="pipeline-summary" id="pipe-summary-schedule"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">List Sync</div>
+                    <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
+                    <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
+                    <div class="form-row" style="margin-top:12px">
+                      <label for="opt-interval-seconds">Update Every (Seconds)</label>
+                      <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
+                      <div class="hint">Minimum 21600 s (6 h). Default 43200 s (12 h). Scheduled from end of last successful run.</div>
+                    </div>
+                    <div class="toggle-row"><label for="opt-remove-missing" class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label for="opt-remove-missing">Remove items no longer in source</label></div>
+                    <div class="toggle-row"><label for="opt-delete-disabled-lists" class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label for="opt-delete-disabled-lists">Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pipeline-card" id="pipe-activity">
+                <button class="pipeline-head" type="button" onclick="togglePipelineCard('activity')">
+                  <span class="dot dot-ok"></span>
+                  <span class="pipeline-title">Watch History &amp; Resume</span>
+                  <span class="pipeline-summary" id="pipe-summary-activity"></span>
+                  <span class="pipeline-chevron">▾</span>
+                </button>
+                <div class="pipeline-body">
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">Watch History</div>
+                    <div class="settings-group-desc">Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.</div>
+                    <div class="form-row">
+                      <label for="opt-activity-history-source">Source</label>
+                      <select id="opt-activity-history-source">
+                        <option value="off">Off</option>
+                        <option value="simkl">SIMKL</option>
+                        <option value="trakt">Trakt</option>
+                      </select>
+                    </div>
+                    <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
+                    <div class="form-row" style="margin-top:12px">
+                      <label for="opt-history-interval-seconds">Auto-Sync Every (Seconds)</label>
+                      <input type="number" id="opt-history-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
+                      <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
+                    </div>
+                    <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
+                  </div>
+                  <div class="settings-group form-section">
+                    <div class="settings-group-title">Resume Progress</div>
+                    <div class="settings-group-desc">Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.</div>
+                    <div class="form-row">
+                      <label for="opt-activity-resume-source">Source</label>
+                      <select id="opt-activity-resume-source">
+                        <option value="off">Off</option>
+                        <option value="trakt">Trakt</option>
+                      </select>
+                    </div>
+                    <div class="toggle-row"><label for="opt-auto-resume-sync" class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label for="opt-auto-resume-sync">Sync resume progress automatically in the background</label></div>
+                    <div class="form-row" style="margin-bottom:0">
+                      <label for="opt-resume-interval-seconds">Auto-Sync Every (Seconds)</label>
+                      <input type="number" id="opt-resume-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
+                      <div class="hint">Minimum 86400 s (24 h). Only affects automatic resume sync.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panel-header"><span>Sync Pairs</span><span class="catalog-note" id="pairs-count"></span></div>
             
@@ -514,7 +778,9 @@
                 <div class="hint" style="margin-bottom:12px">
                   A pair copies one kind of list from one service to another, in one
                   direction. Add a second pair for the reverse direction. Every
-                  service that can be written to may be a target.
+                  service that can be written to may be a target, and several pairs
+                  can share the same target — add one pair per source to send
+                  multiple services into one.
                 </div>
                 <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
                 <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
@@ -597,14 +863,6 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
                 Connections
               </button>
-              <button class="settings-nav-item" id="snav-lists" onclick="showSettingsTab('lists')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                Lists
-              </button>
-              <button class="settings-nav-item" id="snav-behavior" onclick="showSettingsTab('behavior')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-                Behavior
-              </button>
               <div class="settings-nav-sep"></div>
               <button class="settings-nav-item settings-nav-danger" id="snav-danger" onclick="showSettingsTab('danger')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -625,7 +883,7 @@
                 <div class="guide-list" style="margin-bottom:20px">
                   <div class="guide-step"><div class="guide-step-num">1</div><div>Enter a profile password. Leave UUID blank for a new profile. Click <strong>Save Profile</strong>.</div></div>
                   <div class="guide-step"><div class="guide-step-num">2</div><div>Add your PublicMetaDB API key in <strong>Connections</strong>. Connect SIMKL, Trakt, AniList, or MDBList.</div></div>
-                  <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists in <strong>Lists</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
+                  <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists and behavior in <strong>Sync</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
                 </div>
                 <div class="form-row">
                   <label for="profile-id">Profile UUID</label>
@@ -784,188 +1042,6 @@
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Selected MDBList catalog lists. MDBList watch status sync is handled by MDBList's own Trakt/Plex integrations.</div>
                   <div class="form-row" style="margin-bottom:0"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
-                </div>
-              </div>
-            </div>
-
-            <!-- LISTS TAB -->
-            <div class="settings-tab" id="stab-lists">
-              <div class="settings-page-title">Lists</div>
-              <div class="settings-page-desc">Choose exactly what to sync from each connected source into PublicMetaDB.</div>
-              <div class="lists-inner-tabs">
-                <button class="lists-inner-tab active" id="ltab-simkl" onclick="showListsSubTab('simkl')">SIMKL</button>
-                <button class="lists-inner-tab" id="ltab-anilist" onclick="showListsSubTab('anilist')">AniList</button>
-                <button class="lists-inner-tab" id="ltab-trakt" onclick="showListsSubTab('trakt')">Trakt</button>
-                <button class="lists-inner-tab" id="ltab-mdblist" onclick="showListsSubTab('mdblist')">MDBList</button>
-              </div>
-              <div class="lists-subtab active" id="lsub-simkl">
-                <div class="settings-group form-section">
-                  <div class="settings-group-title">SIMKL Lists</div>
-                  <div class="settings-group-desc">Choose which movie, show, and anime statuses should sync from SIMKL.</div>
-                  <div class="status-groups" id="simkl-status-groups"></div>
-                </div>
-              </div>
-              <div class="lists-subtab" id="lsub-anilist">
-                <div class="settings-group form-section">
-                  <div class="settings-group-title">AniList Lists</div>
-                  <div class="settings-group-desc">Choose which anime lists should sync into PublicMetaDB.</div>
-                  <div class="status-group">
-                    <div class="pill-row" id="anilist-status-list"></div>
-                  </div>
-                </div>
-              </div>
-              <div class="lists-subtab" id="lsub-trakt">
-                <div class="settings-group form-section">
-                  <div class="settings-group-title">Trakt Catalogs</div>
-                  <div class="settings-group-desc">Primary sync rules are Trakt watchlists and watched history. Recommendation, personal, liked, and public lists remain available as legacy list imports.</div>
-                  <div class="catalog-tabs">
-                    <button class="catalog-tab active" type="button" data-trakt-tab="default" onclick="switchTraktTab('default')">Default</button>
-                    <button class="catalog-tab" type="button" data-trakt-tab="enabled" onclick="switchTraktTab('enabled')">Enabled</button>
-                    <button class="catalog-tab" type="button" data-trakt-tab="my-lists" onclick="switchTraktTab('my-lists')">My Lists</button>
-                    <button class="catalog-tab" type="button" data-trakt-tab="discover" onclick="switchTraktTab('discover')">Discover</button>
-                  </div>
-                  <div class="catalog-toolbar">
-                    <span class="actions-meta" id="trakt-catalog-status">Connect Trakt to load your personal and liked lists, or search public lists.</span>
-                    <div class="actions-bar" style="margin-top:0">
-                      <button class="btn btn-sm hidden" id="btn-trakt-refresh" type="button" onclick="refreshTraktLists()">Refresh My Lists</button>
-                      <button class="btn btn-sm hidden" id="btn-trakt-sync-all" type="button" onclick="enableAllLikedTraktLists()">Sync All Liked</button>
-                      <button class="btn btn-sm" id="btn-trakt-select-all" type="button" onclick="selectAllVisibleTraktLists()">Select All</button>
-                      <button class="btn btn-sm" id="btn-trakt-deselect-all" type="button" onclick="deselectAllVisibleTraktLists()">Deselect All</button>
-                    </div>
-                  </div>
-                  <div class="catalog-search hidden" id="trakt-discover-search">
-                    <input type="text" id="trakt-discover-query" placeholder="Search public Trakt lists..." autocomplete="off">
-                    <button class="btn btn-sm" type="button" onclick="searchTraktLists()">Search</button>
-                  </div>
-                  <div class="catalog-list" id="trakt-catalog-list" role="listbox" aria-multiselectable="true" aria-label="Trakt lists to sync"></div>
-                </div>
-              </div>
-              <div class="lists-subtab" id="lsub-mdblist">
-                <div class="settings-group form-section">
-                  <div class="settings-group-title">MDBList Lists</div>
-                  <div class="settings-group-desc">Imports selected MDBList catalog lists into PublicMetaDB. Native MDBList watchlist/history writes are not exposed by this app; use MDBList's Trakt integration for that path.</div>
-                  <div class="catalog-tabs">
-                    <button class="catalog-tab active" type="button" data-mdblist-tab="my-lists" onclick="switchMdbListTab('my-lists')">My Lists</button>
-                    <button class="catalog-tab" type="button" data-mdblist-tab="discover" onclick="switchMdbListTab('discover')">Discover</button>
-                  </div>
-                  <div class="catalog-toolbar">
-                    <span class="actions-meta" id="mdblist-status">Enter your MDBList API key in Connections, then refresh your lists.</span>
-                    <div class="actions-bar" style="margin-top:0">
-                      <button class="btn btn-sm" id="btn-mdblist-refresh" type="button" onclick="refreshMdbListLists(false)">Refresh MDBList Lists</button>
-                      <button class="btn btn-sm" type="button" onclick="selectAllVisibleMdbListLists()">Select All</button>
-                      <button class="btn btn-sm" type="button" onclick="deselectAllVisibleMdbListLists()">Deselect All</button>
-                    </div>
-                  </div>
-                  <div class="catalog-search hidden" id="mdblist-discover-search">
-                    <input type="text" id="mdblist-discover-query" placeholder="Search public MDBList lists..." autocomplete="off">
-                    <button class="btn btn-sm" type="button" onclick="searchMdbListLists()">Search</button>
-                  </div>
-                  <div class="catalog-list" id="mdblist-list" role="listbox" aria-multiselectable="true" aria-label="MDBList lists to sync"></div>
-                </div>
-              </div>
-            </div>
-
-            <!-- BEHAVIOR TAB -->
-            <div class="settings-tab" id="stab-behavior">
-              <div class="settings-page-title">Behavior</div>
-              <div class="settings-page-desc">Control how and when SyncMeta fetches and pushes data.</div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">List Sync</div>
-                <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
-                <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
-                <div class="form-row" style="margin-top:12px">
-                  <label for="opt-interval-seconds">Update Every (Seconds)</label>
-                  <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
-                  <div class="hint">Minimum 21600 s (6 h). Default 43200 s (12 h). Scheduled from end of last successful run.</div>
-                </div>
-                <div class="toggle-row"><label for="opt-remove-missing" class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label for="opt-remove-missing">Remove items no longer in source</label></div>
-                <div class="toggle-row"><label for="opt-delete-disabled-lists" class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label for="opt-delete-disabled-lists">Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
-              </div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">PMDB Native Watchlist</div>
-                <div class="settings-group-desc">Select which services contribute their "plan to watch" items to your PublicMetaDB native Watchlist. Arrows show the sync direction.</div>
-                <div class="toggle-row"><label for="opt-simkl-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-simkl-pmdb-watchlist"><span class="slider"></span></label><label for="opt-simkl-pmdb-watchlist">SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row"><label for="opt-trakt-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-trakt-pmdb-watchlist"><span class="slider"></span></label><label for="opt-trakt-pmdb-watchlist">Trakt Watchlist -&gt; PublicMetaDB Watchlist</label></div>
-                <div class="toggle-row" style="margin-bottom:0"><label for="opt-anilist-pmdb-watchlist" class="toggle"><input type="checkbox" id="opt-anilist-pmdb-watchlist"><span class="slider"></span></label><label for="opt-anilist-pmdb-watchlist">AniList Planning -&gt; PublicMetaDB Watchlist</label></div>
-              </div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">Watch History</div>
-                <div class="settings-group-desc">Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.</div>
-                <div class="form-row">
-                  <label for="opt-activity-history-source">Source</label>
-                  <select id="opt-activity-history-source">
-                    <option value="off">Off</option>
-                    <option value="simkl">SIMKL</option>
-                    <option value="trakt">Trakt</option>
-                  </select>
-                </div>
-                <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
-                <div class="form-row" style="margin-top:12px">
-                  <label for="opt-history-interval-seconds">Auto-Sync Every (Seconds)</label>
-                  <input type="number" id="opt-history-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
-                  <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
-                </div>
-                <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
-              </div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">Resume Progress</div>
-                <div class="settings-group-desc">Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.</div>
-                <div class="form-row">
-                  <label for="opt-activity-resume-source">Source</label>
-                  <select id="opt-activity-resume-source">
-                    <option value="off">Off</option>
-                    <option value="trakt">Trakt</option>
-                  </select>
-                </div>
-                <div class="toggle-row"><label for="opt-auto-resume-sync" class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label for="opt-auto-resume-sync">Sync resume progress automatically in the background</label></div>
-                <div class="form-row" style="margin-bottom:0">
-                  <label for="opt-resume-interval-seconds">Auto-Sync Every (Seconds)</label>
-                  <input type="number" id="opt-resume-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
-                  <div class="hint">Minimum 86400 s (24 h). Only affects automatic resume sync.</div>
-                </div>
-              </div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">List Visibility</div>
-                <div class="settings-group-desc">Control the default visibility of synced lists in PublicMetaDB for each source.</div>
-                <div class="form-row">
-                  <label for="opt-simkl-visibility">SIMKL Lists</label>
-                  <select id="opt-simkl-visibility">
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                  </select>
-                  <div class="hint">Recommended: private — these are your personal SIMKL status lists.</div>
-                </div>
-                <div class="form-row">
-                  <label for="opt-anilist-visibility">AniList Lists</label>
-                  <select id="opt-anilist-visibility">
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                  </select>
-                  <div class="hint">Recommended: private — these reflect your personal AniList activity.</div>
-                </div>
-                <div class="form-row">
-                  <label for="opt-trakt-personal-visibility">Trakt Personal Lists</label>
-                  <select id="opt-trakt-personal-visibility">
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                  </select>
-                  <div class="hint">Applies to your Trakt watchlist and personal-style catalogs.</div>
-                </div>
-                <div class="form-row">
-                  <label for="opt-trakt-public-visibility">Trakt Public Lists</label>
-                  <select id="opt-trakt-public-visibility">
-                    <option value="public">Public</option>
-                    <option value="private">Private</option>
-                  </select>
-                  <div class="hint">Applies to liked Trakt lists and Discover/public Trakt lists.</div>
-                </div>
-                <div class="form-row" style="margin-bottom:0">
-                  <label for="opt-mdblist-visibility">MDBList Lists</label>
-                  <select id="opt-mdblist-visibility">
-                    <option value="public">Public</option>
-                    <option value="private">Private</option>
-                  </select>
-                  <div class="hint">Recommended: public — MDBList selections are usually shared/public-style catalogs.</div>
                 </div>
               </div>
             </div>
@@ -1771,6 +1847,12 @@
       setDot('dot-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
       setDot('dot-pmdb', hasSecretInputOrSaved('pmdb-api-key', 'pmdb', 'api_key_saved'));
       setDot('dot-tmdb', hasSecretInputOrSaved('tmdb-api-key', 'tmdb', 'api_key_saved'));
+      // Mirror connection state onto the Sync view's pipeline cards.
+      setDot('dot-pipe-simkl', !!(creds.simkl.client_id && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved')));
+      setDot('dot-pipe-anilist', !!creds.anilist.username);
+      setDot('dot-pipe-trakt', !!(creds.trakt.client_id && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved')));
+      setDot('dot-pipe-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
+      updatePipelineSummaries();
     }
 
     // 'state' is 'ok' | 'off' | 'err'
@@ -1953,8 +2035,11 @@
 
     function switchView(name) {
       const navTarget = name;
-      if (['connections', 'rules'].includes(name)) {
+      if (name === 'connections') {
         name = 'settings';
+      } else if (['rules', 'lists', 'behavior'].includes(name)) {
+        // Sync settings moved out of Settings and into the Sync view.
+        name = 'sync';
       } else if (['sync-now', 'mapping', 'history'].includes(name)) {
         name = 'dashboard';
       }
@@ -1981,8 +2066,6 @@
       }
       if (navTarget === 'connections') {
         showSettingsTab('connections');
-      } else if (navTarget === 'rules') {
-        showSettingsTab('behavior');
       } else if (navTarget === 'sync-now') {
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } else if (navTarget === 'mapping') {
@@ -2213,6 +2296,59 @@
         clearInterval(liveActivityPolling);
         liveActivityPolling = null;
       }
+    }
+
+    // ── Dashboard pipeline status ───────────────────────────────────────
+    // One row per source service feeding PublicMetaDB, aggregated from the
+    // same per-list results the Latest Sync Results panel shows.
+    function renderPipelinesPanel(profile, results) {
+      const panel = el('pipelines-panel');
+      const body = el('pipelines-body');
+      if (!panel || !body) return;
+      const rows = Array.isArray(results) ? results.filter(row => row.source_name) : [];
+      if (!rows.length) {
+        panel.classList.add('hidden');
+        body.innerHTML = '';
+        return;
+      }
+      const groups = new Map();
+      for (const row of rows) {
+        const key = row.source_name;
+        const group = groups.get(key) || { lists: 0, fetched: 0, added: 0, removed: 0, unresolved: 0, errors: 0 };
+        group.lists += 1;
+        group.fetched += row.items_fetched || 0;
+        group.added += row.items_added || 0;
+        group.removed += row.items_removed || 0;
+        group.unresolved += row.items_skipped_unresolved || 0;
+        group.errors += row.error_count || 0;
+        groups.set(key, group);
+      }
+      panel.classList.remove('hidden');
+      const meta = el('pipelines-meta');
+      if (meta) {
+        meta.textContent = profile.sync_running
+          ? 'Live — updating during sync'
+          : (profile.last_sync ? `Last run ${timeAgo(profile.last_sync)}` : '');
+      }
+      body.innerHTML = Array.from(groups.entries()).map(([source, group]) => {
+        const state = group.errors
+          ? '<span class="c-red">errors</span>'
+          : group.unresolved
+            ? '<span class="c-orange">has unresolved</span>'
+            : '<span class="c-green">ok</span>';
+        return `<div class="pipe-status-row">
+          <span class="pipe-status-name">${esc(source)} <span class="pipeline-arrow">→</span> PublicMetaDB</span>
+          <span class="pipe-status-stats">
+            <span>${group.lists} list${group.lists === 1 ? '' : 's'}</span>
+            <span>${group.fetched} fetched</span>
+            ${group.added ? `<span class="c-green">+${group.added}</span>` : ''}
+            ${group.removed ? `<span class="c-red">−${group.removed}</span>` : ''}
+            ${group.unresolved ? `<span class="c-orange">${group.unresolved} unresolved</span>` : ''}
+            ${group.errors ? `<span class="c-red">${group.errors} error${group.errors === 1 ? '' : 's'}</span>` : ''}
+          </span>
+          <span class="pipe-status-meta">${state}</span>
+        </div>`;
+      }).join('');
     }
 
     // ── Library (poster browser) ────────────────────────────────────────
@@ -3512,6 +3648,7 @@
       el('activity-panel').classList.add('hidden');
       el('activity-cards').innerHTML = '';
       updateLiveActivityPanel(null);
+      renderPipelinesPanel({}, []);
       el('sync-hint').textContent = message;
       el('results-time').textContent = '';
       el('results-body').innerHTML = '<div class="empty">No sync results yet. Save or load a profile in Settings to start automatic background sync.</div>';
@@ -3798,6 +3935,7 @@
       `;
 
       updateLiveActivityPanel(profile);
+      renderPipelinesPanel(profile, results);
       renderActivityPanel(profile);
       renderAnimeHealth(profile);
       renderDryRunPreview(profile, results);
@@ -5205,15 +5343,20 @@
       }, 1200);
     }
 
-    document.querySelectorAll('#view-settings input:not([readonly])').forEach(input => {
+    document.querySelectorAll('#view-settings input:not([readonly]), #sync-settings input:not([readonly])').forEach(input => {
       input.addEventListener('input', scheduleAutoSave);
       input.addEventListener('change', scheduleAutoSave);
     });
-    document.querySelectorAll('#view-settings select').forEach(select => {
+    document.querySelectorAll('#view-settings select, #sync-settings select').forEach(select => {
       select.addEventListener('change', scheduleAutoSave);
     });
 
     function showSettingsTab(tab) {
+      if (tab === 'lists' || tab === 'behavior') {
+        // These settings live in the Sync view now; honor old deep links.
+        switchView('sync');
+        return;
+      }
       document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
       document.querySelectorAll('.settings-nav-item').forEach(n => {
         n.classList.remove('active');
@@ -5884,13 +6027,52 @@
       }
     }
 
-    function showListsSubTab(tab) {
-      document.querySelectorAll('.lists-subtab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.lists-inner-tab').forEach(n => n.classList.remove('active'));
-      const tabEl = document.getElementById('lsub-' + tab);
-      const navEl = document.getElementById('ltab-' + tab);
-      if (tabEl) tabEl.classList.add('active');
-      if (navEl) navEl.classList.add('active');
+    // ── Service pipeline cards (Sync view) ─────────────────────────────
+    function togglePipelineCard(key) {
+      const card = el('pipe-' + key);
+      if (card) card.classList.toggle('open');
+    }
+
+    function updatePipelineSummaries() {
+      const summaries = {
+        simkl: () => {
+          const selected = Object.values(simklSelectedStatuses || {}).reduce((acc, list) => acc + (list || []).length, 0);
+          return selected ? `${selected} status${selected === 1 ? '' : 'es'} syncing` : 'nothing selected';
+        },
+        anilist: () => {
+          const selected = (anilistSelectedStatuses || []).length;
+          return selected ? `${selected} list${selected === 1 ? '' : 's'} syncing` : 'nothing selected';
+        },
+        trakt: () => {
+          const parts = [];
+          if (el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked) parts.push('watchlist');
+          const lists = (traktSelectedLists || []).length;
+          if (traktSyncAllLikedLists) parts.push('all liked lists');
+          else if (lists) parts.push(`${lists} list${lists === 1 ? '' : 's'}`);
+          return parts.length ? `${parts.join(' + ')} syncing` : 'nothing selected';
+        },
+        mdblist: () => {
+          const lists = (mdblistSelectedLists || []).length;
+          return lists ? `${lists} list${lists === 1 ? '' : 's'} syncing` : 'nothing selected';
+        },
+        schedule: () => {
+          if (!el('opt-auto-sync').checked) return 'background sync off';
+          return `auto every ${intervalLabel(parseInt(el('opt-interval-seconds').value || '43200', 10))}`;
+        },
+        activity: () => {
+          const history = el('opt-activity-history-source').value;
+          const resume = el('opt-activity-resume-source').value;
+          const parts = [];
+          if (history !== 'off') parts.push(`history from ${history === 'simkl' ? 'SIMKL' : 'Trakt'}`);
+          if (resume !== 'off') parts.push('resume from Trakt');
+          return parts.length ? parts.join(' · ') : 'off';
+        },
+      };
+      for (const [key, build] of Object.entries(summaries)) {
+        const node = el('pipe-summary-' + key);
+        if (!node) continue;
+        try { node.textContent = build(); } catch { node.textContent = ''; }
+      }
     }
   </script>
 </body>
