@@ -48,7 +48,9 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Config:** `src/config.py` — dataclass hierarchy: `AppConfig` contains `SimklConfig`, `TraktConfig`, `AniListConfig`, `MdbListConfig`, `PublicMetaDBConfig`, `SyncConfig`. `SyncConfig.pmdb_watchlist_managed_keys: list[str]` is the persisted set of watchlist keys written by SyncMeta.
 
-**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider. Trakt/SIMKL/AniList carry both read *and* write APIs; MDBList is read-only.
+**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider. Trakt/SIMKL/AniList carry both read *and* write APIs; MDBList is read-only. `tmdb_client.py` is separate from the sync pipeline: it only serves the Library view's poster/title lookups using the profile's optional TMDB API key (`credentials.tmdb.api_key`), with a module-level 24h cache shared across profiles because poster metadata is public.
+
+**Library browser:** `/api/profile/library/overview|items|history` in `web.py` — session-scoped, reads the profile's own PMDB lists and watch history and enriches entries with TMDB title/year/poster when a TMDB key is saved. Without a key the endpoints still succeed (`tmdb_configured: false`) and the UI shows a connect-TMDB notice; a rejected key comes back as `tmdb_error` on a 200, never a failure.
 
 **Cross-service sync:** `src/providers.py` + `src/cross_sync.py`. The main pipeline only writes to PMDB; a *sync pair* copies one category from any provider to any other. `providers.py` wraps each client in a `ProviderAdapter` declaring the categories it can read/write; `cross_sync.CrossSyncService.run_pair()` fetches both sides, diffs on `providers.item_key`, and adds/removes on the target. Pairs live in `options.sync_pairs` (see `SyncPair` in `config.py`), and per-pair ownership in `activity_state.pair_managed_keys`. Endpoints: `/api/profile/pairs`, `/pairs/save`, `/pairs/run`.
 
@@ -57,6 +59,7 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
+- The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
 ## Key Invariants
 

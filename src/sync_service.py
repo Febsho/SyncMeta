@@ -2738,6 +2738,10 @@ class SyncService:
                         existing_map[key] = cached_item
                         self._record_cached_list_item_add(list_id, cached_item)
                         stats.items_added += 1
+                        logger.info(
+                            "  │ + '%s' (tmdb %s, %s) → '%s'",
+                            item.get("title") or f"tmdb {tmdb_id}", tmdb_id, media_type, actual_list_name,
+                        )
                     except SyncCancelled:
                         raise
                     except Exception as exc:
@@ -2967,6 +2971,16 @@ class SyncService:
                     stats.items_added += 1
                     successful_writes += 1
                     written += 1
+                    episode_suffix = (
+                        f" S{item['season']}E{item['episode']}"
+                        if item.get("season") is not None and item.get("episode") is not None
+                        else ""
+                    )
+                    logger.info(
+                        "  │ ✓ Watched '%s'%s (tmdb %s, %s)",
+                        item.get("title") or f"tmdb {item.get('tmdb_id')}",
+                        episode_suffix, item.get("tmdb_id"), item.get("media_type"),
+                    )
                     if written % 10 == 0 or written == total_to_write:
                         self._set_status(f"{status_message} ({written}/{total_to_write} new)")
                         self._publish_progress([stats])
@@ -3080,7 +3094,11 @@ class SyncService:
                         future.result()
                         removed += 1
                         self._record_cached_list_item_remove(list_id, item.get("id", ""))
-                        logger.debug("Removed stale item tmdb=%s from list %s", item.get("tmdb_id"), list_id)
+                        logger.info(
+                            "  │ − '%s' (tmdb %s, %s) removed as stale",
+                            item.get("title") or item.get("name") or f"tmdb {item.get('tmdb_id')}",
+                            item.get("tmdb_id"), item.get("media_type"),
+                        )
                     except SyncCancelled:
                         raise
                     except Exception as exc:

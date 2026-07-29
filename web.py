@@ -43,6 +43,7 @@ from src.mdblist_client import MdbListClient
 from src.publicmetadb_client import PublicMetaDBClient
 from src.profile_store import ProfileStore, merge_credentials, normalize_credentials, normalize_profile_options
 from src.simkl_client import SimklClient
+from src.tmdb_client import TmdbClient, TmdbError, normalize_media_type as tmdb_media_kind
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
 from src.trakt_client import TraktClient
 from src.cross_sync import CrossSyncService
@@ -2052,6 +2053,136 @@ def api_profile_logs_clear():
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
     _profile_log_store.clear(profile_id)
     return jsonify({"status": "cleared"})
+
+
+def _library_context() -> tuple[PublicMetaDBClient | None, str, object | None]:
+    """Resolve the signed-in profile's PMDB client and TMDB key.
+
+    Returns (pmdb_client, tmdb_api_key, error_response). When error_response is
+    not None the caller must return it directly.
+    """
+    private_profile = _current_private_profile()
+    if not private_profile:
+        return None, "", (_clear_session_cookie(_json_error("Sign in first", 401)[0]), 401)
+    credentials = normalize_credentials(private_profile.get("credentials"))
+    pmdb_key = credentials["pmdb"]["api_key"]
+    if not pmdb_key:
+        return None, "", _json_error("Add your PublicMetaDB API key in Settings first", 409)
+    pmdb = PublicMetaDBClient(PublicMetaDBConfig(api_key=pmdb_key))
+    return pmdb, credentials["tmdb"]["api_key"], None
+
+
+def _enrich_library_items(items: list[dict], tmdb_api_key: str) -> tuple[list[dict], str]:
+    """Attach TMDB title/year/poster to items carrying tmdb_id + media_type.
+
+    Returns (items, tmdb_error). A missing key is not an error — items simply
+    come back without posters and the UI shows the connect-TMDB notice.
+    """
+    if not tmdb_api_key:
+        return items, ""
+    client = TmdbClient(tmdb_api_key)
+    refs = [(item.get("tmdb_id"), item.get("media_type", "")) for item in items]
+    try:
+        details_map = client.get_details_batch(refs)
+    except TmdbError as exc:
+        return items, str(exc)
+    for item in items:
+        try:
+            numeric_id = int(item.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        details = details_map.get((tmdb_media_kind(item.get("media_type", "")), numeric_id))
+        if details:
+            item["title"] = details["title"] or item.get("title") or ""
+            item["year"] = details["year"]
+            item["poster_url"] = details["poster_url"]
+    return items, ""
+
+
+@app.route("/api/profile/library/overview", methods=["POST"])
+def api_profile_library_overview():
+    pmdb, tmdb_key, error_response = _library_context()
+    if error_response is not None:
+        return error_response
+    try:
+        raw_lists = pmdb.get_lists()
+    except Exception as exc:
+        logger.warning("Library overview: PMDB list fetch failed: %s", exc)
+        return _json_error("Could not load your PublicMetaDB lists", 502)
+    lists = [{
+        "id": str(entry.get("id", "")),
+        "name": str(entry.get("name", "") or "Unnamed list"),
+        "type": str(entry.get("type", "") or "custom"),
+        "item_count": entry.get("item_count") or entry.get("itemCount"),
+        "is_public": bool(entry.get("is_public") or entry.get("isPublic")),
+    } for entry in raw_lists if entry.get("id")]
+    lists.sort(key=lambda entry: (entry["type"] != "watchlist", entry["name"].lower()))
+    return jsonify({"lists": lists, "tmdb_configured": bool(tmdb_key)})
+
+
+@app.route("/api/profile/library/items", methods=["POST"])
+def api_profile_library_items():
+    pmdb, tmdb_key, error_response = _library_context()
+    if error_response is not None:
+        return error_response
+    body = request.get_json(silent=True) or {}
+    list_id = str(body.get("list_id", "")).strip()
+    if not list_id:
+        return _json_error("list_id is required", 400)
+    try:
+        raw_items = pmdb.get_list_items(list_id)
+    except Exception as exc:
+        logger.warning("Library items: PMDB fetch failed for list %s: %s", list_id, exc)
+        return _json_error("Could not load items for this list", 502)
+    items = [{
+        "id": str(entry.get("id", "")),
+        "tmdb_id": entry.get("tmdb_id"),
+        "media_type": str(entry.get("media_type", "") or ""),
+        "title": str(entry.get("title") or entry.get("name") or "").strip(),
+    } for entry in raw_items]
+    items, tmdb_error = _enrich_library_items(items, tmdb_key)
+    return jsonify({
+        "items": items,
+        "total": len(items),
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+    })
+
+
+@app.route("/api/profile/library/history", methods=["POST"])
+def api_profile_library_history():
+    pmdb, tmdb_key, error_response = _library_context()
+    if error_response is not None:
+        return error_response
+    body = request.get_json(silent=True) or {}
+    try:
+        limit = max(1, min(int(body.get("limit", 500) or 500), 2000))
+    except (TypeError, ValueError):
+        return _json_error("Invalid limit", 400)
+    try:
+        raw_entries = pmdb.get_watched_history()
+    except Exception as exc:
+        logger.warning("Library history: PMDB fetch failed: %s", exc)
+        return _json_error("Could not load your watch history", 502)
+    entries = [{
+        "id": str(entry.get("id", "")),
+        "tmdb_id": entry.get("tmdb_id"),
+        "media_type": str(entry.get("media_type", "") or ""),
+        "season": entry.get("season"),
+        "episode": entry.get("episode"),
+        "watched_at": str(entry.get("watched_at") or entry.get("watchedAt") or ""),
+        "title": str(entry.get("title") or "").strip(),
+    } for entry in raw_entries]
+    entries.sort(key=lambda entry: entry["watched_at"], reverse=True)
+    total = len(entries)
+    entries = entries[:limit]
+    entries, tmdb_error = _enrich_library_items(entries, tmdb_key)
+    return jsonify({
+        "items": entries,
+        "total": total,
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+    })
 
 
 @app.route("/api/profile/list/delete", methods=["POST"])

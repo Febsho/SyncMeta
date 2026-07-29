@@ -1832,6 +1832,120 @@ class WebTests(unittest.TestCase):
         self.assertEqual(private_profile["credentials"]["trakt"]["selected_lists"], [])
         mock_delete_list.assert_called_once_with("pmdb-list-2")
 
+    def _make_library_profile(self, tmdb_key: str = "tmdb-key") -> dict:
+        return web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": "pmdb-secret"},
+            "tmdb": {"api_key": tmdb_key},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+
+    def _login(self, profile: dict) -> None:
+        response = self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"],
+            "password": "secret",
+        })
+        self.assertEqual(response.status_code, 200)
+
+    def test_library_endpoints_require_a_session(self) -> None:
+        for path in ("/api/profile/library/overview", "/api/profile/library/items", "/api/profile/library/history"):
+            response = self.client.post(path, json={})
+            self.assertEqual(response.status_code, 401, path)
+
+    def test_library_overview_lists_pmdb_lists_and_tmdb_state(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+        with patch.object(web.PublicMetaDBClient, "get_lists", return_value=[
+            {"id": "l2", "name": "Anime", "type": "custom", "item_count": 3},
+            {"id": "l1", "name": "Watchlist", "type": "watchlist", "item_count": 7},
+            {"name": "No id — skipped"},
+        ]):
+            response = self.client.post("/api/profile/library/overview", json={})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(data["tmdb_configured"])
+        # The watchlist sorts first, entries without an id are dropped.
+        self.assertEqual([entry["id"] for entry in data["lists"]], ["l1", "l2"])
+
+    def test_library_items_enrich_with_tmdb_details(self) -> None:
+        self._login(self._make_library_profile())
+        with patch.object(web.PublicMetaDBClient, "get_list_items", return_value=[
+            {"id": "i1", "tmdb_id": 100, "media_type": "tv"},
+            {"id": "i2", "tmdb_id": 200, "media_type": "movie"},
+        ]), patch.object(web.TmdbClient, "get_details_batch", return_value={
+            ("tv", 100): {"title": "Frieren", "year": "2023", "poster_url": "https://img/f.jpg"},
+        }):
+            response = self.client.post("/api/profile/library/items", json={"list_id": "l1"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["tmdb_configured"])
+        self.assertEqual(data["items"][0]["title"], "Frieren")
+        self.assertEqual(data["items"][0]["poster_url"], "https://img/f.jpg")
+        # The unmatched item keeps its bare shape rather than being dropped.
+        self.assertEqual(data["items"][1]["tmdb_id"], 200)
+        self.assertNotIn("poster_url", data["items"][1])
+
+    def test_library_items_require_a_list_id(self) -> None:
+        self._login(self._make_library_profile())
+        response = self.client.post("/api/profile/library/items", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_library_items_report_a_bad_tmdb_key_without_failing(self) -> None:
+        self._login(self._make_library_profile())
+        with patch.object(web.PublicMetaDBClient, "get_list_items", return_value=[
+            {"id": "i1", "tmdb_id": 100, "media_type": "tv"},
+        ]), patch.object(web.TmdbClient, "get_details_batch", side_effect=web.TmdbError("TMDB rejected the API key", status_code=401)):
+            response = self.client.post("/api/profile/library/items", json={"list_id": "l1"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("rejected", data["tmdb_error"])
+        self.assertEqual(data["items"][0]["tmdb_id"], 100)
+
+    def test_library_history_sorts_newest_first_and_respects_limit(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
+            {"id": "w1", "tmdb_id": 1, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-01T10:00:00Z"},
+            {"id": "w2", "tmdb_id": 2, "media_type": "movie", "watched_at": "2026-03-01T10:00:00Z"},
+            {"id": "w3", "tmdb_id": 3, "media_type": "movie", "watched_at": "2026-02-01T10:00:00Z"},
+        ]):
+            response = self.client.post("/api/profile/library/history", json={"limit": 2})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["total"], 3)
+        self.assertEqual([entry["id"] for entry in data["items"]], ["w2", "w3"])
+        self.assertEqual(data["items"][1]["season"], None)
+
+    def test_library_requires_a_pmdb_key(self) -> None:
+        profile = web._profile_store.create_profile("secret", {
+            "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
+            "anilist": {"username": "", "access_token": "", "selected_statuses": []},
+            "trakt": {"client_id": "", "client_secret": "", "access_token": "", "refresh_token": "", "sync_watchlist": False, "sync_liked_lists": False, "selected_lists": []},
+            "mdblist": {"api_key": "", "selected_lists": []},
+            "pmdb": {"api_key": ""},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+        self._login(profile)
+        response = self.client.post("/api/profile/library/overview", json={})
+        self.assertEqual(response.status_code, 409)
+
+    def test_index_contains_library_and_live_activity_ui(self) -> None:
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-nav="library"', html)
+        self.assertIn('id="view-library"', html)
+        self.assertIn('id="library-chips"', html)
+        self.assertIn('id="library-tmdb-notice"', html)
+        self.assertIn('id="tmdb-api-key"', html)
+        self.assertIn('id="dot-tmdb"', html)
+        self.assertIn('id="live-activity-panel"', html)
+        self.assertIn("Live Sync Activity", html)
+
 
 if __name__ == "__main__":
     unittest.main()
