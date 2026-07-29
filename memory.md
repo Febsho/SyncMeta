@@ -15,7 +15,10 @@ This file is a compact working memory for future code changes. Keep it current w
   - `src/trakt_client.py`
   - `src/mdblist_client.py`
   - `src/publicmetadb_client.py`
+  - `src/tmdb_client.py` (Library-view poster/title lookups only; module-level 24h cache shared across profiles)
 - Matching external ids to PMDB/TMDB ids lives in `src/matcher.py`.
+- The Library view (`/api/profile/library/*`) browses PMDB lists and watch history with posters; it needs the profile's optional TMDB API key (`credentials.tmdb.api_key`, v3 key or v4 read token) for titles/posters and degrades to bare TMDB ids without one.
+- The dashboard shows a Live Sync Activity panel while a sync runs; it tails the session-scoped `/api/logs` stream, and the sync pipeline logs each list add/remove and watched-history write at INFO so they appear there and in the Logs view.
 
 ## Storage And Secrets
 

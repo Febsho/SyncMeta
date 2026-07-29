@@ -296,6 +296,7 @@ def normalize_credentials(credentials: dict | None) -> dict:
     trakt = raw.get("trakt", {})
     mdblist = raw.get("mdblist", {})
     pmdb = raw.get("pmdb", {})
+    tmdb = raw.get("tmdb", {})
     trakt_default_catalogs_initialized = bool(trakt.get("default_catalogs_initialized", False))
     trakt_selected_lists = _normalize_trakt_selected_lists(trakt.get("selected_lists", []))
     legacy_sync_watchlist = bool(trakt.get("sync_watchlist", False))
@@ -336,6 +337,9 @@ def normalize_credentials(credentials: dict | None) -> dict:
         "pmdb": {
             "api_key": str(pmdb.get("api_key", "")).strip(),
         },
+        "tmdb": {
+            "api_key": str(tmdb.get("api_key", "") if isinstance(tmdb, dict) else "").strip(),
+        },
     }
 
 
@@ -375,6 +379,9 @@ def public_credentials(credentials: dict | None) -> dict:
         },
         "pmdb": {
             "api_key_saved": bool(raw["pmdb"]["api_key"]),
+        },
+        "tmdb": {
+            "api_key_saved": bool(raw["tmdb"]["api_key"]),
         },
     }
 
@@ -558,6 +565,9 @@ def merge_credentials(existing: dict | None, updates: dict | None) -> dict:
         },
         "pmdb": {
             "api_key": keep_secret("pmdb", "api_key"),
+        },
+        "tmdb": {
+            "api_key": keep_secret("tmdb", "api_key"),
         },
     }
 
