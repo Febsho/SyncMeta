@@ -45,7 +45,7 @@ from src.profile_store import ProfileStore, merge_credentials, normalize_credent
 from src.simkl_client import SimklClient
 from src.tmdb_client import TmdbClient, TmdbError, normalize_media_type as tmdb_media_kind
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
-from src.trakt_client import TraktClient
+from src.trakt_client import TraktAuthenticationError, TraktClient
 from src.cross_sync import CrossSyncService
 from src.providers import (
     ALL_CATEGORIES,
@@ -513,9 +513,16 @@ _PROVIDER_STATUS_HINTS = {
 }
 
 
+#: Errors we raise ourselves already say what went wrong and what to do about
+#: it, so appending a guessed hint only contradicts them.
+_SELF_EXPLANATORY_ERRORS: tuple[type, ...] = (TraktAuthenticationError,)
+
+
 def _derive_provider_hint(provider: str, exc: Exception, explicit_hint: str | None = None) -> str | None:
     if explicit_hint:
         return explicit_hint
+    if isinstance(exc, _SELF_EXPLANATORY_ERRORS):
+        return None
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if isinstance(status, int) and status in _PROVIDER_STATUS_HINTS:
@@ -523,7 +530,16 @@ def _derive_provider_hint(provider: str, exc: Exception, explicit_hint: str | No
     message = str(exc).lower()
     if "timeout" in message or "timed out" in message:
         return f"The {provider} API did not respond in time. Retry, or check their status page."
-    if "connection" in message and provider:
+    # Match how requests/urllib3 actually word a transport failure. A bare
+    # "connection" test also fired on any message that merely mentioned the
+    # Connections screen, telling the user to check their network when the real
+    # problem was a rejected API key.
+    if provider and any(
+        phrase in message
+        for phrase in ("connectionerror", "connection error", "connection refused",
+                       "connection aborted", "connection reset",
+                       "failed to establish a new connection", "name or service not known")
+    ):
         return f"Could not reach the {provider} API. Check your network connection."
     return None
 
