@@ -2033,6 +2033,75 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["items"][1]["tmdb_id"], 200)
         self.assertNotIn("poster_url", data["items"][1])
 
+    def test_list_preview_resolves_the_list_by_managed_name(self) -> None:
+        # The dashboard rows only carry a list name; the id lives in
+        # managed_lists, which is deliberately not shipped to the client.
+        profile = self._make_library_profile()
+        web._profile_store.record_sync_success(profile["profile_id"], [], managed_lists=[
+            {"list_name": "Completed - Anime", "list_id": "l7", "display_name": "Completed - Anime",
+             "source_name": "SIMKL", "selection": {}},
+        ])
+        self._login(profile)
+        with patch.object(web.PublicMetaDBClient, "get_list_items", return_value=[
+            {"id": "i1", "tmdb_id": 100, "media_type": "tv"},
+        ]) as get_items, patch.object(web.TmdbClient, "get_details_batch", return_value={
+            ("tv", 100): {"title": "Frieren", "year": "2023", "poster_url": "https://img/f.jpg"},
+        }):
+            response = self.client.post(
+                "/api/profile/library/list-preview", json={"list_name": "Completed - Anime"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        get_items.assert_called_once_with("l7")
+        self.assertFalse(data["missing"])
+        self.assertEqual(data["items"][0]["poster_url"], "https://img/f.jpg")
+        self.assertEqual(data["total"], 1)
+
+    def test_list_preview_falls_back_to_a_name_lookup(self) -> None:
+        self._login(self._make_library_profile())
+        with patch.object(web.PublicMetaDBClient, "find_list_by_name", return_value={"id": "l9"}), \
+             patch.object(web.PublicMetaDBClient, "get_list_items", return_value=[]) as get_items:
+            response = self.client.post(
+                "/api/profile/library/list-preview", json={"list_name": "Made by hand"})
+
+        self.assertEqual(response.status_code, 200)
+        get_items.assert_called_once_with("l9")
+
+    def test_list_preview_reports_a_missing_list_rather_than_failing(self) -> None:
+        self._login(self._make_library_profile())
+        with patch.object(web.PublicMetaDBClient, "find_list_by_name", return_value=None):
+            response = self.client.post(
+                "/api/profile/library/list-preview", json={"list_name": "Never synced"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["missing"])
+        self.assertEqual(data["items"], [])
+
+    def test_list_preview_caps_the_posters_but_reports_the_real_total(self) -> None:
+        profile = self._make_library_profile()
+        web._profile_store.record_sync_success(profile["profile_id"], [], managed_lists=[
+            {"list_name": "Big", "list_id": "l1", "display_name": "Big", "source_name": "Trakt", "selection": {}},
+        ])
+        self._login(profile)
+        many = [{"id": f"i{n}", "tmdb_id": n, "media_type": "movie"} for n in range(1, 61)]
+        with patch.object(web.PublicMetaDBClient, "get_list_items", return_value=many), \
+             patch.object(web.TmdbClient, "get_details_batch") as batch:
+            batch.return_value = {}
+            response = self.client.post("/api/profile/library/list-preview", json={"list_name": "Big"})
+            # Only the shown slice is sent to TMDB, not all 60.
+            self.assertEqual(len(batch.call_args[0][0]), web.LIST_PREVIEW_LIMIT)
+        data = response.get_json()
+
+        self.assertEqual(data["total"], 60)
+        self.assertEqual(data["shown"], web.LIST_PREVIEW_LIMIT)
+        self.assertEqual(len(data["items"]), web.LIST_PREVIEW_LIMIT)
+
+    def test_list_preview_requires_a_name(self) -> None:
+        self._login(self._make_library_profile())
+        response = self.client.post("/api/profile/library/list-preview", json={})
+        self.assertEqual(response.status_code, 400)
+
     def test_library_items_require_a_list_id(self) -> None:
         self._login(self._make_library_profile())
         response = self.client.post("/api/profile/library/items", json={})
