@@ -54,7 +54,21 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Cross-service sync:** `src/providers.py` + `src/cross_sync.py`. The main pipeline only writes to PMDB; a *sync pair* copies one category from any provider to any other. `providers.py` wraps each client in a `ProviderAdapter` declaring the categories it can read/write; `cross_sync.CrossSyncService.run_pair()` fetches both sides, diffs on `providers.item_key`, and adds/removes on the target. Pairs live in `options.sync_pairs` (see `SyncPair` in `config.py`), and per-pair ownership in `activity_state.pair_managed_keys`. Endpoints: `/api/profile/pairs`, `/pairs/save`, `/pairs/run`.
 
-**Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS. Key patterns:
+**Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS.
+
+**Visual language** (shared tokens in `:root`): surfaces are `--surface` on a
+`--line` hairline at 12px radius; a value is titled by a monospace uppercase
+overline (`--mono`, 10px, `.1em` tracking, `--label` colour) and set at **weight
+500 with negative tracking**, not 700 — heavy weights at these sizes read as
+chunky against the thin rules. Bars are 2px. Colour is reserved for status dots
+(which carry a soft glow ring), deltas, and the primary action; everything else
+is greyscale. `.panel-header` is mono/uppercase, but meta text and controls
+inside it are explicitly reset to sentence case — they read as shouting
+otherwise. Selected filter buttons invert to a light fill rather than taking the
+brand accent, so a filter row reads as one segmented control. **No webfonts** —
+the app is self-hosted and must render offline, so `--mono` is a system stack.
+
+Key patterns:
 - `fetchStatus(force)` polls `/status` every 2s during sync; has `_statusGeneration` counter to discard stale renders
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
