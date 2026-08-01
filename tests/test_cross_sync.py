@@ -433,6 +433,165 @@ class SourceListSelectionTests(unittest.TestCase):
         self.assertEqual(target.fetched[0][1], [])
 
 
+class TwoWayPairTests(unittest.TestCase):
+    """Two-way keeps both sides holding the union.
+
+    The dangerous part is telling "new on one side" from "deleted on the other".
+    Both look identical in a single snapshot, so the pair's managed-key set is
+    used as the last agreed state. These tests pin that distinction down.
+    """
+
+    def _two_way(self, **overrides):
+        raw = {"mode": "two_way", "removal_mode": REMOVAL_MANAGED}
+        raw.update(overrides)
+        return _pair(**raw)
+
+    def test_each_side_gains_what_the_other_had(self) -> None:
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("2"), _movie("3")]})
+        service = CrossSyncService({"trakt": a, "simkl": b})
+
+        stats = service.run_pair(self._two_way())
+
+        self.assertEqual([i["tmdb_id"] for i in b.added[0][1]], ["1"])
+        self.assertEqual([i["tmdb_id"] for i in a.added[0][1]], ["3"])
+        self.assertEqual(stats.added, 2)
+        self.assertEqual(stats.categories[0].added_back, 1)
+        self.assertEqual(stats.categories[0].skipped_existing, 1)
+
+    def test_a_second_run_writes_nothing(self) -> None:
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("2")]})
+        service = CrossSyncService({"trakt": a, "simkl": b})
+
+        first = service.run_pair(self._two_way())
+        second = service.run_pair(self._two_way())
+
+        self.assertEqual(first.added, 2)
+        self.assertEqual(second.added, 0, "a settled two-way pair kept writing")
+        self.assertEqual(second.removed, 0)
+
+    def test_a_deletion_propagates_instead_of_being_re_added(self) -> None:
+        # The case two independent one-way pairs cannot get right: after both
+        # sides agreed on an item, removing it from one must remove it from the
+        # other rather than being copied straight back.
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        service = CrossSyncService({"trakt": a, "simkl": b})
+        service.run_pair(self._two_way())          # agree on 1 and 2
+
+        b.remove(CATEGORY_WATCHLIST, [_movie("2")])   # user deletes on SIMKL
+        b.removed.clear()
+        stats = service.run_pair(self._two_way())
+
+        self.assertEqual(stats.removed, 1)
+        self.assertEqual([i["tmdb_id"] for i in a.removed[-1][1]], ["2"])
+        self.assertEqual(a.added, [], "the deleted item was copied back instead")
+
+    def test_a_deletion_is_re_added_when_the_pair_is_additive(self) -> None:
+        # Additive never deletes, so the item comes back from the other side.
+        # That is the documented trade-off, not a bug — pin it so it stays a
+        # deliberate choice.
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"trakt": a, "simkl": b})
+        service.run_pair(self._two_way(removal_mode=REMOVAL_ADDITIVE))
+
+        b.remove(CATEGORY_WATCHLIST, [_movie("1")])
+        stats = service.run_pair(self._two_way(removal_mode=REMOVAL_ADDITIVE))
+
+        self.assertEqual(stats.removed, 0)
+        self.assertEqual(stats.added, 1)
+
+    def test_a_new_item_is_not_mistaken_for_a_deletion(self) -> None:
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"trakt": a, "simkl": b})
+        service.run_pair(self._two_way())
+
+        a.add(CATEGORY_WATCHLIST, [_movie("9")])      # brand new, never synced
+        a.added.clear()
+        stats = service.run_pair(self._two_way())
+
+        self.assertEqual(stats.removed, 0, "a new item was deleted as if it were stale")
+        self.assertEqual([i["tmdb_id"] for i in b.added[-1][1]], ["9"])
+
+    def test_direction_of_the_pair_does_not_change_the_outcome(self) -> None:
+        # Naming the services the other way round must give the same result;
+        # that is the whole reason this is one pass rather than two one-way runs.
+        def build(swap):
+            a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+            b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+            svc = CrossSyncService({"trakt": a, "simkl": b})
+            first = self._two_way() if not swap else self._two_way(source="simkl", target="trakt")
+            svc.run_pair(first)
+            a.remove(CATEGORY_WATCHLIST, [_movie("1")])   # deleted on Trakt
+            a.removed.clear(); b.removed.clear()
+            return svc.run_pair(first), a, b
+
+        forward, fa, fb = build(False)
+        reverse, ra, rb = build(True)
+
+        self.assertEqual(forward.removed, 1)
+        self.assertEqual(reverse.removed, 1)
+        self.assertEqual([i["tmdb_id"] for i in fb.removed[-1][1]], ["1"])
+        self.assertEqual([i["tmdb_id"] for i in rb.removed[-1][1]], ["1"])
+
+    def test_mirror_is_downgraded_because_it_has_no_two_way_meaning(self) -> None:
+        pair = SyncPair.from_dict({
+            "source": "trakt", "target": "simkl", "categories": [CATEGORY_WATCHLIST],
+            "mode": "two_way", "removal_mode": REMOVAL_MIRROR,
+        })
+
+        self.assertEqual(pair.removal_mode, REMOVAL_MANAGED)
+        self.assertTrue(pair.is_two_way())
+
+    def test_a_read_only_service_cannot_be_one_end(self) -> None:
+        a = FakeAdapter("mdblist", {CATEGORY_WATCHLIST: [_movie("1")]}, writable=False,
+                        blocked_reason="MDBList can only be read from.")
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"mdblist": a, "simkl": b})
+
+        stats = service.run_pair(self._two_way(source="mdblist", target="simkl"))
+
+        self.assertEqual(stats.added, 0)
+        self.assertEqual(b.added, [])
+        self.assertIn("MDBList can only be read from", " ".join(stats.errors))
+
+    def test_a_failed_read_of_either_side_writes_nothing(self) -> None:
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("2")]}, fetch_error="upstream 500")
+        service = CrossSyncService({"trakt": a, "simkl": b})
+
+        stats = service.run_pair(self._two_way())
+
+        self.assertEqual(a.added, [])
+        self.assertEqual(b.added, [])
+        self.assertTrue(stats.categories[0].errors)
+
+    def test_a_dry_run_reports_both_directions_and_writes_nothing(self) -> None:
+        a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("2")]})
+        service = CrossSyncService({"trakt": a, "simkl": b}, dry_run=True)
+
+        stats = service.run_pair(self._two_way())
+
+        self.assertEqual(stats.added, 2)
+        self.assertEqual(stats.categories[0].added_back, 1)
+        self.assertEqual(a.added, [])
+        self.assertEqual(b.added, [])
+        self.assertEqual(service.managed_keys, {}, "a dry run recorded ownership")
+
+    def test_display_name_shows_the_direction(self) -> None:
+        one = SyncPair.from_dict({"source": "trakt", "target": "simkl",
+                                  "categories": [CATEGORY_WATCHLIST]})
+        two = SyncPair.from_dict({"source": "trakt", "target": "simkl",
+                                  "categories": [CATEGORY_WATCHLIST], "mode": "two_way"})
+
+        self.assertIn("→", one.display_name())
+        self.assertIn("↔", two.display_name())
+
+
 class PairIdTests(unittest.TestCase):
     """The id is echoed into HTML attributes and keys stored state, so it is
     restricted to an inert alphabet rather than trusted to every call site."""

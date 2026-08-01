@@ -86,8 +86,22 @@ Key patterns:
 
 **PMDB Watchlist managed-keys filter:** `_remove_stale` in `sync_service.py` accepts `managed_keys: frozenset[str] | None`. If `managed_keys` is truthy (non-empty), only items whose key is in `managed_keys` are eligible for removal — this preserves manually-added PMDB entries. An empty frozenset (bootstrap/first-sync) is falsy and falls back to full-removal behavior. Keys are persisted in `activity_state.pmdb_watchlist_managed_keys` by `_merge_activity_results` in `profile_store.py` after each sync.
 
-**Sync pairs are one-way and additive by default.** A pair is `source → target`;
-both directions means two pairs. `removal_mode` is `additive` (never deletes),
+**Two-way is one pass, never two one-way runs.** `SyncPair.mode` is `one_way`
+(default) or `two_way`. Running two one-way passes back to back would let the
+*order* decide the outcome: whichever direction goes first re-adds an item the
+user just deleted on the other side, so a deletion propagates or is resurrected
+depending on which service happens to be named first. `_run_category_two_way`
+instead reads both sides once and treats the pair's managed-key set as *the
+state both sides last agreed on*, which is what makes a one-sided item
+interpretable — previously synced means deleted on the other side, never synced
+means new. There is a regression test asserting the result is the same when the
+two services are named the other way round. `mirror` has no bidirectional
+meaning (applied both ways it just means one side wins and the other's unique
+items are destroyed), so `from_dict` downgrades it to `managed` and the editor
+does not offer it. Two-way writes both ends, so a read-only provider (MDBList,
+AniList without a token) is rejected at either position.
+
+**Sync pairs are additive by default.** `removal_mode` is `additive` (never deletes),
 `managed` (deletes only keys this pair previously wrote, so manual additions on
 the target survive — the same invariant as `pmdb_watchlist_managed_keys`), or
 `mirror` (deletes anything the source lacks). An unrecognised mode must refuse to

@@ -51,6 +51,32 @@ REMOVAL_MODE_LABELS = {
     REMOVAL_MIRROR: "Full mirror — may remove items added manually on the target",
 }
 
+# Direction of a pair.
+#
+# one_way: read the source, write the target. Unambiguous, no conflicts.
+# two_way: both services end up holding the union of the two. This is NOT two
+#   one-way passes run back to back — that would let the order decide whether a
+#   deletion propagates or gets resurrected by the opposite direction. Instead
+#   the pair's managed-key set is treated as *the state both sides last agreed
+#   on*, which is what makes a one-sided item interpretable: present on one side
+#   and previously synced means it was deleted on the other, while present on one
+#   side and never synced means it is new. See CrossSyncService._run_category.
+MODE_ONE_WAY = "one_way"
+MODE_TWO_WAY = "two_way"
+
+ALL_PAIR_MODES = (MODE_ONE_WAY, MODE_TWO_WAY)
+
+PAIR_MODE_LABELS = {
+    MODE_ONE_WAY: "One-way — copy from the first service to the second",
+    MODE_TWO_WAY: "Two-way — keep both services holding the same items",
+}
+
+#: Removal modes that mean something in two-way. `mirror` is "make the target
+#: match the source", which cannot hold in both directions at once — applied
+#: bidirectionally it just means whichever side ran first wins and the other's
+#: unique items are destroyed. It is downgraded rather than offered.
+TWO_WAY_REMOVAL_MODES = (REMOVAL_ADDITIVE, REMOVAL_MANAGED)
+
 
 def item_key(item: dict) -> str:
     """Return a stable cross-provider identity key for an item.
