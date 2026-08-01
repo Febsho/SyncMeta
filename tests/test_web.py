@@ -930,6 +930,97 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(pairs), 1)
         self.assertEqual(pairs[0]["source_lists"], ["list:someone/top-100"])
 
+    def _fake_pair_adapters(self, contents):
+        """Three in-memory adapters counting how often each is read."""
+        from src.providers import CATEGORY_WATCHLIST, ProviderAdapter
+
+        class Fake(ProviderAdapter):
+            def __init__(self, key, items=None):
+                self.key = key
+                self.label = key.title()
+                self.reads = (CATEGORY_WATCHLIST,)
+                self.writes = (CATEGORY_WATCHLIST,)
+                self._items = list(items or [])
+                self.fetches = 0
+
+            def fetch(self, category, source_lists=None):
+                self.fetches += 1
+                return list(self._items)
+
+            def add(self, category, items, target_list=""):
+                self._items.extend(items)
+                return {"added": len(items)}
+
+            def remove(self, category, items, target_list=""):
+                return {"deleted": 0}
+
+        return {key: Fake(key, items) for key, items in contents.items()}
+
+    def test_running_all_pairs_reads_a_shared_source_once(self) -> None:
+        # Fanning one service out to several targets is the normal setup, and it
+        # used to cost one full read of the source per pair.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {"name": "T-S", "source": "trakt", "target": "simkl", "categories": ["watchlist"]},
+            {"name": "T-P", "source": "trakt", "target": "pmdb", "categories": ["watchlist"]},
+        ]})
+
+        movie = {"title": "M", "media_type": "movie", "tmdb_id": "1", "ids": {"tmdb": "1"}}
+        adapters = self._fake_pair_adapters({"trakt": [movie], "simkl": [], "pmdb": []})
+
+        with patch.object(web, "_build_provider_adapters", return_value=adapters):
+            response = self.client.post("/api/profile/pairs/run", json={})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(adapters["trakt"].fetches, 1, "the shared source was read once per pair")
+        self.assertEqual(body["cached_reads"], 1)
+        self.assertEqual(body["provider_reads"], 3)
+        self.assertEqual([r["added"] for r in body["results"]], [1, 1])
+
+    def test_pair_run_records_last_result_for_the_dashboard(self) -> None:
+        # The dashboard renders pair status straight off /status, so the run has
+        # to leave both the definition and its outcome on the public profile.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {"name": "T-S", "source": "trakt", "target": "simkl", "categories": ["watchlist"]},
+        ]})
+
+        movie = {"title": "M", "media_type": "movie", "tmdb_id": "1", "ids": {"tmdb": "1"}}
+        adapters = self._fake_pair_adapters({"trakt": [movie], "simkl": []})
+        with patch.object(web, "_build_provider_adapters", return_value=adapters):
+            self.client.post("/api/profile/pairs/run", json={})
+
+        status = self.client.post("/api/profile/status", json={}).get_json()["profile"]
+        stored_pairs = status["options"]["sync_pairs"]
+        self.assertEqual(len(stored_pairs), 1)
+        pair_id = stored_pairs[0]["pair_id"]
+        self.assertIn(pair_id, status["last_pair_results"])
+        self.assertEqual(status["last_pair_results"][pair_id]["added"], 1)
+
+        # The editor gets the same outcome attached to each pair.
+        pairs = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(pairs[0]["last_result"]["added"], 1)
+
+    def test_a_dry_run_does_not_overwrite_the_stored_pair_result(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {"name": "T-S", "source": "trakt", "target": "simkl", "categories": ["watchlist"]},
+        ]})
+        movie = {"title": "M", "media_type": "movie", "tmdb_id": "1", "ids": {"tmdb": "1"}}
+
+        adapters = self._fake_pair_adapters({"trakt": [movie], "simkl": []})
+        with patch.object(web, "_build_provider_adapters", return_value=adapters):
+            self.client.post("/api/profile/pairs/run", json={})
+            self.client.post("/api/profile/pairs/run", json={"dry_run": True})
+
+        status = self.client.post("/api/profile/status", json={}).get_json()["profile"]
+        stored = list(status["last_pair_results"].values())[0]
+        self.assertFalse(stored["dry_run"], "a dry run replaced the real run's recorded outcome")
+
     def test_pair_lists_target_role_returns_writable_lists_only(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})

@@ -15,11 +15,16 @@ Design notes:
   ``managed`` may delete only keys this pair previously wrote, reusing the same
   invariant that protects manually-added PublicMetaDB watchlist entries.
   ``mirror`` may delete anything the source no longer has.
+* Reads are cached **for the duration of one batch run** (see ``ReadCache``).
+  A realistic setup fans one service out to several others — Trakt → SIMKL,
+  Trakt → AniList, Trakt → PMDB — and without this the same Trakt watchlist was
+  fetched once per pair, tripling the API cost of the identical data.
 """
 
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .providers import (
@@ -32,6 +37,58 @@ from .providers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ReadCache:
+    """Per-run memo of provider reads, so N pairs sharing a side cost one fetch.
+
+    Scoped to a single batch, never to the service, because a later run must see
+    what changed in between.  Correctness rests on the write-through below: once
+    a pair writes to a target, any *other* pair in the same batch has to observe
+    the new contents or it would re-add what was just written.  The exact list we
+    read is updated in place; everything else belonging to that provider is
+    dropped rather than guessed at, since a write to one list says nothing about
+    the others.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str, tuple[str, ...]], list[dict]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def _key(provider: str, category: str, source_lists) -> tuple[str, str, tuple[str, ...]]:
+        lists = tuple(sorted(str(k) for k in (source_lists or []) if str(k).strip()))
+        return (str(provider), str(category), lists)
+
+    def get_or_fetch(self, provider: str, category: str, source_lists, loader):
+        key = self._key(provider, category, source_lists)
+        if key in self._entries:
+            self.hits += 1
+            return list(self._entries[key])
+        items = list(loader() or [])
+        self.misses += 1
+        self._entries[key] = list(items)
+        return items
+
+    def apply_write(self, provider: str, category: str, source_lists, *, added, removed) -> None:
+        """Fold a completed write into the cache for the list it was read from."""
+        key = self._key(provider, category, source_lists)
+        current = self._entries.get(key)
+        # Drop every other view of this provider — a write invalidates reads we
+        # cannot reason about (other lists, other categories of the same item).
+        for other in [k for k in self._entries if k[0] == key[0] and k != key]:
+            self._entries.pop(other, None)
+        if current is None:
+            return
+        removed_keys = {item_key(item) for item in (removed or [])}
+        kept = [item for item in current if item_key(item) not in removed_keys]
+        kept.extend(added or [])
+        self._entries[key] = kept
+
+    def invalidate_provider(self, provider: str) -> None:
+        for key in [k for k in self._entries if k[0] == str(provider)]:
+            self._entries.pop(key, None)
 
 
 @dataclass
@@ -47,6 +104,9 @@ class PairCategoryStats:
     skipped_existing: int = 0
     errors: list[str] = field(default_factory=list)
     managed_keys: list[str] = field(default_factory=list)
+    #: Provider reads this category answered from the batch cache instead of the
+    #: network. Surfaced so the saving is visible rather than merely claimed.
+    cached_reads: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +117,7 @@ class PairCategoryStats:
             "removed": self.removed,
             "unmapped": self.unmapped,
             "skipped_existing": self.skipped_existing,
+            "cached_reads": self.cached_reads,
             "errors": list(self.errors),
         }
 
@@ -84,6 +145,14 @@ class PairRunStats:
     def unmapped(self) -> int:
         return sum(c.unmapped for c in self.categories)
 
+    @property
+    def cached_reads(self) -> int:
+        return sum(c.cached_reads for c in self.categories)
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors) + sum(len(c.errors) for c in self.categories)
+
     def to_dict(self) -> dict:
         return {
             "pair_id": self.pair_id,
@@ -95,6 +164,8 @@ class PairRunStats:
             "added": self.added,
             "removed": self.removed,
             "unmapped": self.unmapped,
+            "cached_reads": self.cached_reads,
+            "error_count": self.error_count,
             "categories": [c.to_dict() for c in self.categories],
             "errors": list(self.errors),
         }
@@ -124,8 +195,32 @@ class CrossSyncService:
         }
         self._cancel_requested_callback = cancel_requested_callback
         self._status_callback = status_callback
+        # Set only while a batch is in flight; see _batch_cache().
+        self._read_cache: ReadCache | None = None
+        self.last_run_cache_hits = 0
+        self.last_run_provider_reads = 0
 
     # ── helpers ────────────────────────────────────────────────────────────
+
+    @contextmanager
+    def _batch_cache(self):
+        """Give the enclosed work one shared read cache.
+
+        Re-entrant on purpose: ``run_pairs`` opens the batch so every pair in it
+        shares reads, while a bare ``run_pair`` opens its own. Nesting must not
+        reset the outer cache, or the batch-level saving would vanish.
+        """
+        if self._read_cache is not None:
+            yield self._read_cache
+            return
+        cache = ReadCache()
+        self._read_cache = cache
+        try:
+            yield cache
+        finally:
+            self._read_cache = None
+            self.last_run_cache_hits = cache.hits
+            self.last_run_provider_reads = cache.misses
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -177,6 +272,10 @@ class CrossSyncService:
     # ── execution ──────────────────────────────────────────────────────────
 
     def run_pair(self, pair) -> PairRunStats:
+        with self._batch_cache():
+            return self._run_pair(pair)
+
+    def _run_pair(self, pair) -> PairRunStats:
         stats = PairRunStats(
             pair_id=pair.pair_id,
             name=pair.display_name(),
@@ -228,9 +327,22 @@ class CrossSyncService:
     def _run_category(self, pair, source, target, category: str) -> PairCategoryStats:
         result = PairCategoryStats(category=category)
         self._set_status(f"{pair.display_name()}: reading {category} from {source.label}")
+        cache = self._read_cache
+        source_lists = getattr(pair, "source_lists", None)
+
+        def _read(adapter, lists):
+            if cache is None:
+                return adapter.fetch(category, lists) or []
+            before = cache.hits
+            items = cache.get_or_fetch(
+                adapter.key, category, lists, lambda: adapter.fetch(category, lists),
+            )
+            if cache.hits > before:
+                result.cached_reads += 1
+            return items
 
         try:
-            source_items = source.fetch(category, getattr(pair, "source_lists", None)) or []
+            source_items = _read(source, source_lists)
         except Exception as exc:
             message = f"Could not read {category} from {source.label}: {self._describe_error(exc)}"
             result.errors.append(message)
@@ -238,7 +350,7 @@ class CrossSyncService:
             return result
 
         try:
-            target_items = target.fetch(category) or []
+            target_items = _read(target, None)
         except Exception as exc:
             # Without the target's current contents everything would look new and
             # be rewritten, so this is fatal for the category rather than ignored.
@@ -277,6 +389,9 @@ class CrossSyncService:
             f"{pair.display_name()}: {len(to_add)} to add, {len(to_remove)} to remove on {target.label}"
         )
 
+        wrote_added: list[dict] = []
+        wrote_removed: list[dict] = []
+
         if to_add:
             if self._dry_run:
                 result.added = len(to_add)
@@ -285,10 +400,15 @@ class CrossSyncService:
                     totals = target.add(category, to_add, getattr(pair, "target_list", "")) or {}
                     result.added = int(totals.get("added") or 0)
                     result.unmapped += int(totals.get("not_found") or 0)
+                    wrote_added = to_add
                 except Exception as exc:
                     message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                    # A partial write may have landed; the cached view of this
+                    # target can no longer be trusted by later pairs.
+                    if cache is not None:
+                        cache.invalidate_provider(target.key)
 
         if to_remove:
             if self._dry_run:
@@ -297,10 +417,20 @@ class CrossSyncService:
                 try:
                     totals = target.remove(category, to_remove, getattr(pair, "target_list", "")) or {}
                     result.removed = int(totals.get("deleted") or 0)
+                    wrote_removed = to_remove
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                    if cache is not None:
+                        cache.invalidate_provider(target.key)
+
+        # Keep the batch cache honest: another pair writing to this same target
+        # must see what this one just did, or it would re-add the same items.
+        if cache is not None and not self._dry_run and (wrote_added or wrote_removed):
+            cache.apply_write(
+                target.key, category, None, added=wrote_added, removed=wrote_removed,
+            )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
         return result
@@ -349,10 +479,16 @@ class CrossSyncService:
 
     def run_pairs(self, pairs) -> list[PairRunStats]:
         out: list[PairRunStats] = []
-        for pair in pairs:
-            if not getattr(pair, "enabled", True):
-                logger.info("Pair %s is disabled; skipping", pair.display_name())
-                continue
-            self._check_cancelled()
-            out.append(self.run_pair(pair))
+        with self._batch_cache() as cache:
+            for pair in pairs:
+                if not getattr(pair, "enabled", True):
+                    logger.info("Pair %s is disabled; skipping", pair.display_name())
+                    continue
+                self._check_cancelled()
+                out.append(self._run_pair(pair))
+            if cache.hits:
+                logger.info(
+                    "Cross-sync: %d provider read(s) served from the batch cache, %d fetched",
+                    cache.hits, cache.misses,
+                )
         return out

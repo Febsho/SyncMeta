@@ -433,6 +433,161 @@ class SourceListSelectionTests(unittest.TestCase):
         self.assertEqual(target.fetched[0][1], [])
 
 
+class PairIdTests(unittest.TestCase):
+    """The id is echoed into HTML attributes and keys stored state, so it is
+    restricted to an inert alphabet rather than trusted to every call site."""
+
+    def test_quotes_and_markup_are_stripped_from_a_supplied_id(self) -> None:
+        pair = SyncPair.from_dict({
+            "pair_id": "a'\"><img src=x onerror=alert(1)>b",
+            "source": "trakt",
+            "target": "simkl",
+            "categories": [CATEGORY_WATCHLIST],
+        })
+
+        self.assertNotIn("'", pair.pair_id)
+        self.assertNotIn('"', pair.pair_id)
+        self.assertNotIn("<", pair.pair_id)
+        self.assertNotIn(">", pair.pair_id)
+        self.assertTrue(pair.pair_id)
+
+    def test_a_normal_id_is_left_alone(self) -> None:
+        pair = SyncPair.from_dict({
+            "pair_id": "trakt-simkl-1",
+            "source": "trakt",
+            "target": "simkl",
+            "categories": [CATEGORY_WATCHLIST],
+        })
+
+        self.assertEqual(pair.pair_id, "trakt-simkl-1")
+
+    def test_an_id_of_only_illegal_characters_becomes_empty_not_partial(self) -> None:
+        # Empty is fine — callers assign a generated id when the field is blank.
+        pair = SyncPair.from_dict({
+            "pair_id": "<>\"'",
+            "source": "trakt",
+            "target": "simkl",
+            "categories": [CATEGORY_WATCHLIST],
+        })
+
+        self.assertEqual(pair.pair_id, "")
+
+
+class BatchReadCacheTests(unittest.TestCase):
+    """One batch must not fetch the same provider data twice.
+
+    The saving is only safe if a write is folded back into the cache, so the
+    correctness cases matter more than the counting ones.
+    """
+
+    def test_a_shared_source_is_fetched_once_for_the_whole_batch(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": source, "simkl": simkl, "pmdb": pmdb})
+
+        service.run_pairs([
+            _pair(pair_id="a", target="simkl"),
+            _pair(pair_id="b", target="pmdb"),
+        ])
+
+        self.assertEqual(len(source.fetched), 1, "Trakt was read once per pair")
+        self.assertEqual(service.last_run_cache_hits, 1)
+
+    def test_a_shared_target_sees_what_an_earlier_pair_wrote(self) -> None:
+        # The dangerous case: two sources feeding one target. Without the write
+        # being folded back in, the second pair reads a stale target and re-adds
+        # the item the first pair just wrote.
+        trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: [_movie("1")]})
+        simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": trakt, "pmdb": pmdb, "simkl": simkl})
+
+        results = service.run_pairs([
+            _pair(pair_id="a", source="trakt", target="simkl"),
+            _pair(pair_id="b", source="pmdb", target="simkl"),
+        ])
+
+        self.assertEqual(results[0].added, 1)
+        self.assertEqual(results[1].added, 0, "the second pair re-added an existing item")
+        self.assertEqual(len(simkl.added), 1)
+
+    def test_a_removal_is_folded_back_into_the_cached_target(self) -> None:
+        trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
+        pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: []})
+        simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("9")]})
+        service = CrossSyncService({"trakt": trakt, "pmdb": pmdb, "simkl": simkl})
+
+        results = service.run_pairs([
+            _pair(pair_id="a", source="trakt", target="simkl", removal_mode=REMOVAL_MIRROR),
+            _pair(pair_id="b", source="pmdb", target="simkl", removal_mode=REMOVAL_MIRROR),
+        ])
+
+        self.assertEqual(results[0].removed, 1)
+        self.assertEqual(results[1].removed, 0, "the second pair tried to delete it again")
+        self.assertEqual(len(simkl.removed), 1)
+
+    def test_a_failed_write_drops_the_cached_target(self) -> None:
+        # A write that raised may have partly landed, so the next pair has to go
+        # back to the network rather than trust a cached view.
+        class ExplodingTarget(FakeAdapter):
+            def add(self, category, items, target_list=""):
+                raise RuntimeError("upstream 500")
+
+        trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: [_movie("2")]})
+        simkl = ExplodingTarget("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": trakt, "pmdb": pmdb, "simkl": simkl})
+
+        service.run_pairs([
+            _pair(pair_id="a", source="trakt", target="simkl"),
+            _pair(pair_id="b", source="pmdb", target="simkl"),
+        ])
+
+        self.assertEqual(len(simkl.fetched), 2, "the target was not re-read after a failed write")
+
+    def test_separate_runs_do_not_share_a_cache(self) -> None:
+        # State can change between runs, so a cache must never outlive its batch.
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pairs([_pair()])
+        service.run_pairs([_pair()])
+
+        self.assertEqual(len(source.fetched), 2)
+
+    def test_different_source_lists_are_cached_separately(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+
+        service.run_pairs([
+            _pair(pair_id="a", source_lists=["watchlist"]),
+            _pair(pair_id="b", source_lists=["list:me/faves"]),
+        ])
+
+        self.assertEqual(
+            [lists for _cat, lists in source.fetched],
+            [["watchlist"], ["list:me/faves"]],
+        )
+
+    def test_cached_reads_are_reported_on_the_result(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService({"trakt": source, "simkl": simkl, "pmdb": pmdb})
+
+        results = service.run_pairs([
+            _pair(pair_id="a", target="simkl"),
+            _pair(pair_id="b", target="pmdb"),
+        ])
+
+        self.assertEqual(results[0].cached_reads, 0)
+        self.assertEqual(results[1].cached_reads, 1)
+        self.assertEqual(results[1].to_dict()["cached_reads"], 1)
+
+
 class TargetListTests(unittest.TestCase):
     def test_target_list_is_passed_to_the_target(self) -> None:
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})

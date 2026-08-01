@@ -2527,11 +2527,15 @@ def api_profile_pairs():
     pairs = []
     adapters = _build_provider_adapters(config)
     service = CrossSyncService(adapters)
+    # Last outcome per pair, so the editor can show what a pair actually did
+    # instead of only what it is configured to do.
+    last_results = private_profile.get("last_pair_results") or {}
     for pair in _sync_pairs_from_config(config):
         entry = pair.to_dict()
         # Surface why a pair cannot run so the editor can explain it in place
         # rather than only failing at run time.
         entry["problem"] = service.validate_pair(pair)
+        entry["last_result"] = last_results.get(pair.pair_id) or None
         pairs.append(entry)
 
     return jsonify({"pairs": pairs, **_pair_capabilities(config)})
@@ -2595,7 +2599,9 @@ def api_profile_pairs_save():
             pair = SyncPair.from_dict(raw)
         except (ValueError, TypeError) as exc:
             return _json_error(f"Pair {index + 1}: {exc}", 400)
-        pair.pair_id = pair.pair_id or f"{pair.source}-{pair.target}-{index + 1}"
+        pair.pair_id = pair.pair_id or SyncPair._clean_pair_id(
+            f"{pair.source}-{pair.target}-{index + 1}"
+        ) or f"pair-{index + 1}"
         normalized.append(pair.to_dict())
 
     seen = set()
@@ -2674,6 +2680,10 @@ def api_profile_pairs_run():
         "status": "completed",
         "dry_run": dry_run,
         "results": [r.to_dict() for r in results],
+        # How much the batch read cache saved, so the UI can show the effect of
+        # fanning one service out to several targets rather than just claiming it.
+        "provider_reads": service.last_run_provider_reads,
+        "cached_reads": service.last_run_cache_hits,
     })
 
 

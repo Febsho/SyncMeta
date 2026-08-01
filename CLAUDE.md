@@ -60,7 +60,8 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
 - Sync settings (per-service list/status pickers, visibility, watchlist toggles, schedule, history/resume) live in the **Sync view** as collapsible per-service "pipeline" cards (`#sync-settings`, `togglePipelineCard`/`updatePipelineSummaries`), not in Settings — Settings keeps only Profile/Connections/Danger Zone. The inputs kept their original ids when they moved, so `gatherOptions`/`gatherCreds`/`populateForm` are unchanged; old `lists`/`behavior`/`rules` deep links redirect to the Sync view. The pipeline cards are *virtual* representations of the existing main pipeline (each service → PMDB) — they are not `options.sync_pairs` and no migration happens
-- The dashboard's Sync Pipelines panel (`renderPipelinesPanel`) aggregates `last_results`/`sync_live_results` per `source_name` into one status row per service
+- The dashboard's Sync Pipelines panel (`renderPipelinesPanel`) aggregates `last_results`/`sync_live_results` per `source_name` into one status row per service. It covers *only* the main service→PMDB pipeline; cross-service pairs used to be appended to it, which made two different things read as one pipeline
+- The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) is its own panel, hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
 ## Key Invariants
@@ -87,6 +88,29 @@ regression test asserting a second run writes nothing.
 **A failed read of the *target* must abort that category.** Without the target's
 current contents every source item looks new and the pair would duplicate the
 entire list.
+
+**Pair reads are cached per batch, and a write must be folded back in.**
+`cross_sync.ReadCache` memoizes `(provider, category, source_lists)` so fanning
+one service out to several targets reads it once instead of once per pair. The
+cache is scoped to a batch — `run_pairs` opens one, a bare `run_pair` opens its
+own, and `_batch_cache` is re-entrant so nesting never resets the outer one. It
+must never outlive a run, or a later run would diff against stale data. Its
+safety rests on `apply_write`: once a pair writes to a target, any other pair in
+the same batch has to see the new contents or it re-adds what was just written
+(two sources feeding one target is the common case). A write updates the exact
+list it was read from and drops every other view of that provider; a write that
+*raised* invalidates the provider outright, since a partial write may have
+landed. `cached_reads` is reported per category so the saving is visible rather
+than merely claimed.
+
+**A pair id is an internal handle, not display text.** `SyncPair._clean_pair_id`
+restricts it to `[A-Za-z0-9-_]` (64 chars). It is echoed into HTML attributes and
+keys `pair_managed_keys`, and `escAttr` is *not* sufficient protection on its
+own: it encodes `'` as `&#39;`, which the HTML parser decodes back before an
+inline handler is compiled. Generated ids are built from `source`/`target`, which
+are free text until an adapter is looked up, so those go through the same filter.
+Render pair ids via `data-` attributes and delegated listeners, never inline
+`onclick`.
 
 **AniList has no watch-history mapping.** It tracks progress per series, not
 individual episode plays, so `AniListAdapter` advertises no history support at
