@@ -930,6 +930,39 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(pairs), 1)
         self.assertEqual(pairs[0]["source_lists"], ["list:someone/top-100"])
 
+    def test_a_self_explanatory_auth_error_gets_no_guessed_hint(self) -> None:
+        # The 403 message names the Connections screen, and a bare "connection"
+        # substring test turned that into "check your network connection" —
+        # contradicting the real cause right next to it.
+        from src.trakt_client import TraktAuthenticationError
+
+        exc = TraktAuthenticationError(
+            "Trakt returned 403 Forbidden — the Trakt Client ID is invalid. "
+            "Verify the Client ID/Secret in Connections and reconnect Trakt."
+        )
+
+        self.assertIsNone(web._derive_provider_hint("Trakt", exc))
+
+    def test_a_real_transport_failure_still_gets_the_network_hint(self) -> None:
+        import requests
+
+        hint = web._derive_provider_hint(
+            "Trakt",
+            requests.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='api.trakt.tv', port=443): Max retries exceeded "
+                "(Caused by NewConnectionError('Failed to establish a new connection'))"
+            ),
+        )
+
+        self.assertIn("Could not reach the Trakt API", hint or "")
+
+    def test_prose_mentioning_connections_is_not_a_network_hint(self) -> None:
+        hint = web._derive_provider_hint(
+            "Trakt", RuntimeError("Re-authorize this app under Connections."),
+        )
+
+        self.assertIsNone(hint)
+
     def _fake_pair_adapters(self, contents):
         """Three in-memory adapters counting how often each is read."""
         from src.providers import CATEGORY_WATCHLIST, ProviderAdapter

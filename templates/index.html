@@ -293,15 +293,36 @@
     .tmdb-notice{display:flex;gap:10px;align-items:center;padding:12px 16px;margin-bottom:14px;border:1px solid rgba(124,109,247,.35);border-radius:10px;background:rgba(124,109,247,.08);font-size:13px;color:var(--z300)}
     .tmdb-notice a{color:var(--accent)}
     .tmdb-notice.tmdb-notice-error{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
+    /* .panel clips its children, which would cut off the lists dropdown. Opted
+       into per panel rather than changing .panel, whose overflow keeps other
+       panels' corners rounded. */
+    .panel-overflow-visible{overflow:visible}
     .library-chips{display:block;padding-bottom:14px}
     .library-pinned{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-    .library-filterbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-    .library-source-pills{display:flex;gap:4px;flex-wrap:wrap}
-    .library-source-pill{padding:4px 11px;border-radius:999px;border:1px solid var(--z800);background:transparent;color:var(--z500);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
-    .library-source-pill.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
-    #library-filter-input{padding:6px 10px;border:1px solid var(--z800);border-radius:6px;background:var(--z900);color:var(--z100);font-size:12px;min-width:170px;margin-left:auto}
-    .library-chip-items{display:flex;gap:8px;flex-wrap:wrap;max-height:190px;overflow-y:auto}
-    .library-more{border-style:dashed;color:var(--z500)}
+    /* Lists picker: a dropdown, because a profile can sync a hundred lists and
+       rendering them all inline buried the posters below a wall of chips. */
+    .library-picker{position:relative;max-width:420px}
+    .library-picker-toggle{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:1px solid var(--z800);border-radius:8px;background:var(--z900);color:var(--z100);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;text-align:left}
+    .library-picker-toggle:hover{border-color:var(--z600)}
+    .library-picker-toggle[aria-expanded="true"]{border-color:var(--accent)}
+    .library-picker-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .library-picker-label .library-picker-none{color:var(--z500);font-weight:400}
+    .library-picker-count{color:var(--z600);font-size:11px;font-weight:400;white-space:nowrap}
+    .library-picker-chev{color:var(--z500);font-size:11px;transition:transform .15s}
+    .library-picker-toggle[aria-expanded="true"] .library-picker-chev{transform:rotate(180deg)}
+    .library-picker-menu{position:absolute;z-index:40;top:calc(100% + 4px);left:0;right:0;background:var(--z950);border:1px solid var(--z800);border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.55);padding:10px;display:none}
+    .library-picker-menu.open{display:block}
+    .library-picker-controls{display:flex;gap:8px;margin-bottom:8px}
+    .library-picker-controls select,.library-picker-controls input{padding:6px 8px;border:1px solid var(--z800);border-radius:6px;background:var(--z900);color:var(--z100);font-size:12px;font-family:inherit;min-width:0}
+    .library-picker-controls select{flex:0 0 42%}
+    .library-picker-controls input{flex:1}
+    .library-picker-options{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+    .library-option{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--z300);font-size:12.5px;font-family:inherit;cursor:pointer;text-align:left}
+    .library-option:hover{background:var(--z900);color:var(--z100)}
+    .library-option.active{border-color:var(--accent);color:var(--accent);background:rgba(124,109,247,.1)}
+    .library-option-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .library-option-count{color:var(--z600);font-variant-numeric:tabular-nums;font-size:11px}
+    .library-option-source{color:var(--z600);font-size:10.5px;text-transform:uppercase;letter-spacing:.03em}
     .pair-list-group-search{border-top:1px dashed var(--z800);padding-top:10px;margin-top:10px}
     .pair-list-group-search .pair-list-group-title{color:var(--accent)}
     .library-chip-empty{color:var(--z600);font-size:12px;padding:4px 0}
@@ -843,7 +864,7 @@
           <span>🎬</span>
           <span>Connect your <strong>TMDB API key</strong> in <a href="#" onclick="switchView('connections'); return false;">Settings → Connections</a> to see posters and titles. Without it only TMDB ids can be shown.</span>
         </div>
-        <div class="panel">
+        <div class="panel panel-overflow-visible">
           <div class="panel-header">
             <span>Browse</span>
             <span class="history-time" id="library-count"></span>
@@ -2603,25 +2624,73 @@
       }
     }
 
-    // Browse controls state. Some profiles have a hundred synced lists, so the
-    // chip wall is filtered per source service, searchable, sorted, and
-    // collapsed to a first page instead of covering the whole screen.
+    // Browse controls state. Some profiles sync a hundred lists, so they live in
+    // a dropdown rather than inline — rendered flat they pushed the posters,
+    // which are the point of this view, off the bottom of the screen.
     let librarySourceFilter = 'all';
     let libraryTextFilter = '';
-    let libraryShowAllLists = false;
-    const LIBRARY_CHIP_LIMIT = 24;
+    let libraryPickerOpen = false;
+    let libraryPickerBound = false;
 
     function libraryChipHtml(entry) {
       const count = entry.item_count != null ? `<span class="library-chip-count">${Number(entry.item_count) || 0}</span>` : '';
       return `<button class="library-chip${librarySelection === entry.id ? ' active' : ''}" type="button" data-library-target="${escAttr(entry.id)}">${esc(entry.name)}${count}</button>`;
     }
 
+    function libraryOptionHtml(entry) {
+      const count = entry.item_count != null
+        ? `<span class="library-option-count">${Number(entry.item_count) || 0}</span>` : '';
+      const source = entry.source ? `<span class="library-option-source">${esc(entry.source)}</span>` : '';
+      return `<button class="library-option${librarySelection === entry.id ? ' active' : ''}" type="button"
+              role="option" aria-selected="${librarySelection === entry.id}"
+              data-library-target="${escAttr(entry.id)}">
+        <span class="library-option-name">${esc(entry.name)}</span>${source}${count}
+      </button>`;
+    }
+
     function bindLibraryChip(node) {
       node.addEventListener('click', () => {
         librarySelection = node.dataset.libraryTarget;
+        setLibraryPickerOpen(false);
         renderLibraryChips();
         loadLibrarySelection();
       });
+    }
+
+    function setLibraryPickerOpen(open) {
+      libraryPickerOpen = !!open;
+      const menu = el('library-picker-menu');
+      const toggle = el('library-picker-toggle');
+      if (menu) menu.classList.toggle('open', libraryPickerOpen);
+      if (toggle) toggle.setAttribute('aria-expanded', libraryPickerOpen ? 'true' : 'false');
+      if (libraryPickerOpen) {
+        const input = el('library-filter-input');
+        if (input) input.focus();
+      }
+    }
+
+    // Bound once on the document: the menu's own markup is replaced on every
+    // filter keystroke, so a listener attached to it would not survive.
+    function bindLibraryPickerDismiss() {
+      if (libraryPickerBound) return;
+      libraryPickerBound = true;
+      document.addEventListener('click', (event) => {
+        if (!libraryPickerOpen) return;
+        const picker = el('library-picker');
+        if (picker && !picker.contains(event.target)) setLibraryPickerOpen(false);
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape' || !libraryPickerOpen) return;
+        setLibraryPickerOpen(false);
+        const toggle = el('library-picker-toggle');
+        if (toggle) toggle.focus();
+      });
+    }
+
+    function librarySelectedListName() {
+      const entry = libraryLists.find(item => item.id === librarySelection);
+      if (entry) return entry.name;
+      return '';
     }
 
     function libraryListSources() {
@@ -2651,54 +2720,72 @@
     function renderLibraryChips() {
       const container = el('library-chips');
       if (!container) return;
+      bindLibraryPickerDismiss();
       const watchlists = libraryLists.filter(entry => entry.type === 'watchlist');
-      const regularCount = libraryLists.length - watchlists.length;
+      const listCount = libraryLists.length - watchlists.length;
       const { sources, hasOther } = libraryListSources();
+      // Watch History and the watchlists are the entries people actually reach
+      // for, and there are only ever a couple, so they stay as direct buttons.
       const pinned = [
         `<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`,
         ...watchlists.map(entry => libraryChipHtml(entry)),
       ].join('');
-      const showFilters = regularCount > 8 || sources.length > 1;
+
+      const selectedName = librarySelectedListName();
+      const label = selectedName
+        ? esc(selectedName)
+        : `<span class="library-picker-none">${listCount ? 'Choose a list…' : 'No synced lists yet'}</span>`;
+
+      const sourceOptions = [['all', 'All services'], ...sources.map(s => [s, s])];
+      if (hasOther) sourceOptions.push(['other', 'Other']);
+
       container.innerHTML = `
         <div class="library-pinned">${pinned}</div>
-        ${showFilters ? `<div class="library-filterbar">
-          <div class="library-source-pills" id="library-source-pills"></div>
-          <input type="text" id="library-filter-input" placeholder="Filter lists…" autocomplete="off" value="${escAttr(libraryTextFilter)}">
+        ${listCount ? `
+        <div class="library-picker" id="library-picker">
+          <button type="button" class="library-picker-toggle" id="library-picker-toggle"
+                  aria-haspopup="listbox" aria-expanded="false" aria-controls="library-picker-menu">
+            <span class="library-picker-label">${label}</span>
+            <span class="library-picker-count">${listCount} list${listCount === 1 ? '' : 's'}</span>
+            <span class="library-picker-chev" aria-hidden="true">▾</span>
+          </button>
+          <div class="library-picker-menu" id="library-picker-menu" role="listbox" aria-label="Synced lists">
+            <div class="library-picker-controls">
+              ${sourceOptions.length > 1 ? `<select id="library-source-select" aria-label="Filter lists by service">
+                ${sourceOptions.map(([key, text]) =>
+                  `<option value="${escAttr(key)}" ${librarySourceFilter === key ? 'selected' : ''}>${esc(text)}</option>`).join('')}
+              </select>` : ''}
+              <input type="text" id="library-filter-input" placeholder="Filter lists…" autocomplete="off" value="${escAttr(libraryTextFilter)}">
+            </div>
+            <div class="library-picker-options" id="library-chip-items"></div>
+          </div>
         </div>` : ''}
-        <div class="library-chip-items" id="library-chip-items"></div>
       `;
+
       container.querySelectorAll('.library-pinned [data-library-target]').forEach(bindLibraryChip);
+
+      const toggle = el('library-picker-toggle');
+      if (toggle) {
+        toggle.addEventListener('click', () => setLibraryPickerOpen(!libraryPickerOpen));
+      }
       const input = el('library-filter-input');
       if (input) {
         input.addEventListener('input', () => {
           libraryTextFilter = input.value;
-          libraryShowAllLists = false;
-          // Only the chip list re-renders, so the filter field keeps focus.
+          // Only the options list re-renders, so the field keeps focus and caret.
           renderLibraryChipItems();
         });
       }
-      renderLibrarySourcePills();
-      renderLibraryChipItems();
-    }
-
-    function renderLibrarySourcePills() {
-      const node = el('library-source-pills');
-      if (!node) return;
-      const { sources, hasOther } = libraryListSources();
-      if (sources.length < 1) { node.innerHTML = ''; return; }
-      const pills = [['all', 'All services'], ...sources.map(source => [source, source])];
-      if (hasOther) pills.push(['other', 'Other']);
-      node.innerHTML = pills.map(([key, label]) =>
-        `<button type="button" class="library-source-pill${librarySourceFilter === key ? ' active' : ''}" data-library-source="${escAttr(key)}">${esc(label)}</button>`
-      ).join('');
-      node.querySelectorAll('[data-library-source]').forEach(pill => {
-        pill.addEventListener('click', () => {
-          librarySourceFilter = pill.dataset.librarySource;
-          libraryShowAllLists = false;
-          renderLibrarySourcePills();
+      const select = el('library-source-select');
+      if (select) {
+        select.addEventListener('change', () => {
+          librarySourceFilter = select.value;
           renderLibraryChipItems();
         });
-      });
+      }
+      // Re-rendering replaced the markup, so re-apply the open state.
+      setLibraryPickerOpen(libraryPickerOpen);
+      renderLibraryChipItems();
     }
 
     function renderLibraryChipItems() {
@@ -2706,23 +2793,12 @@
       if (!node) return;
       const filtered = libraryFilteredLists();
       if (!filtered.length) {
-        node.innerHTML = libraryLists.length ? '<div class="library-chip-empty">No lists match this filter.</div>' : '';
+        node.innerHTML = `<div class="library-chip-empty">${
+          libraryLists.length ? 'No lists match this filter.' : 'No synced lists yet.'}</div>`;
         return;
       }
-      const visible = libraryShowAllLists ? filtered : filtered.slice(0, LIBRARY_CHIP_LIMIT);
-      const chips = visible.map(entry => libraryChipHtml(entry));
-      if (filtered.length > visible.length) {
-        chips.push(`<button class="library-chip library-more" type="button" id="library-show-all">Show all ${filtered.length} lists…</button>`);
-      }
-      node.innerHTML = chips.join('');
+      node.innerHTML = filtered.map(entry => libraryOptionHtml(entry)).join('');
       node.querySelectorAll('[data-library-target]').forEach(bindLibraryChip);
-      const more = el('library-show-all');
-      if (more) {
-        more.addEventListener('click', () => {
-          libraryShowAllLists = true;
-          renderLibraryChipItems();
-        });
-      }
     }
 
     async function loadLibrarySelection() {
