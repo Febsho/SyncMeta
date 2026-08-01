@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .providers import (
+    MODE_ONE_WAY,
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
     REMOVAL_MIRROR,
@@ -107,6 +108,10 @@ class PairCategoryStats:
     #: Provider reads this category answered from the batch cache instead of the
     #: network. Surfaced so the saving is visible rather than merely claimed.
     cached_reads: int = 0
+    #: Two-way only: what went back the other way. `added`/`removed` stay the
+    #: totals so one-way callers and the dashboard need no special case.
+    added_back: int = 0
+    removed_back: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +123,8 @@ class PairCategoryStats:
             "unmapped": self.unmapped,
             "skipped_existing": self.skipped_existing,
             "cached_reads": self.cached_reads,
+            "added_back": self.added_back,
+            "removed_back": self.removed_back,
             "errors": list(self.errors),
         }
 
@@ -130,6 +137,7 @@ class PairRunStats:
     target: str
     removal_mode: str
     dry_run: bool = False
+    mode: str = "one_way"
     categories: list[PairCategoryStats] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -160,6 +168,7 @@ class PairRunStats:
             "source": self.source,
             "target": self.target,
             "removal_mode": self.removal_mode,
+            "mode": self.mode,
             "dry_run": self.dry_run,
             "added": self.added,
             "removed": self.removed,
@@ -254,9 +263,21 @@ class CrossSyncService:
             return f"Target '{pair.target}' is not configured."
         if not target.can_write():
             return target.write_blocked_reason() or f"{target.label} cannot be written to."
+        two_way = getattr(pair, "is_two_way", lambda: False)()
+        if two_way and not source.can_write():
+            # Two-way writes both ends, so a read-only first service (MDBList, or
+            # AniList without a token) cannot take part however it is ordered.
+            return (
+                source.write_blocked_reason()
+                or f"{source.label} cannot be written to, so it cannot be one end of a two-way pair."
+            )
 
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
+        if two_way:
+            # Both ends must handle the category in both directions.
+            readable &= set(target.readable_categories())
+            writable &= set(source.writable_categories())
         usable = [c for c in pair.categories if c in readable and c in writable]
         if not usable:
             unreadable = [c for c in pair.categories if c not in readable]
@@ -276,12 +297,14 @@ class CrossSyncService:
             return self._run_pair(pair)
 
     def _run_pair(self, pair) -> PairRunStats:
+        two_way = getattr(pair, "is_two_way", lambda: False)()
         stats = PairRunStats(
             pair_id=pair.pair_id,
             name=pair.display_name(),
             source=pair.source,
             target=pair.target,
             removal_mode=pair.removal_mode,
+            mode=getattr(pair, "mode", MODE_ONE_WAY),
             dry_run=self._dry_run,
         )
 
@@ -295,6 +318,9 @@ class CrossSyncService:
         target = self._adapters[pair.target]
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
+        if two_way:
+            readable &= set(target.readable_categories())
+            writable &= set(source.writable_categories())
 
         for category in pair.categories:
             self._check_cancelled()
@@ -306,7 +332,8 @@ class CrossSyncService:
                     pair.display_name(), category, source.label, target.label,
                 )
                 continue
-            stats.categories.append(self._run_category(pair, source, target, category))
+            runner = self._run_category_two_way if two_way else self._run_category
+            stats.categories.append(runner(pair, source, target, category))
 
         return stats
 
@@ -433,6 +460,153 @@ class CrossSyncService:
             )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
+        return result
+
+    def _run_category_two_way(self, pair, first, second, category: str) -> PairCategoryStats:
+        """Bring both services to the union of the two, in one pass.
+
+        Deliberately not two one-way runs back to back. That ordering decides the
+        outcome: whichever direction runs first re-adds an item the user deleted
+        on the other side, so a deletion either propagates or is resurrected
+        depending on which service happens to be named first.
+
+        Instead the pair's managed-key set is read as *the state both sides last
+        agreed on*, which is what makes a one-sided item interpretable:
+
+            on one side, previously synced  -> deleted on the other -> remove it
+            on one side, never synced       -> genuinely new        -> add it
+
+        With `additive` the removal branch is skipped entirely, so a deletion is
+        simply re-added from the other side — the usual additive trade-off.
+        """
+        result = PairCategoryStats(category=category)
+        self._set_status(f"{pair.display_name()}: reading {category} from both services")
+        cache = self._read_cache
+        source_lists = getattr(pair, "source_lists", None)
+
+        def _read(adapter, lists):
+            if cache is None:
+                return adapter.fetch(category, lists) or []
+            before = cache.hits
+            items = cache.get_or_fetch(
+                adapter.key, category, lists, lambda: adapter.fetch(category, lists),
+            )
+            if cache.hits > before:
+                result.cached_reads += 1
+            return items
+
+        sides = {}
+        for label, adapter, lists in (("first", first, source_lists), ("second", second, None)):
+            try:
+                sides[label] = _read(adapter, lists)
+            except Exception as exc:
+                # Either side failing is fatal here: without both, every item on
+                # the side that did load looks one-sided and would be acted on.
+                message = f"Could not read {category} from {adapter.label}: {self._describe_error(exc)}"
+                result.errors.append(message)
+                logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                return result
+
+        def _index(raw_items, count_unmapped):
+            out: dict[str, dict] = {}
+            for raw in raw_items:
+                item = enrich_identity(raw)
+                if count_unmapped and not has_portable_identity(item):
+                    result.unmapped += 1
+                    continue
+                out.setdefault(item_key(item), item)
+            return out
+
+        first_by_key = _index(sides["first"], True)
+        second_by_key = _index(sides["second"], True)
+        result.source_items = len(first_by_key)
+        result.target_items = len(second_by_key)
+
+        first_keys, second_keys = set(first_by_key), set(second_by_key)
+        known = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
+        only_first = first_keys - second_keys
+        only_second = second_keys - first_keys
+
+        if pair.removal_mode == REMOVAL_MANAGED:
+            drop_from_first = only_first & known
+            drop_from_second = only_second & known
+        elif pair.removal_mode == REMOVAL_ADDITIVE:
+            drop_from_first = drop_from_second = set()
+        else:
+            # mirror is downgraded on load; anything else refuses to delete.
+            logger.warning(
+                "Pair %s has removal mode %r, which two-way does not support; not removing anything",
+                pair.display_name(), pair.removal_mode,
+            )
+            drop_from_first = drop_from_second = set()
+
+        add_to_second = [first_by_key[k] for k in only_first - drop_from_first]
+        add_to_first = [second_by_key[k] for k in only_second - drop_from_second]
+        remove_from_first = [first_by_key[k] for k in drop_from_first]
+        remove_from_second = [second_by_key[k] for k in drop_from_second]
+        result.skipped_existing = len(first_keys & second_keys)
+
+        self._set_status(
+            f"{pair.display_name()}: {len(add_to_second)}→{second.label}, "
+            f"{len(add_to_first)}→{first.label}"
+        )
+
+        # (adapter, items, is_reverse, verb)
+        plan = [
+            (second, add_to_second, False, "add"),
+            (first, add_to_first, True, "add"),
+            (second, remove_from_second, False, "remove"),
+            (first, remove_from_first, True, "remove"),
+        ]
+        target_list = getattr(pair, "target_list", "")
+        for adapter, items, reverse, verb in plan:
+            if not items:
+                continue
+            if self._dry_run:
+                count = len(items)
+            else:
+                try:
+                    # target_list belongs to the declared target only; writing
+                    # back to the first service uses its own default list.
+                    dest = "" if reverse else target_list
+                    totals = (adapter.add(category, items, dest) if verb == "add"
+                              else adapter.remove(category, items, dest)) or {}
+                    count = int(totals.get("added" if verb == "add" else "deleted") or 0)
+                    if verb == "add":
+                        result.unmapped += int(totals.get("not_found") or 0)
+                    if cache is not None:
+                        cache.apply_write(
+                            adapter.key, category, None,
+                            added=items if verb == "add" else [],
+                            removed=items if verb == "remove" else [],
+                        )
+                except Exception as exc:
+                    action = "write" if verb == "add" else "remove"
+                    message = (f"Could not {action} {category} "
+                               f"{'to' if verb == 'add' else 'from'} {adapter.label}: "
+                               f"{self._describe_error(exc)}")
+                    result.errors.append(message)
+                    logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                    if cache is not None:
+                        cache.invalidate_provider(adapter.key)
+                    continue
+            if verb == "add":
+                if reverse:
+                    result.added_back += count
+                result.added += count
+            else:
+                if reverse:
+                    result.removed_back += count
+                result.removed += count
+
+        # The new agreed state: everything either side holds, minus what this run
+        # deleted. Recorded even when a write failed, since a partial result is
+        # still closer to the truth than the previous run's snapshot.
+        if not self._dry_run:
+            agreed = (first_keys | second_keys) - drop_from_first - drop_from_second
+            ordered = sorted(agreed)
+            self._managed_keys.setdefault(pair.pair_id, {})[category] = ordered
+            result.managed_keys = ordered
         return result
 
     def _items_to_remove(

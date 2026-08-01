@@ -1054,6 +1054,69 @@ class WebTests(unittest.TestCase):
         stored = list(status["last_pair_results"].values())[0]
         self.assertFalse(stored["dry_run"], "a dry run replaced the real run's recorded outcome")
 
+    def test_two_way_pair_round_trips_and_is_offered_to_the_editor(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        saved = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "pmdb", "categories": ["watchlist"],
+            "mode": "two_way", "removal_mode": "managed",
+        }]})
+        self.assertEqual(saved.status_code, 200)
+
+        body = self.client.post("/api/profile/pairs", json={}).get_json()
+        self.assertEqual(body["pairs"][0]["mode"], "two_way")
+        self.assertEqual([m["key"] for m in body["pair_modes"]], ["one_way", "two_way"])
+        # The editor narrows its removal choices from this rather than offering
+        # one the backend would silently rewrite.
+        self.assertEqual(body["two_way_removal_modes"], ["additive", "managed"])
+        self.assertNotIn("mirror", body["two_way_removal_modes"])
+
+    def test_saving_a_two_way_mirror_pair_stores_the_downgrade(self) -> None:
+        # Mirror has no bidirectional meaning; the pair must not come back
+        # claiming a mode it will not actually run in.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "pmdb", "categories": ["watchlist"],
+            "mode": "two_way", "removal_mode": "mirror",
+        }]})
+
+        pairs = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(pairs[0]["mode"], "two_way")
+        self.assertEqual(pairs[0]["removal_mode"], "managed")
+
+    def test_an_existing_pair_defaults_to_one_way(self) -> None:
+        # Pairs saved before two-way existed carry no mode field.
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "pmdb", "categories": ["watchlist"],
+        }]})
+
+        pairs = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(pairs[0]["mode"], "one_way")
+        self.assertEqual(pairs[0]["removal_mode"], "additive")
+
+    def test_running_a_two_way_pair_writes_both_services(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "name": "T-S", "source": "trakt", "target": "simkl",
+            "categories": ["watchlist"], "mode": "two_way",
+        }]})
+
+        a = {"title": "A", "media_type": "movie", "tmdb_id": "1", "ids": {"tmdb": "1"}}
+        b = {"title": "B", "media_type": "movie", "tmdb_id": "2", "ids": {"tmdb": "2"}}
+        adapters = self._fake_pair_adapters({"trakt": [a], "simkl": [b]})
+        with patch.object(web, "_build_provider_adapters", return_value=adapters):
+            response = self.client.post("/api/profile/pairs/run", json={})
+
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()["results"][0]
+        self.assertEqual(result["mode"], "two_way")
+        self.assertEqual(result["added"], 2)
+        self.assertEqual(result["categories"][0]["added_back"], 1)
+
     def test_pair_lists_target_role_returns_writable_lists_only(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})

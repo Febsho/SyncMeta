@@ -141,6 +141,35 @@
     /* Sync-pair list picker: a provider can offer a hundred lists, so the
        selection is shown as chips and the choices are filtered and scrolled
        instead of being spilled across the page. */
+    /* Pair editor. Each card is a stack of labelled sections rather than a run
+       of form rows, so the shape of a pair — what flows where, then what may be
+       deleted — is readable before any of the controls are. */
+    .pair-card{border:1px solid var(--line);border-radius:12px;background:var(--z950);margin-bottom:14px;overflow:hidden}
+    .pair-card.is-disabled{opacity:.62}
+    .pair-card-top{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+    .pair-card-name{flex:1;min-width:160px;padding:7px 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--z100);font-size:14px;font-weight:500;font-family:inherit;letter-spacing:-.01em}
+    .pair-card-name:hover{border-color:var(--z800)}
+    .pair-card-name:focus{border-color:var(--z600);background:var(--z900);outline:none}
+    .pair-sec{padding:16px;border-bottom:1px solid var(--line)}
+    .pair-sec:last-child{border-bottom:none}
+    .pair-sec-title{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label);margin-bottom:10px}
+    /* The flow row: [from] (direction) [to] reads left to right as the sync. */
+    .pair-flow-row{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+    .pair-flow-end{flex:1;min-width:150px;display:flex;flex-direction:column;gap:5px}
+    .pair-flow-end > span{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--label)}
+    .pair-dir{display:flex;flex-direction:column;gap:4px;align-items:center;padding-bottom:2px}
+    .pair-dir-btn{width:46px;padding:7px 0;border:1px solid var(--line);border-radius:8px;background:var(--z900);color:var(--z400);font-size:15px;font-family:inherit;cursor:pointer;line-height:1;transition:border-color .15s,color .15s,background .15s}
+    .pair-dir-btn:hover{border-color:var(--z600);color:var(--z100)}
+    .pair-dir-btn.two-way{border-color:var(--z100);background:var(--z100);color:var(--z950)}
+    .pair-dir-label{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--label)}
+    .pair-opt-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+    .pair-note{margin-top:10px;font-size:12px;line-height:1.5;color:var(--z500)}
+    .pair-note.warn{color:var(--orange)}
+    .pair-note.err{color:var(--red)}
+    .pair-card-foot{display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--surface);flex-wrap:wrap}
+    .pair-card-foot .spacer{margin-left:auto}
+    .pair-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--z400);cursor:pointer}
+    .pair-lastrun{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--label)}
     .pair-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
     .pair-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.45);background:rgba(20,83,45,.26);color:var(--z100);font-size:12px;font-family:inherit;cursor:pointer;max-width:100%;text-transform:none;letter-spacing:normal}
     .pair-chip:hover{border-color:var(--red);color:var(--white)}
@@ -905,11 +934,12 @@
               <div class="form-section">
                 <div class="form-section-title">Cross-Service Sync Pairs</div>
                 <div class="hint" style="margin-bottom:12px">
-                  A pair copies one kind of list from one service to another, in one
-                  direction. Add a second pair for the reverse direction. Every
-                  service that can be written to may be a target, and several pairs
-                  can share the same target — add one pair per source to send
-                  multiple services into one.
+                  A pair connects two services. <strong>One-way</strong> copies from the
+                  first to the second. <strong>Two-way</strong> keeps both holding the
+                  same items — use the arrow button to switch. Several pairs can share
+                  a service, so you can send multiple sources into one target by adding
+                  one pair each. Two-way needs both services to be writable, which rules
+                  out MDBList and an AniList without an access token.
                 </div>
                 <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
                 <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
@@ -2556,7 +2586,9 @@
 
     function pairRowHtml(pair, result) {
       const disabled = pair.enabled === false;
-      const name = pair.name || `${pairDashLabel(pair.source)} → ${pairDashLabel(pair.target)}`;
+      const twoWay = pair.mode === 'two_way';
+      const arrow = twoWay ? '↔' : '→';
+      const name = pair.name || `${pairDashLabel(pair.source)} ${arrow} ${pairDashLabel(pair.target)}`;
       const categories = (pair.categories || [])
         .map(c => PAIR_CATEGORY_LABELS[c] || c).join(', ');
       const removal = String(pair.removal_mode || 'additive');
@@ -2594,8 +2626,9 @@
             ${esc(name)}
             <div class="pair-flow" style="margin-top:4px">
               <span class="pair-node">${esc(pairDashLabel(pair.source))}</span>
-              <span class="pipeline-arrow">→</span>
+              <span class="pipeline-arrow">${arrow}</span>
               <span class="pair-node">${esc(pairDashLabel(pair.target))}</span>
+              ${twoWay ? '<span class="pair-badge">two-way</span>' : ''}
               ${removalBadge}
             </div>
           </span>
@@ -6199,16 +6232,20 @@
     // entirely gave no way to tell a missing setting from a bug.
     function pairProviderOptions(role, selectedKey) {
       return pairsState.providers.map(provider => {
-        const usable = role === 'source'
-          ? (provider.configured && provider.reads.length && !provider.unavailable_reason)
-          : (provider.configured && provider.writes.length);
+        const canRead = provider.configured && provider.reads.length && !provider.unavailable_reason;
+        const canWrite = provider.configured && provider.writes.length;
+        // 'both' is the two-way case: that end is read *and* written, so a
+        // read-only service like MDBList cannot fill it at either position.
+        const usable = role === 'source' ? canRead
+          : role === 'both' ? (canRead && canWrite)
+          : canWrite;
         let why = '';
         if (!usable) {
           // For a target, an inability to write is the truthful reason and
           // outranks any source-side note.
-          why = role === 'target'
-            ? (provider.write_blocked_reason || provider.unavailable_reason || 'Not available')
-            : (provider.unavailable_reason || 'Not available');
+          why = role === 'source'
+            ? (provider.unavailable_reason || 'Not available')
+            : (provider.write_blocked_reason || provider.unavailable_reason || 'Not available');
         }
         const label = usable ? provider.label : `${provider.label} — ${why}`;
         return `<option value="${escAttr(provider.key)}" ${provider.key === selectedKey ? 'selected' : ''} ${usable ? '' : 'disabled'}>${esc(label)}</option>`;
@@ -6387,44 +6424,49 @@
       if (!pair) return [];
       const notes = [];
       const categories = new Set(pair.categories || []);
+      const twoWay = pair.mode === 'two_way';
       pairsState.pairs.forEach((other, otherIndex) => {
         if (otherIndex === index || other.enabled === false || pair.enabled === false) return;
         const shared = (other.categories || []).filter(c => categories.has(c));
         if (!shared.length) return;
         const sharedText = shared.join(', ');
-        if (other.source === pair.source && other.target === pair.target) {
+        const sameWay = other.source === pair.source && other.target === pair.target;
+        const reverse = other.source === pair.target && other.target === pair.source;
+        if (!sameWay && !reverse) return;
+        // A two-way pair already covers both directions, so a second pair
+        // between the same services repeats its work — and if either can delete,
+        // the two disagree about what a one-sided item means.
+        if (twoWay || other.mode === 'two_way') {
+          notes.push(`Pair ${otherIndex + 1} also syncs ${sharedText} between these two services. A two-way pair already covers both directions — remove the other one.`);
+          return;
+        }
+        if (sameWay) {
           notes.push(`Pair ${otherIndex + 1} already syncs ${sharedText} from ${providerLabel(pair.source)} to ${providerLabel(pair.target)} — one of the two is redundant.`);
           return;
         }
-        // A ↔ B where either side may delete: whatever one pair removes, the
-        // other adds straight back, and the items ping-pong every run.
-        if (other.source === pair.target && other.target === pair.source) {
-          const destructive = (pair.removal_mode && pair.removal_mode !== 'additive')
-            || (other.removal_mode && other.removal_mode !== 'additive');
-          if (destructive) {
-            notes.push(`Pair ${otherIndex + 1} syncs ${sharedText} back the other way and one of the two can delete — they will undo each other. Use "additive" on both for a two-way mirror.`);
-          }
+        // A → B plus B → A where either may delete: whatever one removes the
+        // other adds straight back, and items ping-pong every run. One two-way
+        // pair is the fix, since it decides both sides together.
+        const destructive = (pair.removal_mode && pair.removal_mode !== 'additive')
+          || (other.removal_mode && other.removal_mode !== 'additive');
+        if (destructive) {
+          notes.push(`Pair ${otherIndex + 1} syncs ${sharedText} back the other way and one of the two can delete — they will undo each other. Use a single two-way pair instead.`);
         }
       });
       return notes;
     }
 
-    function pairLastRunHtml(pair) {
+    function pairLastRunText(pair) {
       const result = pair.last_result;
-      if (!result) return '';
+      if (!result) return 'never run';
       const errorCount = Number(result.error_count || 0)
         || ((result.errors || []).length
             + (result.categories || []).reduce((acc, c) => acc + ((c.errors || []).length), 0));
       const when = result.timestamp ? timeAgo(result.timestamp) : '';
-      const bits = [
-        `+${result.added || 0} added`,
-        `${result.removed || 0} removed`,
-      ];
+      const bits = [`+${result.added || 0}`, `−${result.removed || 0}`];
       if (result.unmapped) bits.push(`${result.unmapped} unmatched`);
       if (errorCount) bits.push(`${errorCount} error${errorCount === 1 ? '' : 's'}`);
-      return `<div class="catalog-note" style="margin-top:6px;color:${errorCount ? 'var(--orange)' : 'var(--z500)'}">
-        Last ${result.dry_run ? 'dry run' : 'run'}${when ? ` ${esc(when)}` : ''}: ${esc(bits.join(' · '))}
-      </div>`;
+      return `${result.dry_run ? 'dry run' : 'ran'}${when ? ` ${when}` : ''} · ${bits.join(' ')}`;
     }
 
     function pairCardHtml(pair, index) {
@@ -6434,55 +6476,96 @@
                  ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
           ${esc(category.label)}
         </label>`).join('');
-      const removalOptions = pairsState.removal_modes.map(mode =>
-        `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(mode.label)}</option>`
-      ).join('');
-      const problem = pair.problem
-        ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
-        : '';
-      const destructive = pair.removal_mode && pair.removal_mode !== 'additive'
-        ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> This pair may delete items from ${esc(providerLabel(pair.target))}.</div>`
-        : '';
-      const conflicts = pairConflicts(index)
-        .map(text => `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(text)}</div>`)
+      const twoWay = pair.mode === 'two_way';
+      // Two-way silently downgrades mirror server-side, so don't offer it here —
+      // a control whose value the backend overrides reads as a bug.
+      const allowed = twoWay
+        ? (pairsState.two_way_removal_modes || ['additive', 'managed'])
+        : pairsState.removal_modes.map(m => m.key);
+      // The stored labels are written for one-way ("...from the target"), which
+      // names nothing in a two-way pair — both ends are target and source.
+      const twoWayRemovalLabels = {
+        additive: 'Additive only — never remove from either service',
+        managed: 'Propagate removals, but only for items this pair added',
+      };
+      const removalOptions = pairsState.removal_modes
+        .filter(mode => allowed.includes(mode.key))
+        .map(mode => {
+          const label = twoWay ? (twoWayRemovalLabels[mode.key] || mode.label) : mode.label;
+          return `<option value="${escAttr(mode.key)}" ${mode.key === pair.removal_mode ? 'selected' : ''}>${esc(label)}</option>`;
+        })
         .join('');
-      const lastRun = pairLastRunHtml(pair);
 
-      return `<div class="guide-box" data-pair-card="${index}" style="margin-bottom:10px">
-        <div class="form-row" style="margin-bottom:8px">
-          <label for="pair-name-${index}">Name</label>
-          <input type="text" id="pair-name-${index}" data-pair-index="${index}" data-pair-field="name"
-                 value="${escAttr(pair.name || '')}" placeholder="${escAttr(providerLabel(pair.source) + ' to ' + providerLabel(pair.target))}">
+      const fromLabel = twoWay ? 'First service' : 'From';
+      const toLabel = twoWay ? 'Second service' : 'To';
+      const notes = [];
+      if (twoWay) {
+        notes.push([pair.removal_mode === 'managed'
+          ? `Both services end up with the same items. Removing something from either side removes it from the other, but only for items this pair added — anything you added by hand elsewhere is left alone.`
+          : `Both services end up with the same items. Nothing is ever deleted, so removing something from one side means it comes back from the other on the next run.`, '']);
+      } else if (pair.removal_mode && pair.removal_mode !== 'additive') {
+        notes.push([`This pair may delete items from ${providerLabel(pair.target)}.`, 'warn']);
+      }
+      pairConflicts(index).forEach(text => notes.push([text, 'warn']));
+      if (pair.problem) notes.push([pair.problem, 'err']);
+      const notesHtml = notes.map(([text, kind]) =>
+        `<div class="pair-note ${kind}">${kind ? '<span aria-hidden="true">⚠</span> ' : ''}${esc(text)}</div>`).join('');
+
+      const targetPicker = pairTargetListPickerHtml(pair, index);
+      const listPicker = pairListPickerHtml(pair, index);
+
+      return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'}" data-pair-card="${index}">
+        <div class="pair-card-top">
+          <input type="text" class="pair-card-name" id="pair-name-${index}"
+                 data-pair-index="${index}" data-pair-field="name"
+                 value="${escAttr(pair.name || '')}" aria-label="Pair name"
+                 placeholder="${escAttr(providerLabel(pair.source) + (twoWay ? ' ↔ ' : ' → ') + providerLabel(pair.target))}">
+          <span class="pair-lastrun">${pair.last_result ? esc(pairLastRunText(pair)) : 'never run'}</span>
         </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-          <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
-            <label for="pair-source-${index}">From</label>
-            <select id="pair-source-${index}" data-pair-index="${index}" data-pair-field="source">${pairProviderOptions('source', pair.source)}</select>
+
+        <div class="pair-sec">
+          <div class="pair-sec-title">Direction</div>
+          <div class="pair-flow-row">
+            <label class="pair-flow-end">
+              <span>${esc(fromLabel)}</span>
+              <select id="pair-source-${index}" data-pair-index="${index}" data-pair-field="source">${pairProviderOptions(twoWay ? 'both' : 'source', pair.source)}</select>
+            </label>
+            <div class="pair-dir">
+              <button type="button" class="pair-dir-btn ${twoWay ? 'two-way' : ''}"
+                      data-pair-toggle-mode="${index}" aria-pressed="${twoWay}"
+                      title="${twoWay ? 'Switch to one-way' : 'Switch to two-way'}">${twoWay ? '⇄' : '→'}</button>
+              <span class="pair-dir-label">${twoWay ? 'two-way' : 'one-way'}</span>
+            </div>
+            <label class="pair-flow-end">
+              <span>${esc(toLabel)}</span>
+              <select id="pair-target-${index}" data-pair-index="${index}" data-pair-field="target">${pairProviderOptions(twoWay ? 'both' : 'target', pair.target)}</select>
+            </label>
           </div>
-          <div class="form-row" style="margin-bottom:0;flex:1;min-width:140px">
-            <label for="pair-target-${index}">To</label>
-            <select id="pair-target-${index}" data-pair-index="${index}" data-pair-field="target">${pairProviderOptions('target', pair.target)}</select>
+        </div>
+
+        <div class="pair-sec">
+          <div class="pair-sec-title">What to sync</div>
+          <div role="group" aria-label="Categories to sync">${categoryBoxes}</div>
+          ${listPicker}${targetPicker}
+        </div>
+
+        <div class="pair-sec">
+          <div class="pair-sec-title">Removals</div>
+          <div class="pair-opt-grid">
+            <label class="pair-flow-end">
+              <span>When an item disappears</span>
+              <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
+            </label>
           </div>
+          ${notesHtml}
         </div>
-        <div class="form-row" style="margin-top:10px;margin-bottom:8px">
-          <label id="pair-cats-label-${index}">What to sync</label>
-          <div role="group" aria-labelledby="pair-cats-label-${index}">${categoryBoxes}</div>
-        </div>
-        ${pairListPickerHtml(pair, index)}
-        ${pairTargetListPickerHtml(pair, index)}
-        <div class="form-row" style="margin-bottom:0">
-          <label for="pair-removal-${index}">Removals</label>
-          <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
-        </div>
-        ${destructive}
-        ${conflicts}
-        ${problem}
-        ${lastRun}
-        <div class="inline-actions" style="justify-content:flex-start;margin-top:10px">
-          <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px">
+
+        <div class="pair-card-foot">
+          <label class="pair-toggle">
             <input type="checkbox" data-pair-index="${index}" data-pair-field="enabled" ${pair.enabled ? 'checked' : ''}>
             Enabled
           </label>
+          <span class="spacer"></span>
           <button class="btn btn-sm" type="button" data-pair-dry-run="${index}">Dry Run</button>
           <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
           <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
@@ -6641,6 +6724,31 @@
           renderPairListOptions(index);
           return;
         }
+        if (button.dataset.pairToggleMode !== undefined) {
+          const index = Number(button.dataset.pairToggleMode);
+          const pair = pairAt(button.dataset.pairToggleMode);
+          if (!pair) return;
+          pair.mode = pair.mode === 'two_way' ? 'one_way' : 'two_way';
+          // Mirror has no bidirectional meaning and the backend downgrades it;
+          // do it here too so the control never shows a value that will not stick.
+          const allowed = pairsState.two_way_removal_modes || ['additive', 'managed'];
+          if (pair.mode === 'two_way' && !allowed.includes(pair.removal_mode)) {
+            pair.removal_mode = 'managed';
+          }
+          // Two-way writes both ends, so an end that cannot be written to is no
+          // longer a valid choice; drop it rather than saving an unrunnable pair.
+          if (pair.mode === 'two_way') {
+            const writable = (key) => {
+              const p = pairsState.providers.find(x => x.key === key);
+              return p && p.configured && p.writes.length;
+            };
+            if (!writable(pair.source)) pair.source = '';
+            if (!writable(pair.target)) pair.target = '';
+          }
+          renderPairCard(index);
+          renderSyncCards();
+          return;
+        }
         if (button.dataset.pairClearLists !== undefined) {
           const index = Number(button.dataset.pairClearLists);
           const pair = pairAt(button.dataset.pairClearLists);
@@ -6693,6 +6801,9 @@
         providers: Array.isArray(result.data.providers) ? result.data.providers : [],
         categories: Array.isArray(result.data.categories) ? result.data.categories : [],
         removal_modes: Array.isArray(result.data.removal_modes) ? result.data.removal_modes : [],
+        pair_modes: Array.isArray(result.data.pair_modes) ? result.data.pair_modes : [],
+        two_way_removal_modes: Array.isArray(result.data.two_way_removal_modes)
+          ? result.data.two_way_removal_modes : ['additive', 'managed'],
       };
       renderPairCapabilities();
       renderSyncCards();
@@ -6717,6 +6828,7 @@
         source_lists: [],
         target_list: '',
         removal_mode: 'additive',
+        mode: 'one_way',
         enabled: true,
       });
       renderPairs();
@@ -6735,6 +6847,7 @@
           source_lists: pair.source_lists || [],
           target_list: pair.target_list || '',
           removal_mode: pair.removal_mode || 'additive',
+          mode: pair.mode || 'one_way',
           enabled: pair.enabled !== false,
         }));
         const result = await apiPost('/api/profile/pairs/save', { pairs: payload });

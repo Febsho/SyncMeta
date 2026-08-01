@@ -1,9 +1,12 @@
 """Configuration management for SyncMeta."""
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 SIMKL_LINKED_SELECTED_STATUSES = {
@@ -121,10 +124,14 @@ class SyncConfig:
 
 @dataclass
 class SyncPair:
-    """One directional cross-service sync: read `source`, write `target`.
+    """A cross-service sync between two providers.
 
-    Pairs are one-way by design; define two pairs if both directions are wanted.
-    `removal_mode` defaults to additive so a new pair can never delete anything.
+    One-way (the default) reads `source` and writes `target`. Two-way keeps both
+    holding the union of the two — expressed as one pair rather than a pair in
+    each direction, because a correct two-way sync has to decide *together*
+    whether a one-sided item is new or deleted, which two independent pairs
+    cannot do. `removal_mode` defaults to additive so a new pair can never
+    delete anything.
     """
 
     pair_id: str = ""
@@ -140,7 +147,13 @@ class SyncPair:
     # declare supports_target_lists.
     target_list: str = ""
     removal_mode: str = "additive"
+    #: "one_way" (default) or "two_way". Two-way keeps both services holding the
+    #: union of the two rather than running a second pair in reverse.
+    mode: str = "one_way"
     enabled: bool = True
+
+    def is_two_way(self) -> bool:
+        return self.mode == "two_way"
 
     def to_dict(self) -> dict:
         return {
@@ -152,6 +165,7 @@ class SyncPair:
             "source_lists": list(self.source_lists),
             "target_list": self.target_list,
             "removal_mode": self.removal_mode,
+            "mode": self.mode,
             "enabled": bool(self.enabled),
         }
 
@@ -170,7 +184,16 @@ class SyncPair:
 
     @classmethod
     def from_dict(cls, raw: dict) -> "SyncPair":
-        from .providers import ALL_CATEGORIES, ALL_REMOVAL_MODES, REMOVAL_ADDITIVE
+        from .providers import (
+            ALL_CATEGORIES,
+            ALL_PAIR_MODES,
+            ALL_REMOVAL_MODES,
+            MODE_ONE_WAY,
+            MODE_TWO_WAY,
+            REMOVAL_ADDITIVE,
+            REMOVAL_MANAGED,
+            TWO_WAY_REMOVAL_MODES,
+        )
 
         if not isinstance(raw, dict):
             raise ValueError("Sync pair must be an object")
@@ -197,6 +220,21 @@ class SyncPair:
             # inheriting a destructive one.
             removal_mode = REMOVAL_ADDITIVE
 
+        mode = str(raw.get("mode", "") or "").strip().lower()
+        if mode not in ALL_PAIR_MODES:
+            mode = MODE_ONE_WAY
+        if mode == MODE_TWO_WAY and removal_mode not in TWO_WAY_REMOVAL_MODES:
+            # "Make the target match the source" has no bidirectional meaning —
+            # run both ways it just means one side wins and the other's unique
+            # items are destroyed. Downgrade to the managed equivalent rather
+            # than dropping the pair, which would lose the user's config.
+            logger.warning(
+                "Sync pair %r is two-way; downgrading removal mode %r to %r",
+                raw.get("name") or raw.get("pair_id") or f"{source}->{target}",
+                removal_mode, REMOVAL_MANAGED,
+            )
+            removal_mode = REMOVAL_MANAGED
+
         source_lists = [
             str(value).strip()
             for value in (raw.get("source_lists") or [])
@@ -212,11 +250,13 @@ class SyncPair:
             source_lists=source_lists,
             target_list=str(raw.get("target_list", "") or "").strip(),
             removal_mode=removal_mode,
+            mode=mode,
             enabled=bool(raw.get("enabled", True)),
         )
 
     def display_name(self) -> str:
-        return self.name or f"{self.source} → {self.target}"
+        arrow = "↔" if self.is_two_way() else "→"
+        return self.name or f"{self.source} {arrow} {self.target}"
 
 
 @dataclass

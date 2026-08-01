@@ -49,10 +49,13 @@ from src.trakt_client import TraktAuthenticationError, TraktClient
 from src.cross_sync import CrossSyncService
 from src.providers import (
     ALL_CATEGORIES,
+    ALL_PAIR_MODES,
     ALL_REMOVAL_MODES,
     CATEGORY_LABELS,
+    PAIR_MODE_LABELS,
     PROVIDER_ORDER,
     REMOVAL_MODE_LABELS,
+    TWO_WAY_REMOVAL_MODES,
     AniListAdapter,
     MdbListAdapter,
     PmdbAdapter,
@@ -971,6 +974,12 @@ def _pair_capabilities(config: AppConfig) -> dict:
         "removal_modes": [
             {"key": key, "label": REMOVAL_MODE_LABELS[key]} for key in ALL_REMOVAL_MODES
         ],
+        "pair_modes": [
+            {"key": key, "label": PAIR_MODE_LABELS[key]} for key in ALL_PAIR_MODES
+        ],
+        # Which removal modes two-way accepts, so the editor can narrow the list
+        # rather than offering one the backend will silently downgrade.
+        "two_way_removal_modes": list(TWO_WAY_REMOVAL_MODES),
     }
 
 
