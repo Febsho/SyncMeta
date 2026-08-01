@@ -710,29 +710,53 @@ class SyncService:
             return result
 
         workers = sum([simkl_enabled, trakt_enabled, anilist_enabled])
+        selection = {"source": "pmdb", "kind": "watchlist-merge"}
         all_items: list[dict] = []
-        if workers == 0:
-            pass
-        elif workers == 1:
-            if simkl_enabled:
-                all_items.extend(_fetch_simkl_plantowatch())
-            elif trakt_enabled:
-                all_items.extend(self._trakt.get_watchlist() or [])
-            else:
-                all_items.extend(self._anilist_root_client.get_status("PLANNING") or [])
-        else:
-            self._set_status("Fetching watchlist sources")
-            with ThreadPoolExecutor(max_workers=min(_SOURCE_SYNC_WORKERS, workers)) as pool:
-                futures = []
+        try:
+            if workers == 0:
+                pass
+            elif workers == 1:
                 if simkl_enabled:
-                    futures.append(pool.submit(_fetch_simkl_plantowatch))
-                if trakt_enabled:
-                    futures.append(pool.submit(self._trakt.get_watchlist))
-                if anilist_enabled:
-                    futures.append(pool.submit(self._anilist_root_client.get_status, "PLANNING"))
-                for future in futures:
-                    result = future.result()
-                    all_items.extend(result or [])
+                    all_items.extend(_fetch_simkl_plantowatch())
+                elif trakt_enabled:
+                    all_items.extend(self._trakt.get_watchlist() or [])
+                else:
+                    all_items.extend(self._anilist_root_client.get_status("PLANNING") or [])
+            else:
+                self._set_status("Fetching watchlist sources")
+                with ThreadPoolExecutor(max_workers=min(_SOURCE_SYNC_WORKERS, workers)) as pool:
+                    futures = []
+                    if simkl_enabled:
+                        futures.append(pool.submit(_fetch_simkl_plantowatch))
+                    if trakt_enabled:
+                        futures.append(pool.submit(self._trakt.get_watchlist))
+                    if anilist_enabled:
+                        futures.append(pool.submit(self._anilist_root_client.get_status, "PLANNING"))
+                    for future in futures:
+                        result = future.result()
+                        all_items.extend(result or [])
+        except SyncCancelled:
+            raise
+        except Exception as exc:
+            # A failed source read means the merged view is incomplete; running
+            # the merge anyway would remove every item that source contributed
+            # (force_remove_missing=True). Skip the merge and report the error
+            # instead of aborting the whole sync run.
+            row_type = self._infer_row_type("Combined", selection, "PMDB Watchlist")
+            stats = SyncStats(
+                list_name="Watchlist",
+                display_name="PMDB Watchlist",
+                source_name="Combined",
+                row_key=self._make_row_key("Combined", "Watchlist", row_type, selection),
+                row_type=row_type,
+            )
+            self._record_error(
+                stats,
+                "fetch",
+                f"Watchlist source fetch failed, PMDB watchlist left untouched: {exc}",
+            )
+            logger.error("PMDB watchlist merge skipped — source fetch failed: %s", exc)
+            return stats
 
         return self._sync_list(
             all_items,
@@ -745,7 +769,7 @@ class SyncService:
             force_remove_missing=True,
             allow_empty_sync=True,
             managed_keys=frozenset(self._config.sync.pmdb_watchlist_managed_keys),
-            selection={"source": "pmdb", "kind": "watchlist-merge"},
+            selection=selection,
         )
 
     def _sync_simkl(self) -> list[SyncStats]:

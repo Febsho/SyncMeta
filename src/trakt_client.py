@@ -205,14 +205,24 @@ class TraktClient:
             self._attempt_token_refresh()
         response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
         self._check_cancelled()
-        if response.status_code == 401:
+        # 401 = expired/invalid token; 403 = invalid Client ID, unapproved app,
+        # or revoked access.  Both are auth failures a retry cannot fix, so try
+        # one token refresh and otherwise surface a reconnect message instead of
+        # a bare HTTPError.  /oauth/ endpoints keep their raw status codes —
+        # the device flow inspects them.
+        if response.status_code in (401, 403) and not path.startswith("/oauth/"):
             if self._attempt_token_refresh():
                 response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
                 self._check_cancelled()
-                if response.status_code == 401:
-                    raise TraktAuthenticationError("Trakt token expired, reconnect Trakt.")
-            else:
+            if response.status_code == 401:
                 raise TraktAuthenticationError("Trakt token expired, reconnect Trakt.")
+            if response.status_code == 403:
+                raise TraktAuthenticationError(
+                    "Trakt returned 403 Forbidden — the Trakt Client ID is invalid, "
+                    "the API app was deleted or is unapproved, or its access was "
+                    "revoked. Verify the Client ID/Secret in Connections and "
+                    "reconnect Trakt."
+                )
         response.raise_for_status()
         return response
 

@@ -45,6 +45,19 @@ class RefreshingSession:
         return FakeResponse(200, "[]", [])
 
 
+class ForbiddenSession:
+    def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
+        return FakeResponse(403, "forbidden")
+
+
+class ForbiddenThenOkSession(RefreshingSession):
+    def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
+        self.requests += 1
+        if self.requests == 1:
+            return FakeResponse(403, "forbidden")
+        return FakeResponse(200, "[]", [])
+
+
 class TraktClientTests(unittest.TestCase):
     def test_401_raises_reconnect_error(self) -> None:
         client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))
@@ -82,6 +95,30 @@ class TraktClientTests(unittest.TestCase):
         self.assertEqual(captured["access"], "new-access")
         self.assertEqual(captured["refresh"], "new-refresh")
         self.assertTrue(captured["expires_at"])
+
+    def test_403_raises_auth_error_instead_of_http_error(self) -> None:
+        client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))
+        client._session = ForbiddenSession()
+
+        with self.assertRaisesRegex(TraktAuthenticationError, "403 Forbidden"):
+            client._get("/sync/watchlist")
+
+    def test_403_refreshes_token_and_retries_request(self) -> None:
+        client = TraktClient(TraktConfig(
+            base_url="https://api.trakt.tv",
+            client_id="client",
+            client_secret="secret",
+            access_token="old",
+            refresh_token="refresh",
+        ))
+        session = ForbiddenThenOkSession()
+        client._session = session
+
+        result = client._get("/sync/watchlist")
+
+        self.assertEqual(result, [])
+        self.assertEqual(session.refreshes, 1)
+        self.assertEqual(session.requests, 2)
 
     def test_normalize_movie_watchlist_entry(self) -> None:
         client = TraktClient(TraktConfig())
