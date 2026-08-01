@@ -273,6 +273,15 @@
     .pipe-status-stats{display:flex;gap:14px;color:var(--z400);font-variant-numeric:tabular-nums;flex-wrap:wrap}
     .pipe-status-stats .c-green{color:var(--green)}.pipe-status-stats .c-red{color:var(--red)}.pipe-status-stats .c-orange{color:var(--orange)}
     .pipe-status-meta{margin-left:auto;color:var(--z500);font-size:12px}
+    /* Cross-service pair rows (dashboard) */
+    .pair-row-disabled{opacity:.55}
+    .pair-flow{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .pair-node{padding:2px 8px;border-radius:6px;background:var(--z900);border:1px solid var(--z800);color:var(--z100);font-size:12px;font-weight:600}
+    .pair-badge{padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid var(--z800);color:var(--z400);text-transform:lowercase}
+    .pair-badge.warn{border-color:rgba(251,146,60,.45);color:var(--orange)}
+    .pair-badge.danger{border-color:rgba(248,113,113,.45);color:var(--red)}
+    .pair-row-actions{display:flex;gap:6px;margin-left:auto;align-items:center}
+    .pair-row-problem{padding:0 18px 10px 18px;font-size:12px;color:var(--orange)}
     /* Live sync activity */
     .live-activity-status{padding:10px 18px;border-bottom:1px solid var(--z900);font-size:13px;color:var(--z300);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .live-activity-status .live-step{color:var(--z100);font-weight:600}
@@ -466,6 +475,19 @@
         <div class="panel hidden" id="pipelines-panel">
           <div class="panel-header"><span>Sync Pipelines</span><span class="history-time" id="pipelines-meta"></span></div>
           <div id="pipelines-body"></div>
+        </div>
+
+        <!-- Cross-service pairs (any service to any other), hidden until one exists -->
+        <div class="panel hidden" id="pairs-dash-panel">
+          <div class="panel-header">
+            <span>Cross-Service Pairs</span>
+            <div class="actions-bar" style="margin-top:0">
+              <span class="history-time" id="pairs-dash-meta"></span>
+              <button class="btn btn-sm" type="button" id="btn-dash-pairs-dry" onclick="runPairsFromDashboard('', true)">Dry Run All</button>
+              <button class="btn btn-sm" type="button" id="btn-dash-pairs-run" onclick="runPairsFromDashboard('', false)">Run All</button>
+            </div>
+          </div>
+          <div id="pairs-dash-body"></div>
         </div>
 
         <!-- Activity sync (hidden until configured) -->
@@ -2316,9 +2338,11 @@
       const panel = el('pipelines-panel');
       const body = el('pipelines-body');
       if (!panel || !body) return;
+      // Cross-service pairs used to be appended here. They have their own panel
+      // now — mixing "SIMKL → PublicMetaDB" with "Trakt → AniList" in one list
+      // made two different things look like one pipeline.
       const rows = Array.isArray(results) ? results.filter(row => row.source_name) : [];
-      const pairResults = Object.values((profile && profile.last_pair_results) || {});
-      if (!rows.length && !pairResults.length) {
+      if (!rows.length) {
         panel.classList.add('hidden');
         body.innerHTML = '';
         return;
@@ -2362,32 +2386,166 @@
         </div>`;
       });
 
-      // Custom cross-service pairs show alongside the built-in pipelines with
-      // their last recorded run.
-      const pairRows = pairResults
-        .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
-        .map(result => {
-          const errorCount = (result.errors || []).length
-            + (result.categories || []).reduce((acc, cat) => acc + ((cat.errors || []).length), 0);
-          const state = errorCount
-            ? '<span class="c-red">errors</span>'
-            : '<span class="c-green">ok</span>';
-          const when = result.timestamp ? timeAgo(result.timestamp) : '';
-          const firstError = (result.errors || [])[0]
-            || ((result.categories || []).flatMap(cat => cat.errors || [])[0] || '');
-          return `<div class="pipe-status-row" ${firstError ? `title="${escAttr(firstError)}"` : ''}>
-            <span class="pipe-status-name">${esc(result.name || `${result.source} → ${result.target}`)} <span class="catalog-note">pair</span></span>
-            <span class="pipe-status-stats">
-              ${result.added ? `<span class="c-green">+${result.added}</span>` : '<span>+0</span>'}
-              ${result.removed ? `<span class="c-red">−${result.removed}</span>` : ''}
-              ${result.unmapped ? `<span class="c-orange">${result.unmapped} unmapped</span>` : ''}
-              ${errorCount ? `<span class="c-red">${errorCount} error${errorCount === 1 ? '' : 's'}</span>` : ''}
-            </span>
-            <span class="pipe-status-meta">${result.dry_run ? 'dry run · ' : ''}${when ? `ran ${esc(when)} · ` : ''}${state}</span>
-          </div>`;
-        });
+      body.innerHTML = serviceRows.join('');
+    }
 
-      body.innerHTML = serviceRows.concat(pairRows).join('');
+    // ── Cross-service pairs (dashboard) ─────────────────────────────────
+    // Driven entirely off /status: the public profile already carries both the
+    // pair definitions (options.sync_pairs) and their last outcomes, so showing
+    // them here costs no extra request.
+    const PAIR_CATEGORY_LABELS = { watchlist: 'Watchlist', collection: 'Collection', history: 'History' };
+    // The dashboard renders before the pair editor has ever been opened, so it
+    // cannot rely on pairsState.providers for names.
+    const PROVIDER_DASH_LABELS = {
+      trakt: 'Trakt', simkl: 'SIMKL', anilist: 'AniList', mdblist: 'MDBList', pmdb: 'PublicMetaDB',
+    };
+
+    function pairDashLabel(key) {
+      return PROVIDER_DASH_LABELS[key] || key;
+    }
+
+    function pairRowHtml(pair, result) {
+      const disabled = pair.enabled === false;
+      const name = pair.name || `${pairDashLabel(pair.source)} → ${pairDashLabel(pair.target)}`;
+      const categories = (pair.categories || [])
+        .map(c => PAIR_CATEGORY_LABELS[c] || c).join(', ');
+      const removal = String(pair.removal_mode || 'additive');
+      const removalBadge = removal === 'additive'
+        ? '<span class="pair-badge">additive</span>'
+        : `<span class="pair-badge ${removal === 'mirror' ? 'danger' : 'warn'}">${esc(removal)}</span>`;
+
+      let stats = '<span class="c-dim">never run</span>';
+      let meta = disabled ? 'disabled' : 'not run yet';
+      let firstError = '';
+      if (result) {
+        const errorCount = Number(result.error_count || 0)
+          || ((result.errors || []).length
+              + (result.categories || []).reduce((acc, c) => acc + ((c.errors || []).length), 0));
+        firstError = (result.errors || [])[0]
+          || ((result.categories || []).flatMap(c => c.errors || [])[0] || '');
+        stats = `
+          ${result.added ? `<span class="c-green">+${result.added}</span>` : '<span>+0</span>'}
+          ${result.removed ? `<span class="c-red">−${result.removed}</span>` : ''}
+          ${result.unmapped ? `<span class="c-orange">${result.unmapped} unmapped</span>` : ''}
+          ${result.cached_reads ? `<span class="c-dim">${result.cached_reads} cached read${result.cached_reads === 1 ? '' : 's'}</span>` : ''}
+          ${errorCount ? `<span class="c-red">${errorCount} error${errorCount === 1 ? '' : 's'}</span>` : ''}`;
+        const when = result.timestamp ? `ran ${esc(timeAgo(result.timestamp))}` : '';
+        const state = errorCount ? '<span class="c-red">errors</span>' : '<span class="c-green">ok</span>';
+        meta = `${result.dry_run ? 'dry run · ' : ''}${when ? when + ' · ' : ''}${state}`;
+      }
+
+      const problem = pair.problem
+        ? `<div class="pair-row-problem"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
+        : (firstError ? `<div class="pair-row-problem"><span aria-hidden="true">⚠</span> ${esc(firstError)}</div>` : '');
+
+      return `<div>
+        <div class="pipe-status-row ${disabled ? 'pair-row-disabled' : ''}">
+          <span class="pipe-status-name">
+            ${esc(name)}
+            <div class="pair-flow" style="margin-top:4px">
+              <span class="pair-node">${esc(pairDashLabel(pair.source))}</span>
+              <span class="pipeline-arrow">→</span>
+              <span class="pair-node">${esc(pairDashLabel(pair.target))}</span>
+              ${removalBadge}
+            </div>
+          </span>
+          <span class="pipe-status-stats">
+            ${categories ? `<span class="c-dim">${esc(categories)}</span>` : ''}
+            ${stats}
+          </span>
+          <span class="pair-row-actions">
+            <span class="pipe-status-meta" style="margin-left:0">${meta}</span>
+            <button class="btn btn-sm" type="button" ${disabled ? 'disabled' : ''}
+                    data-dash-pair-run="${escAttr(pair.pair_id || '')}">Run</button>
+          </span>
+        </div>
+        ${problem}
+      </div>`;
+    }
+
+    // Delegated once, like the pair editor. Inline onclick would mean
+    // interpolating a user-supplied pair_id into executable JS, and attribute
+    // escaping does not survive that — the parser decodes the entities before
+    // the handler is compiled.
+    let pairsDashDelegated = false;
+    function bindPairsDashEvents(node) {
+      if (pairsDashDelegated) return;
+      pairsDashDelegated = true;
+      node.addEventListener('click', (event) => {
+        const button = event.target.closest && event.target.closest('button');
+        if (!button || !button.dataset || button.dataset.dashPairRun === undefined) return;
+        const pairId = button.dataset.dashPairRun;
+        if (!pairId) return;
+        runPairsFromDashboard(pairId, false);
+      });
+    }
+
+    function renderPairsDashPanel(profile) {
+      const panel = el('pairs-dash-panel');
+      const body = el('pairs-dash-body');
+      if (!panel || !body) return;
+      bindPairsDashEvents(body);
+      const pairs = ((profile && profile.options) || {}).sync_pairs || [];
+      const results = (profile && profile.last_pair_results) || {};
+      if (!pairs.length) {
+        panel.classList.add('hidden');
+        body.innerHTML = '';
+        return;
+      }
+      panel.classList.remove('hidden');
+
+      const meta = el('pairs-dash-meta');
+      if (meta) {
+        const runs = Object.values(results);
+        const latest = runs
+          .map(r => r.timestamp).filter(Boolean)
+          .sort().slice(-1)[0];
+        const enabled = pairs.filter(p => p.enabled !== false).length;
+        const saved = runs.reduce((acc, r) => acc + Number(r.cached_reads || 0), 0);
+        const parts = [`${enabled} of ${pairs.length} enabled`];
+        if (latest) parts.push(`last run ${timeAgo(latest)}`);
+        if (saved) parts.push(`${saved} read${saved === 1 ? '' : 's'} saved by caching`);
+        meta.textContent = parts.join(' · ');
+      }
+
+      body.innerHTML = pairs
+        .map(pair => pairRowHtml(pair, results[pair.pair_id]))
+        .join('');
+    }
+
+    async function runPairsFromDashboard(pairId, dryRun) {
+      const buttons = [el('btn-dash-pairs-run'), el('btn-dash-pairs-dry')].filter(Boolean);
+      buttons.forEach(b => { b.disabled = true; });
+      const runBtn = el('btn-dash-pairs-run');
+      if (runBtn && !pairId) runBtn.textContent = dryRun ? 'Running...' : 'Running...';
+      try {
+        const payload = { dry_run: !!dryRun };
+        if (pairId) payload.pair_id = pairId;
+        const result = await apiPost('/api/profile/pairs/run', payload);
+        if (!result.ok) {
+          showToast(formatApiError(result.data, 'Sync pair run failed.'), true, false);
+          return;
+        }
+        const runs = result.data.results || [];
+        const added = runs.reduce((sum, r) => sum + (r.added || 0), 0);
+        const removed = runs.reduce((sum, r) => sum + (r.removed || 0), 0);
+        const cached = Number(result.data.cached_reads || 0);
+        const savedNote = cached ? ` (${cached} read${cached === 1 ? '' : 's'} served from cache)` : '';
+        showToast(
+          dryRun
+            ? `Dry run — ${added} would be added, ${removed} removed${savedNote}.`
+            : `Pairs synced — ${added} added, ${removed} removed${savedNote}.`,
+          false, true,
+        );
+        // A dry run writes nothing, so the stored results the dashboard renders
+        // are unchanged; only a real run needs the profile re-read.
+        if (!dryRun) _forceStatusRefresh();
+      } catch {
+        showToast('Network error while running sync pairs.', true);
+      } finally {
+        buttons.forEach(b => { b.disabled = false; });
+        if (runBtn) runBtn.textContent = 'Run All';
+      }
     }
 
     // ── Library (poster browser) ────────────────────────────────────────
@@ -3792,6 +3950,7 @@
       el('activity-cards').innerHTML = '';
       updateLiveActivityPanel(null);
       renderPipelinesPanel({}, []);
+      renderPairsDashPanel(null);
       el('sync-hint').textContent = message;
       el('results-time').textContent = '';
       el('results-body').innerHTML = '<div class="empty">No sync results yet. Save or load a profile in Settings to start automatic background sync.</div>';
@@ -4079,6 +4238,7 @@
 
       updateLiveActivityPanel(profile);
       renderPipelinesPanel(profile, results);
+      renderPairsDashPanel(profile);
       renderActivityPanel(profile);
       renderAnimeHealth(profile);
       renderDryRunPreview(profile, results);
@@ -5848,6 +6008,54 @@
         </div>`;
     }
 
+    // Two pairs can quietly work against each other in ways the backend cannot
+    // call invalid on its own — each is fine in isolation. Flagging them here is
+    // the only place a user sees the whole set at once.
+    function pairConflicts(index) {
+      const pair = pairsState.pairs[index];
+      if (!pair) return [];
+      const notes = [];
+      const categories = new Set(pair.categories || []);
+      pairsState.pairs.forEach((other, otherIndex) => {
+        if (otherIndex === index || other.enabled === false || pair.enabled === false) return;
+        const shared = (other.categories || []).filter(c => categories.has(c));
+        if (!shared.length) return;
+        const sharedText = shared.join(', ');
+        if (other.source === pair.source && other.target === pair.target) {
+          notes.push(`Pair ${otherIndex + 1} already syncs ${sharedText} from ${providerLabel(pair.source)} to ${providerLabel(pair.target)} — one of the two is redundant.`);
+          return;
+        }
+        // A ↔ B where either side may delete: whatever one pair removes, the
+        // other adds straight back, and the items ping-pong every run.
+        if (other.source === pair.target && other.target === pair.source) {
+          const destructive = (pair.removal_mode && pair.removal_mode !== 'additive')
+            || (other.removal_mode && other.removal_mode !== 'additive');
+          if (destructive) {
+            notes.push(`Pair ${otherIndex + 1} syncs ${sharedText} back the other way and one of the two can delete — they will undo each other. Use "additive" on both for a two-way mirror.`);
+          }
+        }
+      });
+      return notes;
+    }
+
+    function pairLastRunHtml(pair) {
+      const result = pair.last_result;
+      if (!result) return '';
+      const errorCount = Number(result.error_count || 0)
+        || ((result.errors || []).length
+            + (result.categories || []).reduce((acc, c) => acc + ((c.errors || []).length), 0));
+      const when = result.timestamp ? timeAgo(result.timestamp) : '';
+      const bits = [
+        `+${result.added || 0} added`,
+        `${result.removed || 0} removed`,
+      ];
+      if (result.unmapped) bits.push(`${result.unmapped} unmatched`);
+      if (errorCount) bits.push(`${errorCount} error${errorCount === 1 ? '' : 's'}`);
+      return `<div class="catalog-note" style="margin-top:6px;color:${errorCount ? 'var(--orange)' : 'var(--z500)'}">
+        Last ${result.dry_run ? 'dry run' : 'run'}${when ? ` ${esc(when)}` : ''}: ${esc(bits.join(' · '))}
+      </div>`;
+    }
+
     function pairCardHtml(pair, index) {
       const categoryBoxes = pairsState.categories.map(category => `
         <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
@@ -5864,6 +6072,10 @@
       const destructive = pair.removal_mode && pair.removal_mode !== 'additive'
         ? `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> This pair may delete items from ${esc(providerLabel(pair.target))}.</div>`
         : '';
+      const conflicts = pairConflicts(index)
+        .map(text => `<div class="catalog-note" style="color:var(--orange);margin-top:6px"><span aria-hidden="true">⚠</span> ${esc(text)}</div>`)
+        .join('');
+      const lastRun = pairLastRunHtml(pair);
 
       return `<div class="guide-box" data-pair-card="${index}" style="margin-bottom:10px">
         <div class="form-row" style="margin-bottom:8px">
@@ -5892,12 +6104,15 @@
           <select id="pair-removal-${index}" data-pair-index="${index}" data-pair-field="removal_mode">${removalOptions}</select>
         </div>
         ${destructive}
+        ${conflicts}
         ${problem}
+        ${lastRun}
         <div class="inline-actions" style="justify-content:flex-start;margin-top:10px">
           <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px">
             <input type="checkbox" data-pair-index="${index}" data-pair-field="enabled" ${pair.enabled ? 'checked' : ''}>
             Enabled
           </label>
+          <button class="btn btn-sm" type="button" data-pair-dry-run="${index}">Dry Run</button>
           <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
           <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
         </div>
@@ -6071,9 +6286,20 @@
           renderSyncCards();
           return;
         }
-        if (button.dataset.pairRun !== undefined) {
-          const pair = pairAt(button.dataset.pairRun);
-          if (pair) runPairs(pair.pair_id, false);
+        // A pair that has never been saved has no id, and an empty pair_id means
+        // "run everything" to the endpoint — so running one unsaved pair would
+        // silently run all of them. Refuse instead.
+        const runIndex = button.dataset.pairRun !== undefined
+          ? button.dataset.pairRun
+          : button.dataset.pairDryRun;
+        if (runIndex !== undefined) {
+          const pair = pairAt(runIndex);
+          if (!pair) return;
+          if (!pair.pair_id) {
+            showToast('Save this pair before running it on its own.', true);
+            return;
+          }
+          runPairs(pair.pair_id, button.dataset.pairDryRun !== undefined);
         }
       });
     }
@@ -6165,7 +6391,8 @@
           const catErrors = (cat.errors || []).map(e =>
             `<div class="catalog-note" style="color:var(--red)">${esc(e)}</div>`).join('');
           return `<div class="catalog-note">${esc(cat.category)}: +${cat.added} added, ${cat.removed} removed,
-            ${cat.skipped_existing} already there${cat.unmapped ? `, ${cat.unmapped} unmatched` : ''}</div>${catErrors}`;
+            ${cat.skipped_existing} already there${cat.unmapped ? `, ${cat.unmapped} unmatched` : ''}${
+              cat.cached_reads ? `, ${cat.cached_reads} read${cat.cached_reads === 1 ? '' : 's'} from cache` : ''}</div>${catErrors}`;
         }).join('');
         return `<div class="guide-box" style="margin-bottom:8px">
           <div style="font-weight:500">${esc(run.name)}${dryRun ? ' <span class="c-dim">(dry run)</span>' : ''}</div>
@@ -6191,13 +6418,17 @@
         }
         renderPairResults(result.data.results, result.data.dry_run);
         const totalAdded = (result.data.results || []).reduce((sum, r) => sum + (r.added || 0), 0);
+        const cached = Number(result.data.cached_reads || 0);
+        const savedNote = cached ? ` (${cached} read${cached === 1 ? '' : 's'} served from cache)` : '';
         showToast(
-          dryRun ? `Dry run complete — ${totalAdded} item(s) would be added.`
-                 : `Sync complete — ${totalAdded} item(s) added.`,
+          dryRun ? `Dry run complete — ${totalAdded} item(s) would be added${savedNote}.`
+                 : `Sync complete — ${totalAdded} item(s) added${savedNote}.`,
           false, true,
         );
         // Ownership records changed, so refresh to pick up any new problems.
         await fetchPairs();
+        // The dashboard renders the same last-run data, so keep it in step.
+        if (!dryRun) _forceStatusRefresh();
       } catch {
         if (node) node.innerHTML = '';
         showToast('Network error while running sync pairs.', true);

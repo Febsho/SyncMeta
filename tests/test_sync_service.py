@@ -275,6 +275,42 @@ class SyncServiceTests(unittest.TestCase):
         service._pmdb = pmdb
         return service, pmdb
 
+    def test_pmdb_watchlist_merge_reports_error_instead_of_crashing_on_trakt_auth_failure(self) -> None:
+        config = AppConfig(
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                dry_run=False,
+                media_types=["shows"],
+                trakt_sync_to_pmdb_watchlist=True,
+            ),
+        )
+        config.trakt.client_id = "trakt-client"
+        config.trakt.access_token = "trakt-token"
+        config.trakt.enabled = True
+
+        service = SyncService(config)
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+
+        class ForbiddenTraktClient(StubTraktClient):
+            def get_watchlist(self) -> list[dict]:
+                raise TraktAuthenticationError("Trakt returned 403 Forbidden — reconnect Trakt.")
+
+        service._trakt = ForbiddenTraktClient()
+
+        stats = service._sync_pmdb_watchlist()
+
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats.display_name, "PMDB Watchlist")
+        self.assertEqual(len(stats.errors), 1)
+        self.assertIn("403 Forbidden", stats.errors[0])
+        self.assertIn("left untouched", stats.errors[0])
+        # The merge must not run on a partial source set: nothing written, nothing removed.
+        self.assertEqual(pmdb.created_lists, [])
+        self.assertEqual(pmdb.added_items, [])
+        self.assertEqual(pmdb.removed_list_items, [])
+
     def test_live_progress_publishes_pending_row_before_list_finishes(self) -> None:
         progress_events: list[list[dict]] = []
         config = AppConfig(

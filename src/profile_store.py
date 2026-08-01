@@ -616,7 +616,11 @@ def _normalize_sync_pairs(raw: object) -> list[dict]:
         except (ValueError, TypeError) as exc:
             logger.warning("Dropping invalid sync pair at index %d: %s", index, exc)
             continue
-        pair_id = pair.pair_id or f"{pair.source}-{pair.target}-{index + 1}"
+        # Generated ids go through the same filter as supplied ones: source and
+        # target are free text until an adapter is looked up by them.
+        pair_id = pair.pair_id or SyncPair._clean_pair_id(
+            f"{pair.source}-{pair.target}-{index + 1}"
+        ) or f"pair-{index + 1}"
         # Duplicate ids would let two pairs share managed keys and delete each
         # other's items.
         while pair_id in seen_ids:

@@ -155,6 +155,19 @@ class SyncPair:
             "enabled": bool(self.enabled),
         }
 
+    #: A pair id is an internal handle, not user-facing text: it is echoed into
+    #: HTML attributes and used to key stored state. Restricting it to this
+    #: alphabet keeps it inert wherever it is rendered, rather than relying on
+    #: every call site escaping it correctly.
+    _PAIR_ID_ALLOWED = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    )
+
+    @classmethod
+    def _clean_pair_id(cls, value: object) -> str:
+        text = str(value or "").strip()
+        return "".join(ch for ch in text if ch in cls._PAIR_ID_ALLOWED)[:64]
+
     @classmethod
     def from_dict(cls, raw: dict) -> "SyncPair":
         from .providers import ALL_CATEGORIES, ALL_REMOVAL_MODES, REMOVAL_ADDITIVE
@@ -191,7 +204,7 @@ class SyncPair:
         ]
 
         return cls(
-            pair_id=str(raw.get("pair_id", "") or "").strip(),
+            pair_id=cls._clean_pair_id(raw.get("pair_id")),
             name=str(raw.get("name", "") or "").strip(),
             source=source,
             target=target,
