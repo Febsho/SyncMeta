@@ -5,7 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SyncMeta</title>
   <style>
-    :root{color-scheme:dark;--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24}
+    :root{color-scheme:dark;--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24;
+      /* Surface + hairline + monospace overline. Numbers are set at weight 500
+         with negative tracking rather than 700 — heavy weights at this size
+         read as chunky and fight the thin rules. */
+      --surface:#111113;--line:#2b2b2f;--label:#7f7f84;
+      --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+    /* Small uppercase monospace label that titles a value. */
+    .overline{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label);font-weight:400}
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--black);color:var(--z300);min-height:100vh;-webkit-font-smoothing:antialiased}
     nav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,.8);backdrop-filter:blur(24px);border-bottom:1px solid rgba(255,255,255,.1);padding:0 24px}
@@ -31,9 +38,19 @@
     .hero-cta{display:inline-flex;padding:12px 36px;border-radius:50px;background:linear-gradient(135deg,var(--accent2),#a78bfa);color:var(--white);font-size:15px;font-weight:600;border:none;cursor:pointer}
     .app-section{display:none;padding:32px 0 64px}.app-section.active{display:block}
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:24px}
-    .card,.panel,.form-section{background:var(--z950);border:1px solid var(--z900);border-radius:8px}
-    .card{padding:18px}.card-label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--z500);margin-bottom:6px;font-weight:600}.card-value{font-size:22px;font-weight:700;color:var(--z100)}.card-sub{font-size:12px;color:var(--z500);margin-top:4px}
-    .panel{overflow:hidden;margin-bottom:20px}.panel-header{padding:14px 18px;border-bottom:1px solid var(--z900);font-size:14px;font-weight:700;color:var(--z100);display:flex;align-items:center;justify-content:space-between}.panel-body{padding:18px}
+    .card,.panel,.form-section{background:var(--surface);border:1px solid var(--line);border-radius:12px}
+    .card{padding:20px}
+    .card-label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--label);margin-bottom:10px;font-weight:400}
+    .card-value{font-size:26px;font-weight:500;color:var(--z100);letter-spacing:-.025em;line-height:1.1}
+    .card-sub{font-size:11.5px;color:var(--label);margin-top:5px}
+    .panel{overflow:hidden;margin-bottom:20px}
+    .panel-header{padding:16px 20px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px;font-weight:400;letter-spacing:.1em;text-transform:uppercase;color:var(--z300);display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .panel-body{padding:20px}
+    /* The mono/uppercase treatment is for the panel *title* only. Meta text and
+       controls sit in the same bar and read as shouting if they inherit it. */
+    .panel-header .history-time,.panel-header .catalog-note,.panel-header .actions-bar,
+    .panel-header .log-toolbar,.panel-header .status-inline,.panel-header .btn,
+    .panel-header input,.panel-header select{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;text-transform:none;letter-spacing:normal}
     .table-scroll{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
     .table-scroll table{min-width:900px}
     .table-pager{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:12px 18px 4px;color:var(--z500);font-size:12px;flex-wrap:wrap}
@@ -85,13 +102,6 @@
     .log-row{display:grid;grid-template-columns:170px 58px 130px minmax(0,1fr);gap:10px;padding:3px 0;color:var(--z400);border-bottom:1px solid rgba(39,39,46,.18)}
     .log-row:last-child{border-bottom:none}.log-time{color:var(--z600);font-variant-numeric:tabular-nums}.log-level{font-weight:800}.log-level.INFO{color:var(--green)}.log-level.WARNING{color:var(--orange)}.log-level.ERROR,.log-level.CRITICAL{color:var(--red)}.log-name{color:var(--z500);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.log-message{color:var(--z300);word-break:break-word}.log-toolbar{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}.log-live.active{border-color:rgba(52,211,153,.5);color:var(--green);background:rgba(20,83,45,.18)}
     .activity-cards{margin-bottom:0}
-    .activity-card{min-height:150px}
-    .activity-card .card-value{display:flex;align-items:baseline;gap:8px}
-    .activity-meta{font-size:12px;color:var(--z500);margin-top:4px}
-    .activity-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
-    .activity-stat{padding:10px 12px;border:1px solid var(--z900);border-radius:8px;background:rgba(24,24,27,.55)}
-    .activity-stat-label{font-size:10px;text-transform:uppercase;letter-spacing:.45px;color:var(--z500);font-weight:700;margin-bottom:4px}
-    .activity-stat-value{font-size:16px;font-weight:700;color:var(--z100);font-variant-numeric:tabular-nums}
     .toast{position:fixed;bottom:24px;right:24px;padding:12px 16px;border-radius:8px;font-size:13px;background:rgba(10,10,11,.92);border:1px solid var(--z800);backdrop-filter:blur(16px);opacity:0;transform:translateY(10px);transition:all .3s;z-index:100;color:var(--z300);max-width:min(420px,calc(100vw - 48px));display:flex;flex-direction:column;gap:4px}.toast.show{opacity:1;transform:translateY(0)}.toast.error{border-color:rgba(248,113,113,.3);color:var(--red)}.toast.success{border-color:rgba(52,211,153,.3);color:var(--green)}
     .toast-message{font-weight:500;word-break:break-word;line-height:1.35}
     .toast-hint{font-size:12px;color:var(--z500);font-weight:400;word-break:break-word;line-height:1.35}
@@ -223,19 +233,19 @@
     .conn-card-title{font-size:15px;font-weight:700;color:var(--z100);margin-bottom:4px;display:flex;align-items:center;gap:8px}
     .conn-card-desc{font-size:12px;color:var(--z500);margin-bottom:14px}
     .conn-card.full{grid-column:1 / -1;margin-bottom:0}
-    .result-list{display:flex;flex-direction:column;gap:1px;background:var(--z900)}
-    .result-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:12px 18px;background:var(--z950);cursor:default;transition:background .15s}
+    .result-list{display:flex;flex-direction:column;gap:1px;background:var(--line)}
+    .result-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:15px 20px;background:var(--surface);cursor:default;transition:background .15s}
     .result-row:hover{background:rgba(255,255,255,.02)}
     .result-row-left{display:flex;flex-direction:column;gap:3px;min-width:0}
-    .result-row-title{font-size:13px;font-weight:600;color:var(--z200);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .result-row-source{font-size:11px;color:var(--z600);font-weight:500}
+    .result-row-title{font-size:13.5px;font-weight:500;color:var(--z100);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .result-row-source{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--label);font-weight:400}
     .result-row-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
     .result-stat{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:36px}
-    .result-stat-val{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
-    .result-stat-label{font-size:9px;text-transform:uppercase;letter-spacing:.3px;color:var(--z600);font-weight:600}
+    .result-stat-val{font-size:16px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1;letter-spacing:-.02em}
+    .result-stat-label{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:var(--label);font-weight:400}
     .result-row-actions{display:flex;gap:6px;margin-left:4px}
-    .result-bar{height:3px;border-radius:2px;background:var(--z800);margin-top:4px;overflow:hidden}
-    .result-bar-fill{height:100%;border-radius:2px;transition:width .3s}
+    .result-bar{display:flex;height:3px;border-radius:2px;background:var(--z800);margin-top:4px;overflow:hidden}
+    .result-bar-fill{height:100%;transition:width .3s}
     .log-viewer{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.65;max-height:600px;overflow-y:auto;overflow-x:hidden;background:var(--black);border-top:1px solid var(--z900);scroll-behavior:smooth}
     .log-empty{padding:32px;text-align:center;color:var(--z600);font-family:inherit}
     .log-line{display:grid;grid-template-columns:70px 52px 1fr;gap:0 10px;padding:3px 14px;border-bottom:1px solid rgba(255,255,255,.03);align-items:baseline}
@@ -266,13 +276,52 @@
     .pipeline-body .settings-group{margin-bottom:14px}
     .pipeline-body .settings-group:last-child{margin-bottom:0}
     /* Dashboard pipeline status */
-    .pipe-status-row{display:flex;align-items:center;gap:12px;padding:10px 18px;border-bottom:1px solid rgba(39,39,46,.3);font-size:13px;flex-wrap:wrap}
+    .pipe-status-row{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
     .pipe-status-row:last-child{border-bottom:none}
-    .pipe-status-name{font-weight:600;color:var(--z100);min-width:170px}
+    .pipe-status-name{font-weight:500;color:var(--z100);min-width:170px;letter-spacing:-.01em}
     .pipe-status-name .pipeline-arrow{font-size:12px}
     .pipe-status-stats{display:flex;gap:14px;color:var(--z400);font-variant-numeric:tabular-nums;flex-wrap:wrap}
     .pipe-status-stats .c-green{color:var(--green)}.pipe-status-stats .c-red{color:var(--red)}.pipe-status-stats .c-orange{color:var(--orange)}
     .pipe-status-meta{margin-left:auto;color:var(--z500);font-size:12px}
+    /* Service sync cards — one per service feeding PublicMetaDB. Flat text rows
+       gave the most important panel on the page the weight of a log line. */
+    .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px;padding:20px}
+    .svc-card{position:relative;display:flex;flex-direction:column;gap:14px;padding:20px;border:1px solid var(--line);border-radius:12px;background:var(--z950);text-align:left;font-family:inherit;cursor:pointer;transition:border-color .15s,background .15s}
+    .svc-card:hover{border-color:var(--z600)}
+    .svc-card.active{border-color:var(--z100);background:#141417}
+    .svc-card.is-error{border-color:rgba(248,113,113,.35)}
+    .svc-card.is-warn{border-color:rgba(251,191,36,.28)}
+    .svc-card-head{display:flex;align-items:center;gap:8px}
+    .svc-name{font-size:15px;font-weight:500;color:var(--z100);letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .svc-status{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:400;white-space:nowrap;flex:none;color:var(--z400)}
+    /* Glow ring around the dot — the one place colour is allowed to carry. */
+    .svc-dot{width:7px;height:7px;border-radius:50%;flex:none}
+    .svc-ok .svc-dot{background:var(--green);box-shadow:0 0 0 4px rgba(52,211,153,.12)}
+    .svc-warn .svc-dot{background:var(--orange);box-shadow:0 0 0 4px rgba(251,191,36,.12)}
+    .svc-err .svc-dot{background:var(--red);box-shadow:0 0 0 4px rgba(248,113,113,.12)}
+    .svc-stats{display:flex;gap:10px 20px;flex-wrap:wrap}
+    .svc-stat{display:flex;flex-direction:column-reverse;gap:6px}
+    .svc-stat-val{font-size:23px;font-weight:500;color:var(--z100);font-variant-numeric:tabular-nums;line-height:1;letter-spacing:-.025em}
+    .svc-stat-label{font-family:var(--mono);font-size:10px;font-weight:400;letter-spacing:.09em;text-transform:uppercase;color:var(--label);white-space:nowrap}
+    /* Composition of what was fetched, unlike the old bar which showed the
+       resolve rate and so sat at ~100% for every row regardless of outcome. */
+    .svc-bar{display:flex;height:2px;overflow:hidden;background:var(--z800)}
+    .svc-bar span{display:block;height:100%}
+    /* Activity cards reuse the service card, minus the click affordance. */
+    .svc-card-static{cursor:default}
+    .svc-card-static:hover{border-color:var(--line)}
+    .svc-card-off{opacity:.6}
+    .svc-muted .svc-dot{background:var(--z600)}
+    .svc-foot{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--label)}
+    .svc-foot .pipeline-arrow{font-size:10px}
+    .svc-filter-note{padding:0 20px 18px;font-size:12px;color:var(--z400);display:flex;align-items:center;gap:10px}
+    /* Segmented control: the selected option inverts to a light fill instead of
+       taking the brand accent, which keeps a row of filters reading as one
+       control rather than several competing buttons. */
+    #results-filters .btn{border-radius:7px;background:var(--z900);border-color:#303034;color:#85858a;font-weight:400}
+    #results-filters .btn:hover{border-color:var(--z600);color:var(--z100)}
+    #results-filters .btn-primary{background:var(--z100);border-color:var(--z100);color:var(--z950);font-weight:500}
+    #results-filters .btn-primary:hover{background:var(--white);border-color:var(--white);color:var(--z950)}
     /* Cross-service pair rows (dashboard) */
     .pair-row-disabled{opacity:.55}
     .pair-flow{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -408,10 +457,13 @@
       .service-pill{padding:8px 14px;font-size:13px}
       .hero-cta{padding:11px 28px;font-size:14px}
       .cards{grid-template-columns:1fr 1fr}
+      /* The activity cards carry a name plus a status chip, which does not fit
+         two-up at this width — the chip was being clipped. */
+      .activity-cards{grid-template-columns:1fr}
       .poster-grid{grid-template-columns:repeat(auto-fill,minmax(102px,1fr));gap:10px;padding:12px}
       .episode-thumb{width:84px}
       .card{padding:14px}.card-value{font-size:18px}
-      .activity-stats{grid-template-columns:1fr 1fr}
+      .svc-grid{grid-template-columns:1fr;padding:12px 14px}
       .btn{padding:8px 14px;font-size:12px}.btn-sm{padding:5px 10px;font-size:11px}
       .settings-group{padding:14px}
       .settings-page-title{font-size:17px}
@@ -1220,6 +1272,9 @@
     let lastSiteStats = null;
     let currentResultsPage = 1;
     let currentResultsFilter = 'all';
+    // Set by clicking a service card; narrows Latest Sync Results to one
+    // service. Kept separate from currentResultsFilter so the two compose.
+    let currentServiceFilter = '';
     let pendingDeleteListName = '';
     let deletingManagedListName = '';
     let pendingClearWatchHistory = false;
@@ -2387,27 +2442,78 @@
           ? 'Live — updating during sync'
           : (profile.last_sync ? `Last run ${timeAgo(profile.last_sync)}` : '');
       }
-      const serviceRows = Array.from(groups.entries()).map(([source, group]) => {
-        const state = group.errors
-          ? '<span class="c-red">errors</span>'
-          : group.unresolved
-            ? '<span class="c-orange">has unresolved</span>'
-            : '<span class="c-green">ok</span>';
-        return `<div class="pipe-status-row">
-          <span class="pipe-status-name">${esc(source)} <span class="pipeline-arrow">→</span> PublicMetaDB</span>
-          <span class="pipe-status-stats">
-            <span>${group.lists} list${group.lists === 1 ? '' : 's'}</span>
-            <span>${group.fetched} fetched</span>
-            ${group.added ? `<span class="c-green">+${group.added}</span>` : ''}
-            ${group.removed ? `<span class="c-red">−${group.removed}</span>` : ''}
-            ${group.unresolved ? `<span class="c-orange">${group.unresolved} unresolved</span>` : ''}
-            ${group.errors ? `<span class="c-red">${group.errors} error${group.errors === 1 ? '' : 's'}</span>` : ''}
-          </span>
-          <span class="pipe-status-meta">${state}</span>
-        </div>`;
-      });
 
-      body.innerHTML = serviceRows.join('');
+      const cards = Array.from(groups.entries())
+        // Anything needing attention sorts first, so a broken service is not
+        // buried behind healthy ones on a wide grid.
+        .sort((a, b) => (b[1].errors - a[1].errors)
+          || (b[1].unresolved - a[1].unresolved)
+          || a[0].localeCompare(b[0]))
+        .map(([source, group]) => {
+          const level = group.errors ? 'err' : group.unresolved ? 'warn' : 'ok';
+          const stateText = group.errors
+            ? `${group.errors} error${group.errors === 1 ? '' : 's'}`
+            : group.unresolved ? `${group.unresolved} unresolved` : 'ok';
+          // Segments of what was fetched: added, carried over, unresolved.
+          const total = Math.max(1, group.fetched);
+          const pctAdded = Math.round((group.added / total) * 100);
+          const pctUnres = Math.round((group.unresolved / total) * 100);
+          const pctRest = Math.max(0, 100 - pctAdded - pctUnres);
+          const selected = currentServiceFilter === source;
+          return `<button type="button" class="svc-card ${selected ? 'active' : ''} ${
+              level === 'err' ? 'is-error' : level === 'warn' ? 'is-warn' : ''}"
+              data-service-card="${escAttr(source)}"
+              aria-pressed="${selected}"
+              title="${selected ? 'Show all services again' : `Show only ${escAttr(source)} lists below`}">
+            <span class="svc-card-head">
+              <span class="svc-name">${esc(source)}</span>
+              <span class="svc-status svc-${level}"><span class="svc-dot"></span>${esc(stateText)}</span>
+            </span>
+            <span class="svc-stats">
+              <span class="svc-stat"><span class="svc-stat-val">${group.fetched}</span><span class="svc-stat-label">fetched</span></span>
+              <span class="svc-stat"><span class="svc-stat-val ${group.added ? 'c-green' : ''}">${group.added ? '+' : ''}${group.added}</span><span class="svc-stat-label">added</span></span>
+              ${group.removed ? `<span class="svc-stat"><span class="svc-stat-val c-red">−${group.removed}</span><span class="svc-stat-label">removed</span></span>` : ''}
+              ${group.unresolved ? `<span class="svc-stat"><span class="svc-stat-val c-orange">${group.unresolved}</span><span class="svc-stat-label">unresolved</span></span>` : ''}
+            </span>
+            <span class="svc-bar" aria-hidden="true">
+              ${pctAdded ? `<span style="width:${pctAdded}%;background:var(--green)"></span>` : ''}
+              ${pctRest ? `<span style="width:${pctRest}%;background:var(--z700)"></span>` : ''}
+              ${pctUnres ? `<span style="width:${pctUnres}%;background:var(--orange)"></span>` : ''}
+            </span>
+            <span class="svc-foot">
+              ${group.lists} list${group.lists === 1 ? '' : 's'}
+              <span class="pipeline-arrow">→</span> PublicMetaDB
+            </span>
+          </button>`;
+        });
+
+      const note = currentServiceFilter
+        ? `<div class="svc-filter-note">
+             Showing only <strong>${esc(currentServiceFilter)}</strong> in Latest Sync Results below.
+             <button class="btn btn-sm" type="button" id="svc-clear-filter">Show all</button>
+           </div>`
+        : '';
+      body.innerHTML = `<div class="svc-grid">${cards.join('')}</div>${note}`;
+
+      body.querySelectorAll('[data-service-card]').forEach(card => {
+        card.addEventListener('click', () => {
+          // Clicking the active service clears the filter, so the card is a
+          // toggle rather than a one-way trip that needs a separate reset.
+          const source = card.dataset.serviceCard;
+          currentServiceFilter = currentServiceFilter === source ? '' : source;
+          currentResultsPage = 1;
+          renderDashboard(lastDashboardProfile);
+        });
+      });
+      const clear = el('svc-clear-filter');
+      if (clear) {
+        clear.addEventListener('click', (event) => {
+          event.stopPropagation();
+          currentServiceFilter = '';
+          currentResultsPage = 1;
+          renderDashboard(lastDashboardProfile);
+        });
+      }
     }
 
     // ── Cross-service pairs (dashboard) ─────────────────────────────────
@@ -4227,10 +4333,15 @@
 
     function filterResultsRows(rows) {
       if (!Array.isArray(rows)) return [];
-      if (currentResultsFilter === 'anime') return rows.filter(row => ((row.display_name || row.list_name || '').toLowerCase().includes('anime')));
-      if (currentResultsFilter === 'unresolved') return rows.filter(row => Number(row.items_skipped_unresolved || 0) > 0);
-      if (currentResultsFilter === 'ambiguous') return rows.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0 || String(row.unresolved_reason_counts && Object.keys(row.unresolved_reason_counts || {}).join(' ')).includes('ambiguous'));
-      return rows;
+      // The service card selection composes with the category filter rather
+      // than replacing it, so "Trakt" + "Unresolved" is expressible.
+      let out = currentServiceFilter
+        ? rows.filter(row => row.source_name === currentServiceFilter)
+        : rows;
+      if (currentResultsFilter === 'anime') return out.filter(row => ((row.display_name || row.list_name || '').toLowerCase().includes('anime')));
+      if (currentResultsFilter === 'unresolved') return out.filter(row => Number(row.items_skipped_unresolved || 0) > 0);
+      if (currentResultsFilter === 'ambiguous') return out.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0 || String(row.unresolved_reason_counts && Object.keys(row.unresolved_reason_counts || {}).join(' ')).includes('ambiguous'));
+      return out;
     }
 
     function renderResultFilters(rows) {
@@ -4242,13 +4353,22 @@
         ['unresolved', 'Unresolved'],
         ['ambiguous', 'Ambiguous'],
       ];
+      // Count within the selected service, or the buttons would advertise rows
+      // the current selection cannot show.
+      const scoped = currentServiceFilter
+        ? rows.filter(row => row.source_name === currentServiceFilter)
+        : rows;
       const counts = {
-        all: rows.length,
-        anime: rows.filter(row => ((row.display_name || row.list_name || '').toLowerCase().includes('anime'))).length,
-        unresolved: rows.filter(row => Number(row.items_skipped_unresolved || 0) > 0).length,
-        ambiguous: rows.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0).length,
+        all: scoped.length,
+        anime: scoped.filter(row => ((row.display_name || row.list_name || '').toLowerCase().includes('anime'))).length,
+        unresolved: scoped.filter(row => Number(row.items_skipped_unresolved || 0) > 0).length,
+        ambiguous: scoped.filter(row => Number((row.match_breakdown || {})['confidence:ambiguous'] || 0) > 0).length,
       };
-      node.innerHTML = filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${escAttr(key)}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
+      const serviceChip = currentServiceFilter
+        ? `<button class="btn btn-sm btn-primary" type="button" id="results-clear-service"
+                   title="Stop filtering by service">${esc(currentServiceFilter)} <span aria-hidden="true">×</span></button>`
+        : '';
+      node.innerHTML = serviceChip + filters.map(([key, label]) => `<button class="btn btn-sm ${currentResultsFilter === key ? 'btn-primary' : ''}" type="button" data-results-filter="${escAttr(key)}">${esc(label)}${counts[key] ? ` (${counts[key]})` : ''}</button>`).join('');
       node.querySelectorAll('[data-results-filter]').forEach(btn => {
         btn.addEventListener('click', () => {
           currentResultsFilter = btn.dataset.resultsFilter || 'all';
@@ -4256,6 +4376,14 @@
           renderDashboard(lastDashboardProfile);
         });
       });
+      const clearService = el('results-clear-service');
+      if (clearService) {
+        clearService.addEventListener('click', () => {
+          currentServiceFilter = '';
+          currentResultsPage = 1;
+          renderDashboard(lastDashboardProfile);
+        });
+      }
     }
 
     function renderDashboard(profile) {
@@ -4360,15 +4488,24 @@
           const removed = row.items_removed || 0;
           const unresolved = row.items_skipped_unresolved || 0;
           const errors = row.error_count || 0;
-          const pct = fetched ? Math.min(100, Math.round((resolved / fetched) * 100)) : 0;
-          const barColor = errors > 0 ? 'var(--red)' : unresolved > 0 ? 'var(--orange)' : 'var(--green)';
+          // Composition of what was fetched, matching the service cards. This
+          // used to plot resolved/fetched, which is ~100% for almost every list
+          // and so drew a full bar whether the run changed anything or not.
+          const barTotal = Math.max(1, fetched);
+          const pctAdded = Math.round((added / barTotal) * 100);
+          const pctUnres = Math.round((unresolved / barTotal) * 100);
+          const pctRest = Math.max(0, 100 - pctAdded - pctUnres);
           const sourceBadge = row.source_name ? esc(row.source_name) : '';
           const title = esc(row.display_name || row.list_name || 'Unknown list');
           return `<div class="result-row">
             <div class="result-row-left">
               <div class="result-row-title">${title}</div>
               <div class="result-row-source">${sourceBadge}${sourceBadge && fetched ? ' · ' : ''}${fetched} items → ${resolved} resolved</div>
-              <div class="result-bar"><div class="result-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
+              <div class="result-bar" aria-hidden="true">
+                ${pctAdded ? `<div class="result-bar-fill" style="width:${pctAdded}%;background:var(--green)"></div>` : ''}
+                ${pctRest ? `<div class="result-bar-fill" style="width:${pctRest}%;background:${errors > 0 ? 'var(--red)' : 'var(--z700)'}"></div>` : ''}
+                ${pctUnres ? `<div class="result-bar-fill" style="width:${pctUnres}%;background:var(--orange)"></div>` : ''}
+              </div>
             </div>
             <div class="result-row-right">
               ${added > 0 ? `<div class="result-stat"><div class="result-stat-val c-green">+${added}</div><div class="result-stat-label">added</div></div>` : ''}
@@ -5075,18 +5212,36 @@
         metaText = `${subtitle} · Updated ${timeAgo(lastRunAt)}`;
       }
 
+      // Same card vocabulary as the service grid above, so watch history reads
+      // as another service→PublicMetaDB pipeline rather than a separate widget.
+      // The headline used to repeat the first stat box verbatim, which is what
+      // made this panel twice the size it needed to be.
+      const level = quaternaryValue > 0 ? 'err' : (!enabled ? 'off' : 'ok');
+      const stateText = quaternaryValue > 0
+        ? `${quaternaryValue} error${quaternaryValue === 1 ? '' : 's'}`
+        : (enabled ? 'ok' : 'off');
+      const barTotal = Math.max(1, secondaryValue);
+      const pctAdded = Math.round((primaryValue / barTotal) * 100);
+      const pctRest = Math.max(0, 100 - pctAdded);
+
       return `
-        <div class="card activity-card">
-          <div class="card-label">${esc(title)}</div>
-          <div class="card-value">${primaryValue}<span class="card-sub">${esc(primaryLabel.toLowerCase())}</span></div>
-          <div class="activity-meta">${metaText}</div>
-          <div class="card-sub">${esc(statusText)}</div>
-          <div class="activity-stats">
-            <div class="activity-stat"><div class="activity-stat-label">${esc(primaryLabel)}</div><div class="activity-stat-value ${primaryValue > 0 ? 'c-green' : ''}">${primaryValue}</div></div>
-            <div class="activity-stat"><div class="activity-stat-label">${esc(secondaryLabel)}</div><div class="activity-stat-value">${secondaryValue}</div></div>
-            <div class="activity-stat"><div class="activity-stat-label">${esc(tertiaryLabel)}</div><div class="activity-stat-value ${tertiaryValue > 0 ? (title === 'Resume Progress' ? 'c-orange' : 'c-dim') : 'c-dim'}">${tertiaryValue}</div></div>
-            <div class="activity-stat"><div class="activity-stat-label">${esc(quaternaryLabel)}</div><div class="activity-stat-value ${quaternaryValue > 0 ? 'c-red' : 'c-dim'}">${quaternaryValue}</div></div>
+        <div class="svc-card svc-card-static ${level === 'err' ? 'is-error' : ''} ${enabled ? '' : 'svc-card-off'}">
+          <div class="svc-card-head">
+            <span class="svc-name">${esc(title)}</span>
+            <span class="svc-status svc-${level === 'off' ? 'muted' : level}"><span class="svc-dot"></span>${esc(stateText)}</span>
           </div>
+          <div class="svc-stats">
+            <span class="svc-stat"><span class="svc-stat-val">${secondaryValue}</span><span class="svc-stat-label">${esc(secondaryLabel)}</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${primaryValue > 0 ? 'c-green' : ''}">${primaryValue > 0 ? '+' : ''}${primaryValue}</span><span class="svc-stat-label">${esc(primaryLabel)}</span></span>
+            ${tertiaryValue > 0 ? `<span class="svc-stat"><span class="svc-stat-val c-dim">${tertiaryValue}</span><span class="svc-stat-label">${esc(tertiaryLabel)}</span></span>` : ''}
+            ${quaternaryValue > 0 ? `<span class="svc-stat"><span class="svc-stat-val c-red">${quaternaryValue}</span><span class="svc-stat-label">${esc(quaternaryLabel)}</span></span>` : ''}
+          </div>
+          <div class="svc-bar" aria-hidden="true">
+            ${pctAdded ? `<span style="width:${pctAdded}%;background:var(--green)"></span>` : ''}
+            ${pctRest ? `<span style="width:${pctRest}%;background:${quaternaryValue > 0 ? 'var(--red)' : 'var(--z700)'}"></span>` : ''}
+          </div>
+          <div class="svc-foot">${metaText}</div>
+          <div class="svc-foot">${esc(statusText)}</div>
         </div>
       `;
     }

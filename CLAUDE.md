@@ -54,13 +54,30 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Cross-service sync:** `src/providers.py` + `src/cross_sync.py`. The main pipeline only writes to PMDB; a *sync pair* copies one category from any provider to any other. `providers.py` wraps each client in a `ProviderAdapter` declaring the categories it can read/write; `cross_sync.CrossSyncService.run_pair()` fetches both sides, diffs on `providers.item_key`, and adds/removes on the target. Pairs live in `options.sync_pairs` (see `SyncPair` in `config.py`), and per-pair ownership in `activity_state.pair_managed_keys`. Endpoints: `/api/profile/pairs`, `/pairs/save`, `/pairs/run`.
 
-**Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS. Key patterns:
+**Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS.
+
+**Visual language** (shared tokens in `:root`): surfaces are `--surface` on a
+`--line` hairline at 12px radius; a value is titled by a monospace uppercase
+overline (`--mono`, 10px, `.1em` tracking, `--label` colour) and set at **weight
+500 with negative tracking**, not 700 — heavy weights at these sizes read as
+chunky against the thin rules. Bars are 2px. Colour is reserved for status dots
+(which carry a soft glow ring), deltas, and the primary action; everything else
+is greyscale. `.panel-header` is mono/uppercase, but meta text and controls
+inside it are explicitly reset to sentence case — they read as shouting
+otherwise. Selected filter buttons invert to a light fill rather than taking the
+brand accent, so a filter row reads as one segmented control. **No webfonts** —
+the app is self-hosted and must render offline, so `--mono` is a system stack.
+
+Key patterns:
 - `fetchStatus(force)` polls `/status` every 2s during sync; has `_statusGeneration` counter to discard stale renders
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
 - Sync settings (per-service list/status pickers, visibility, watchlist toggles, schedule, history/resume) live in the **Sync view** as collapsible per-service "pipeline" cards (`#sync-settings`, `togglePipelineCard`/`updatePipelineSummaries`), not in Settings — Settings keeps only Profile/Connections/Danger Zone. The inputs kept their original ids when they moved, so `gatherOptions`/`gatherCreds`/`populateForm` are unchanged; old `lists`/`behavior`/`rules` deep links redirect to the Sync view. The pipeline cards are *virtual* representations of the existing main pipeline (each service → PMDB) — they are not `options.sync_pairs` and no migration happens
-- The dashboard's Sync Pipelines panel (`renderPipelinesPanel`) aggregates `last_results`/`sync_live_results` per `source_name` into one status row per service. It covers *only* the main service→PMDB pipeline; cross-service pairs used to be appended to it, which made two different things read as one pipeline
+- The dashboard's Sync Pipelines panel (`renderPipelinesPanel`) aggregates `last_results`/`sync_live_results` per `source_name` into one **card** per service (`.svc-card`), sorted so services with errors then unresolved come first. It covers *only* the main service→PMDB pipeline; cross-service pairs used to be appended to it, which made two different things read as one pipeline
+- **Clicking a service card filters Latest Sync Results to that service.** `currentServiceFilter` is deliberately separate from `currentResultsFilter` so the two compose ("Trakt" + "Unresolved"); clicking the active card clears it, and the filter-button counts are scoped to the selected service so they never advertise rows the selection cannot show
+- **Bars show composition, not resolve rate.** The service cards and the result rows both segment `fetched` into added / carried-over / unresolved. The result rows previously plotted `resolved / fetched`, which is ~100% for nearly every list, so every row drew a full bar whether the run changed anything or not
+- The Activity Sync cards (`buildActivityCard`) reuse `.svc-card` so watch history and resume read as more service→PMDB pipelines. They are `.svc-card-static` (no click affordance). The headline number used to repeat the first stat box verbatim, which is what made that panel twice the size it needed to be
 - The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) is its own panel, hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
