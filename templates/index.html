@@ -392,6 +392,29 @@
     .poster-sub{font-size:11px;color:var(--z500);margin-top:2px}
     .poster-card-clickable{cursor:pointer;transition:border-color .15s,transform .15s}
     .poster-card-clickable:hover{border-color:var(--accent);transform:translateY(-2px)}
+    /* Expanding poster preview under a sync-result row. The wrapper animates
+       grid-template-rows 0fr→1fr, which transitions to the content's natural
+       height — max-height would need a guessed value that either clips a full
+       row or leaves the tail of the animation running over empty space. */
+    /* Row + its preview are one list entry, so the list's 1px gap draws one
+       divider per result rather than a second one under every collapsed panel. */
+    .result-entry{background:var(--surface)}
+    .result-preview{display:grid;grid-template-rows:0fr;transition:grid-template-rows .28s cubic-bezier(.4,0,.2,1);background:var(--z950);border-top:1px solid transparent}
+    .result-preview.open{grid-template-rows:1fr;border-top-color:var(--line)}
+    .result-preview-inner{overflow:hidden;min-height:0}
+    .result-preview-body{padding:16px 20px;opacity:0;transform:translateY(-4px);transition:opacity .2s ease .06s,transform .2s ease .06s}
+    .result-preview.open .result-preview-body{opacity:1;transform:none}
+    .result-poster-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px}
+    .result-poster{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--z900)}
+    .result-poster .poster-frame{border-radius:0}
+    .result-poster-name{padding:6px 7px;font-size:10.5px;color:var(--z400);line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .result-preview-note{margin-top:12px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--label)}
+    .result-preview-msg{font-size:12px;color:var(--z500)}
+    /* Only the chevron rotates; the row itself must not shift on open. */
+    .result-chevron{display:inline-block;margin-right:7px;color:var(--z600);font-size:10px;transition:transform .28s cubic-bezier(.4,0,.2,1)}
+    .result-row.expanded .result-chevron{transform:rotate(90deg);color:var(--z300)}
+    .result-row-expandable{cursor:pointer}
+    .result-row-expandable:hover{background:#141417}
     .library-detail{padding:16px 18px}
     .library-detail-header{display:flex;gap:14px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
     .library-detail-poster{width:56px;flex:none;aspect-ratio:2/3;border-radius:8px;overflow:hidden;background:var(--z900);position:relative}
@@ -4331,6 +4354,97 @@
       `;
     }
 
+    // ── Expandable list previews (Latest Sync Results) ──────────────────
+    // Keyed on list_name rather than row index or row_key: the dashboard
+    // re-renders on every status poll and rows move between pages and filters,
+    // so anything positional would reopen the wrong row.
+    const expandedResultRows = new Set();
+    const resultPreviewCache = {};      // list_name -> payload
+    const resultPreviewLoading = new Set();
+
+    function resultPreviewHtml(listName) {
+      if (resultPreviewLoading.has(listName)) {
+        return '<div class="result-preview-msg"><span class="spinner" style="vertical-align:middle;margin-right:8px"></span>Loading items…</div>';
+      }
+      const data = resultPreviewCache[listName];
+      if (!data) return '<div class="result-preview-msg">Loading items…</div>';
+      if (data.error) return `<div class="result-preview-msg" style="color:var(--orange)">${esc(data.error)}</div>`;
+      if (data.missing) return '<div class="result-preview-msg">This list is not in PublicMetaDB (yet). Run a sync to create it.</div>';
+      const items = data.items || [];
+      if (!items.length) return '<div class="result-preview-msg">This list is empty.</div>';
+
+      const posters = items.map(item => {
+        const name = item.title || (item.tmdb_id ? `TMDB ${item.tmdb_id}` : 'Unknown');
+        // The no-poster fallback already prints the name inside the frame, so
+        // repeating it underneath just showed every title twice.
+        const caption = item.poster_url ? `<div class="result-poster-name">${esc(name)}</div>` : '';
+        return `<div class="result-poster">
+          <div class="poster-frame">${libraryPosterHtml(item, name)}</div>${caption}
+        </div>`;
+      }).join('');
+
+      const more = data.total > data.shown ? ` · showing first ${data.shown}` : '';
+      const notice = !data.tmdb_configured
+        ? ' · connect a TMDB key in Settings for posters'
+        : (data.tmdb_error ? ` · TMDB: ${data.tmdb_error}` : '');
+      return `<div class="result-poster-strip">${posters}</div>
+        <div class="result-preview-note">${data.total} item${data.total === 1 ? '' : 's'}${esc(more)}${esc(notice)}</div>`;
+    }
+
+    function paintResultPreview(listName) {
+      const wrap = document.querySelector(`[data-result-preview="${CSS.escape(listName)}"]`);
+      if (!wrap) return;
+      const body = wrap.querySelector('.result-preview-body');
+      if (body) body.innerHTML = resultPreviewHtml(listName);
+    }
+
+    async function loadResultPreview(listName) {
+      if (resultPreviewCache[listName] || resultPreviewLoading.has(listName)) return;
+      resultPreviewLoading.add(listName);
+      paintResultPreview(listName);
+      let result;
+      try {
+        result = await apiPost('/api/profile/library/list-preview', { list_name: listName });
+      } catch {
+        resultPreviewCache[listName] = { error: 'Could not reach the server.' };
+        resultPreviewLoading.delete(listName);
+        paintResultPreview(listName);
+        return;
+      }
+      resultPreviewLoading.delete(listName);
+      if (result.ok) {
+        resultPreviewCache[listName] = result.data;
+      } else {
+        // formatApiError returns an object for the toast; this slot renders as
+        // text, so take the message rather than stringifying the whole thing.
+        const info = formatApiError(result.data, 'Could not load this list.');
+        resultPreviewCache[listName] = {
+          error: [info.message, info.hint].filter(Boolean).join(' '),
+        };
+      }
+      paintResultPreview(listName);
+    }
+
+    function toggleResultPreview(listName) {
+      if (!listName) return;
+      const row = document.querySelector(`[data-result-expand="${CSS.escape(listName)}"]`);
+      const wrap = document.querySelector(`[data-result-preview="${CSS.escape(listName)}"]`);
+      if (!row || !wrap) return;
+      const opening = !expandedResultRows.has(listName);
+      if (opening) expandedResultRows.add(listName);
+      else expandedResultRows.delete(listName);
+      // Toggle classes directly rather than re-rendering the panel, so the
+      // grid-template-rows transition actually runs from its current state.
+      row.classList.toggle('expanded', opening);
+      row.setAttribute('aria-expanded', String(opening));
+      row.title = opening ? 'Hide the items in this list' : 'Show the items in this list';
+      wrap.classList.toggle('open', opening);
+      if (opening) {
+        paintResultPreview(listName);
+        loadResultPreview(listName);
+      }
+    }
+
     function filterResultsRows(rows) {
       if (!Array.isArray(rows)) return [];
       // The service card selection composes with the category filter rather
@@ -4497,9 +4611,17 @@
           const pctRest = Math.max(0, 100 - pctAdded - pctUnres);
           const sourceBadge = row.source_name ? esc(row.source_name) : '';
           const title = esc(row.display_name || row.list_name || 'Unknown list');
-          return `<div class="result-row">
+          // Only rows backed by a real PMDB list can show its contents; history
+          // and resume rows carry no list_name and stay inert.
+          const listName = row.list_name || '';
+          const expandable = !!listName;
+          const open = expandable && expandedResultRows.has(listName);
+          return `<div class="result-entry">
+          <div class="result-row ${expandable ? 'result-row-expandable' : ''} ${open ? 'expanded' : ''}"
+                       ${expandable ? `data-result-expand="${escAttr(listName)}" role="button" tabindex="0"
+                          aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} the items in this list"` : ''}>
             <div class="result-row-left">
-              <div class="result-row-title">${title}</div>
+              <div class="result-row-title">${expandable ? '<span class="result-chevron" aria-hidden="true">▶</span>' : ''}${title}</div>
               <div class="result-row-source">${sourceBadge}${sourceBadge && fetched ? ' · ' : ''}${fetched} items → ${resolved} resolved</div>
               <div class="result-bar" aria-hidden="true">
                 ${pctAdded ? `<div class="result-bar-fill" style="width:${pctAdded}%;background:var(--green)"></div>` : ''}
@@ -4515,6 +4637,11 @@
               ${added === 0 && removed === 0 && unresolved === 0 && errors === 0 ? `<div class="result-stat"><div class="result-stat-val c-dim">—</div><div class="result-stat-label">no changes</div></div>` : ''}
               <div class="result-row-actions">${buildDeleteActions(row)}</div>
             </div>
+          </div>
+          ${expandable ? `<div class="result-preview ${open ? 'open' : ''}" data-result-preview="${escAttr(listName)}">
+            <div class="result-preview-inner"><div class="result-preview-body">${
+              open ? resultPreviewHtml(listName) : ''}</div></div>
+          </div>` : ''}
           </div>`;
         }).join('');
         el('results-body').innerHTML = `<div class="result-list">${rowsHtml}</div>${pagerHtml}`;
@@ -4529,6 +4656,19 @@
         });
         document.querySelectorAll('[data-row-detail]').forEach(node => {
           node.addEventListener('click', () => openRunDetails(node.dataset.rowDetail, node.dataset.rowKey || ''));
+        });
+        document.querySelectorAll('[data-result-expand]').forEach(node => {
+          const activate = (event) => {
+            // The row carries Details/Delete buttons; a click on those must not
+            // also toggle the row underneath them.
+            if (event.target.closest('.result-row-actions')) return;
+            event.preventDefault();
+            toggleResultPreview(node.dataset.resultExpand);
+          };
+          node.addEventListener('click', activate);
+          node.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') activate(event);
+          });
         });
         const prevPage = el('results-prev-page');
         const nextPage = el('results-next-page');

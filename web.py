@@ -2179,6 +2179,73 @@ def api_profile_library_items():
     })
 
 
+#: How many posters a dashboard row preview shows before saying "+N more".
+LIST_PREVIEW_LIMIT = 18
+
+
+@app.route("/api/profile/library/list-preview", methods=["POST"])
+def api_profile_library_list_preview():
+    """Posters for one synced list, addressed by *name* rather than PMDB id.
+
+    The dashboard's sync results only carry the list name — the id lives in the
+    profile's managed_lists — so resolving it here keeps that mapping on the
+    server instead of shipping the whole managed_lists table to the client.
+    """
+    pmdb, tmdb_key, private_profile, error_response = _library_context()
+    if error_response is not None:
+        return error_response
+    body = request.get_json(silent=True) or {}
+    list_name = str(body.get("list_name", "")).strip()
+    if not list_name:
+        return _json_error("list_name is required", 400)
+
+    list_id = ""
+    for entry in (private_profile.get("managed_lists") or []):
+        if str(entry.get("list_name", "")).strip() == list_name:
+            list_id = str(entry.get("list_id", "")).strip()
+            break
+    if not list_id:
+        # A list SyncMeta has not recorded as managed (or one renamed since) can
+        # still be looked up by name rather than reporting it as missing.
+        try:
+            found = pmdb.find_list_by_name(list_name)
+        except Exception as exc:
+            logger.warning("List preview: PMDB lookup failed for %r: %s", list_name, exc)
+            return _json_error("Could not look up this list", 502)
+        list_id = str((found or {}).get("id", "")).strip()
+    if not list_id:
+        return jsonify({
+            "items": [], "total": 0, "shown": 0,
+            "tmdb_configured": bool(tmdb_key), "tmdb_error": "",
+            "missing": True,
+        })
+
+    try:
+        raw_items = pmdb.get_list_items(list_id)
+    except Exception as exc:
+        logger.warning("List preview: PMDB fetch failed for %s: %s", list_id, exc)
+        return _json_error("Could not load items for this list", 502)
+
+    total = len(raw_items)
+    items = [{
+        "id": str(entry.get("id", "")),
+        "tmdb_id": entry.get("tmdb_id"),
+        "media_type": str(entry.get("media_type", "") or ""),
+        "title": str(entry.get("title") or entry.get("name") or "").strip(),
+    } for entry in raw_items[:LIST_PREVIEW_LIMIT]]
+    # Only the shown slice is enriched — pulling TMDB details for a 400-item
+    # list to render 18 posters is the expensive way to do this.
+    items, tmdb_error = _enrich_library_items(items, tmdb_key)
+    return jsonify({
+        "items": items,
+        "total": total,
+        "shown": len(items),
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+        "missing": False,
+    })
+
+
 def _normalized_history_entries(pmdb: PublicMetaDBClient) -> list[dict]:
     raw_entries = pmdb.get_watched_history()
     entries = []
