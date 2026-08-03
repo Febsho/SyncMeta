@@ -482,7 +482,10 @@
       .cards{grid-template-columns:1fr 1fr}
       th,td{padding:8px 10px}
       .catalog-search{flex-direction:column}
-      .settings-layout{grid-template-columns:1fr;padding:16px 0 48px;gap:0}
+      /* minmax(0,1fr), not 1fr: a grid item's default min-width is auto, so a
+         wide child (the settings nav row) stretched the track past the viewport
+         and gave the whole page a horizontal scroll at narrow widths. */
+      .settings-layout{grid-template-columns:minmax(0,1fr);padding:16px 0 48px;gap:0}
       .settings-sidebar{position:static;margin-bottom:4px}
       .settings-nav{display:flex;flex-direction:row;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding:0 0 1px;border-bottom:1px solid var(--z800);gap:0;background:transparent}
       .settings-nav::-webkit-scrollbar{display:none}
@@ -507,15 +510,27 @@
       .inline-actions{min-width:0;flex-wrap:wrap}
       .next-sync-badge{font-size:11px;padding:5px 10px}
       .actions-meta{font-size:12px}
+      /* "SIMKL → PublicMetaDB" was nowrap, so on a narrow phone it pushed the
+         row's chevron off the right edge instead of wrapping. */
+      .pipeline-head{gap:8px;padding:12px 14px}
+      .pipeline-title{white-space:normal}
+      .pipeline-summary{min-width:0}
+      /* Seven nav items do not fit a phone. They used to be clipped by the flex
+         row with a hidden scrollbar, so Settings — which holds Connections, and
+         is where a new user has to go first — was off the right edge with
+         nothing on screen suggesting it existed. They wrap to a second row
+         instead: every destination stays visible and nothing depends on
+         guessing that the bar scrolls. */
+      .nav-inner{flex-direction:column;align-items:stretch;height:auto;gap:2px;padding:8px 0 0}
+      .nav-links{flex-wrap:wrap;justify-content:center;row-gap:0}
+      .nav-link{padding:10px 12px;font-size:13px}
+      .nav-external{padding:10px 12px;font-size:13px}
     }
     @media (max-width:480px){
       nav{padding:0 12px}
-      .nav-inner{height:50px}
       .nav-logo{font-size:16px}
-      .nav-links{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex-shrink:1}
-      .nav-links::-webkit-scrollbar{display:none}
-      .nav-link{padding:12px 10px;font-size:13px}
-      .nav-external{padding:12px 8px;font-size:13px}
+      .nav-link{padding:9px 10px;font-size:13px}
+      .nav-external{padding:9px 10px;font-size:13px}
       .page{padding:0 12px}
       .hero{padding:40px 12px}
       .hero-card{padding:28px 16px 24px;border-radius:12px}

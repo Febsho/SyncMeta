@@ -67,6 +67,12 @@ inside it are explicitly reset to sentence case — they read as shouting
 otherwise. Selected filter buttons invert to a light fill rather than taking the
 brand accent, so a filter row reads as one segmented control. **No webfonts** —
 the app is self-hosted and must render offline, so `--mono` is a system stack.
+Below 700px the nav **wraps to a second row** rather than scrolling behind a
+hidden scrollbar — seven items do not fit a phone, and the clipped ones included
+Settings, which holds Connections and is where a new user has to start. No view
+may give the page a horizontal scrollbar at 320px; a grid track written `1fr`
+needs `minmax(0,1fr)`, since a grid item's default `min-width:auto` lets a wide
+child stretch the track past the viewport.
 A service's state is always a **dot plus its name**, never prose: the pair
 capability row (`.pair-cap`) is chips in that vocabulary, having been a run of
 `"Trakt: not connected"` lines joined by `<br>`. Form controls outside a
