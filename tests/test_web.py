@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1408,6 +1409,39 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(reset_response.status_code, 400)
         self.assertEqual(reset_data["error"], "Profile UUID is required")
+
+    def test_scheduler_waits_before_claiming_anything_on_startup(self) -> None:
+        # The scheduler is started by the first HTTP request, and every profile
+        # whose schedule lapsed while the server was down is due immediately.
+        # Without a grace period that request triggers a stampede of syncs and
+        # then has to compete with it, so the site hangs for exactly the person
+        # who woke it up.
+        claimed: list[int] = []
+
+        class _Store:
+            def claim_due_profiles(self, limit=None):
+                claimed.append(limit)
+                return []
+
+        scheduler = web.ProfileScheduler(_Store(), poll_seconds=60)
+        original_grace = web.SCHEDULER_STARTUP_GRACE_SECONDS
+        try:
+            web.SCHEDULER_STARTUP_GRACE_SECONDS = 30
+            scheduler.start()
+            time.sleep(0.4)
+            self.assertEqual(claimed, [], "claimed profiles during the startup grace period")
+
+            # With no grace it polls straight away, and asks for a bounded batch
+            # rather than every due profile at once.
+            web.SCHEDULER_STARTUP_GRACE_SECONDS = 0
+            immediate = web.ProfileScheduler(_Store(), poll_seconds=60)
+            immediate.start()
+            time.sleep(0.4)
+            self.assertEqual(claimed, [web.SCHEDULER_CLAIM_BATCH])
+            immediate._stop.set()
+        finally:
+            web.SCHEDULER_STARTUP_GRACE_SECONDS = original_grace
+            scheduler._stop.set()
 
     def test_profile_save_rate_limits_password_guesses(self) -> None:
         # Saving with a UUID + password and no session signs in and hands back a

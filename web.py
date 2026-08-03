@@ -80,6 +80,13 @@ PROFILE_STORE_FILE = Path(
 )
 SCHEDULER_POLL_SECONDS = max(5, int(os.getenv("SYNCMETA_SCHEDULER_POLL_SECONDS", "5") or "5"))
 MAX_CONCURRENT_SYNCS = max(1, int(os.getenv("SYNCMETA_MAX_CONCURRENT_SYNCS", "1") or "1"))
+# Head start for the web tier before the scheduler claims anything. See
+# ProfileScheduler._run: the first request is what starts the scheduler, so
+# without this it competes with the stampede it just caused.
+SCHEDULER_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS", "20") or "20"))
+# How many profiles one poll may claim. Beyond the pool's capacity a claim only
+# fills the queue while showing the profile as running.
+SCHEDULER_CLAIM_BATCH = max(1, int(os.getenv("SYNCMETA_SCHEDULER_CLAIM_BATCH", str(MAX_CONCURRENT_SYNCS)) or "1"))
 SESSION_COOKIE_NAME = "syncmeta_session"
 ACCESS_COOKIE_NAME = "syncmeta_site_access"
 SESSION_TTL_SECONDS = int(os.getenv("SYNCMETA_SESSION_TTL_SECONDS", "2592000"))
@@ -1419,9 +1426,20 @@ class ProfileScheduler:
         self._thread.start()
 
     def _run(self) -> None:
+        # The scheduler is started lazily by the first HTTP request, and every
+        # profile whose schedule lapsed while the server was down is due the
+        # instant it polls. So the very request that brings the app up used to
+        # trigger a stampede of syncs and then have to compete with it — after a
+        # restart the site appeared to hang for exactly the person who woke it.
+        # Serve for a moment before claiming anything.
+        if SCHEDULER_STARTUP_GRACE_SECONDS > 0:
+            self._stop.wait(SCHEDULER_STARTUP_GRACE_SECONDS)
         first_poll = True
         while not self._stop.is_set():
-            due = self._store.claim_due_profiles()
+            # Claimed in batches: everything past the pool's capacity would only
+            # sit in the queue anyway, while being flagged as running to the
+            # dashboard. The rest is picked up by the next poll.
+            due = self._store.claim_due_profiles(limit=SCHEDULER_CLAIM_BATCH)
             for i, profile in enumerate(due):
                 if first_poll and i > 0:
                     # Stagger startup syncs by 30s each to avoid hammering APIs

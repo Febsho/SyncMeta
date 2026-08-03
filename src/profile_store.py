@@ -1541,12 +1541,20 @@ class ProfileStore:
             claimed["pending_sync_modes"] = self._normalize_sync_modes(sync_modes)
             return claimed
 
-    def claim_due_profiles(self) -> list[dict]:
+    def claim_due_profiles(self, limit: int | None = None) -> list[dict]:
+        """Claim profiles whose schedule is due, at most `limit` of them.
+
+        A claim marks the profile as running, so claiming more than the runner
+        can actually start just fills its queue while the dashboard reports work
+        that has not begun. The remainder stays due for the next poll.
+        """
         due_profiles: list[dict] = []
         now = utc_now()
         with self._lock:
             changed = False
             for profile in self._profiles.values():
+                if limit is not None and len(due_profiles) >= limit:
+                    break
                 if profile["sync_running"]:
                     continue
                 options = profile.get("options", {})

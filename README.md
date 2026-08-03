@@ -134,6 +134,8 @@ the code default, both are listed.
 | `DISABLE_PROFILE_SCHEDULER` | `0` | `1` turns off all automatic background sync. |
 | `SYNCMETA_SCHEDULER_POLL_SECONDS` | `5` | How often due profiles are checked. Minimum 5. |
 | `SYNCMETA_MAX_CONCURRENT_SYNCS` | `1` | Profiles allowed to sync at the same time. |
+| `SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS` | `20` | Head start for the web tier before the first claim. `0` disables. |
+| `SYNCMETA_SCHEDULER_CLAIM_BATCH` | max concurrent | Profiles claimed per poll. |
 | `SYNCMETA_SCHEDULE_JITTER_SECONDS` | `900` | Maximum stagger applied to automatic runs. |
 | `SYNCMETA_LIST_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for list sync. |
 | `SYNCMETA_HISTORY_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for watch history. |
@@ -158,8 +160,8 @@ the code default, both are listed.
 | Variable | Default | Description |
 |---|---:|---|
 | `SYNCMETA_PROFILE_LOG_LIMIT` | `500` | Log lines kept per profile. Minimum 100. |
-| `SYNCMETA_GUNICORN_WORKERS` | `1` | Gunicorn workers. |
-| `SYNCMETA_GUNICORN_THREADS` | `2` | Gunicorn threads. |
+| `SYNCMETA_GUNICORN_WORKERS` | `1` | Gunicorn workers. **Keep at 1** — see below. |
+| `SYNCMETA_GUNICORN_THREADS` | `6` | Gunicorn threads. Raise this, not workers. |
 | `SYNCMETA_GUNICORN_TIMEOUT` | `120` | Gunicorn request timeout in seconds. |
 
 ### Docker limits
@@ -174,21 +176,12 @@ Read by `docker-compose.yml`, not by the app.
 
 ### Two things to know
 
-**The shipped `docker-compose.yml` forwards only some of these.** Putting a
-variable in `.env` is not enough on its own — Compose passes through just the
-list under `environment:`. `ADMIN_PASSWORD`, `SITE_ACCESS_PASSWORD`, the session,
-login and access limits, `DISABLE_PROFILE_SCHEDULER`,
-`SYNCMETA_SCHEDULER_POLL_SECONDS`, `SYNCMETA_MASTER_KEY_FILE`,
-`SYNCMETA_MAPPING_WRITE_WORKERS`, the per-mode jitter overrides,
-`SYNCMETA_PROFILE_LOG_LIMIT` and `SYNCMETA_GUNICORN_TIMEOUT` are not forwarded.
-To use them, add them under `environment:` yourself, or point the service at
-your `.env`:
 
-```yaml
-services:
-  syncmeta:
-    env_file: .env
-```
+**Never run more than one Gunicorn worker.** The scheduler and the sync runner
+live inside the web process, so a second worker is a second scheduler claiming
+and running every sync a second time. Raise `SYNCMETA_GUNICORN_THREADS` instead
+— threads share the one process and are what keep the dashboard answering while
+a sync is blocked on a slow provider.
 
 **Provider variables in `src/config.py` are dead.** `SIMKL_*`, `TRAKT_*`,
 `ANILIST_*`, `MDBLIST_*`, `PMDB_API_KEY` and `SYNC_*` are left over from the

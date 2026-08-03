@@ -97,6 +97,21 @@ Key patterns:
 
 ## Key Invariants
 
+**The scheduler shares the web process, so it must yield to it.** `ProfileScheduler`
+is started lazily by `_before_request`, and every profile whose schedule lapsed
+while the server was down is due the moment it first polls — so the request that
+boots the app used to trigger a stampede of syncs and then queue behind it, which
+is what made the site appear to hang (and the proxy return 502) right after a
+restart. `SCHEDULER_STARTUP_GRACE_SECONDS` gives the web tier a head start, and
+`claim_due_profiles(limit=...)` claims at most `SCHEDULER_CLAIM_BATCH` per poll —
+a claim marks a profile running, so claiming past the runner's capacity only
+fills its queue while the dashboard advertises work that has not started.
+**Gunicorn workers must stay at 1**: the scheduler and `SyncRunner` are
+per-process, so a second worker is a second scheduler running every sync twice.
+Threads are the dial to turn. Note `sync_running` is deliberately *not*
+persisted (`_hydrate_profile` forces it `False`), so a killed process cannot
+wedge a profile as permanently running; there is a test pinning that.
+
 **PMDB Watchlist managed-keys filter:** `_remove_stale` in `sync_service.py` accepts `managed_keys: frozenset[str] | None`. If `managed_keys` is truthy (non-empty), only items whose key is in `managed_keys` are eligible for removal — this preserves manually-added PMDB entries. An empty frozenset (bootstrap/first-sync) is falsy and falls back to full-removal behavior. Keys are persisted in `activity_state.pmdb_watchlist_managed_keys` by `_merge_activity_results` in `profile_store.py` after each sync.
 
 **Two-way is one pass, never two one-way runs.** `SyncPair.mode` is `one_way`

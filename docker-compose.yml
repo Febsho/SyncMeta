@@ -5,6 +5,13 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    # Everything in .env reaches the container. Without this only the variables
+    # named below were passed, so ADMIN_PASSWORD and SITE_ACCESS_PASSWORD could
+    # be set in .env and silently do nothing — /admin just stayed disabled.
+    # required: false keeps `docker compose up` working with no .env at all.
+    env_file:
+      - path: .env
+        required: false
     environment:
       PROFILE_STORE_FILE: /app/data/profiles.json
       SYNCMETA_MASTER_KEY: ${SYNCMETA_MASTER_KEY:-}
@@ -18,10 +25,13 @@ services:
       SYNCMETA_PREWARM_WORKERS: ${SYNCMETA_PREWARM_WORKERS:-2}
       SYNCMETA_ANILIST_PREWARM_LIMIT: ${SYNCMETA_ANILIST_PREWARM_LIMIT:-50}
       SYNCMETA_SCHEDULE_JITTER_SECONDS: ${SYNCMETA_SCHEDULE_JITTER_SECONDS:-900}
+      # Keep at 1. The scheduler and sync runner live in the process, so a
+      # second worker is a second scheduler running the same syncs twice.
       SYNCMETA_GUNICORN_WORKERS: ${SYNCMETA_GUNICORN_WORKERS:-1}
-      SYNCMETA_GUNICORN_THREADS: ${SYNCMETA_GUNICORN_THREADS:-2}
-      # Optional: add SITE_ACCESS_PASSWORD in your own override or env_file
-      # if you want a shared password before the app loads.
+      SYNCMETA_GUNICORN_THREADS: ${SYNCMETA_GUNICORN_THREADS:-6}
+      SYNCMETA_GUNICORN_TIMEOUT: ${SYNCMETA_GUNICORN_TIMEOUT:-120}
+      SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS: ${SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS:-20}
+      SYNCMETA_MAPPING_WRITE_WORKERS: ${SYNCMETA_MAPPING_WRITE_WORKERS:-1}
     volumes:
       - ./data:/app/data
     cpus: ${SYNCMETA_CPU_LIMIT:-1.0}

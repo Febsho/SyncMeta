@@ -285,6 +285,46 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertFalse(due[0]["pending_sync_modes"]["lists"])
         self.assertTrue(due[0]["pending_sync_modes"]["history"])
 
+    def test_a_killed_process_does_not_wedge_a_profile_as_running(self) -> None:
+        # sync_running is deliberately not persisted (_hydrate_profile forces it
+        # False), so a process killed mid-sync cannot leave a profile stuck with
+        # claim_due_profiles skipping it forever. Pinned by a test because
+        # persisting the flag "for accuracy" would silently reintroduce that.
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        self.store._profiles[profile_id]["next_sync_at"] = "2000-01-01T00:00:00+00:00"
+        self.store._save_locked()
+
+        self.assertEqual(len(self.store.claim_due_profiles()), 1)
+        self.assertTrue(self.store._profiles[profile_id]["sync_running"])
+
+        on_disk = json.loads((Path(self.tmpdir.name) / "profiles.json").read_text())
+        self.assertNotIn("sync_running", on_disk["profiles"][profile_id])
+
+        restarted = ProfileStore(Path(self.tmpdir.name) / "profiles.json")
+        self.assertFalse(restarted._profiles[profile_id]["sync_running"])
+        restarted._profiles[profile_id]["next_sync_at"] = "2000-01-01T00:00:00+00:00"
+        self.assertEqual(len(restarted.claim_due_profiles()), 1)
+
+    def test_claim_due_profiles_honours_a_batch_limit(self) -> None:
+        ids = []
+        for _ in range(3):
+            created = self.store.create_profile("secret", self.credentials, self.options)
+            ids.append(created["profile_id"])
+            self.store._profiles[created["profile_id"]]["next_sync_at"] = "2000-01-01T00:00:00+00:00"
+        self.store._save_locked()
+
+        first = self.store.claim_due_profiles(limit=2)
+        self.assertEqual(len(first), 2)
+        # The unclaimed one is still due and is picked up by the next poll.
+        second = self.store.claim_due_profiles(limit=2)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(
+            sorted(p["profile_id"] for p in first + second), sorted(ids)
+        )
+        # No limit keeps the old behaviour.
+        self.assertEqual(self.store.claim_due_profiles(), [])
+
     def test_sync_success_persists_managed_lists(self) -> None:
         created = self.store.create_profile("secret", self.credentials, self.options)
 
