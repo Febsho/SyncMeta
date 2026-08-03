@@ -67,9 +67,22 @@ inside it are explicitly reset to sentence case — they read as shouting
 otherwise. Selected filter buttons invert to a light fill rather than taking the
 brand accent, so a filter row reads as one segmented control. **No webfonts** —
 the app is self-hosted and must render offline, so `--mono` is a system stack.
+Below 700px the nav **wraps to a second row** rather than scrolling behind a
+hidden scrollbar — seven items do not fit a phone, and the clipped ones included
+Settings, which holds Connections and is where a new user has to start. No view
+may give the page a horizontal scrollbar at 320px; a grid track written `1fr`
+needs `minmax(0,1fr)`, since a grid item's default `min-width:auto` lets a wide
+child stretch the track past the viewport.
+A service's state is always a **dot plus its name**, never prose: the pair
+capability row (`.pair-cap`) is chips in that vocabulary, having been a run of
+`"Trakt: not connected"` lines joined by `<br>`. Form controls outside a
+`.form-row` need the dark treatment applied explicitly (`.pair-flow-end select`,
+`.library-picker-controls select`) or they fall back to the browser's native
+light control on a black page.
 
 Key patterns:
 - `fetchStatus(force)` polls `/status` every 2s during sync; has `_statusGeneration` counter to discard stale renders
+- **Every poller skips its work while `document.hidden`.** A background tab still runs its timers, so an unattended dashboard kept requesting `/status` every 2s for a whole sync, plus the log and live-activity tails at 2s each. The intervals stay installed and the callback returns early instead, so no polling state is torn down and rebuilt; one `visibilitychange` listener forces an immediate refresh of whatever is running on return, so a hidden tab never comes back showing stale numbers
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
@@ -178,6 +191,23 @@ come back empty reads as a broken feature. It rides to the UI as
 `has_list_search` in `describe()` — the unconfigured-provider stub in
 `_pair_capabilities` must keep answering the same shape.
 
+**Running pairs saves them first.** A run executes server-side against the
+*saved* pairs, so a card the user just added is invisible to it — "Run All" on a
+screen showing one pair used to answer "No sync pairs configured".
+`runPairs()` therefore calls `savePairs(false)` when `pairsHaveUnsavedEdits()`
+and aborts the run if that save fails. Dirtiness is a comparison against
+`pairsSavedSnapshot` (the serialized payload as the server last reported it, set
+in `fetchPairs`) rather than a flag, because a pair is mutated from a dozen
+places that would each have to remember to set one. The run controls live in the
+Sync Pairs **panel header** only: they were duplicated in the page topbar under
+the same ids, so `getElementById` bound the topbar copy and the lower buttons
+were dead — and "Run All" beside the service pipelines read as running those too.
+
+**A 200 from `/pairs/run` is not a successful run.** Provider read/write
+failures come back as per-run and per-category `errors` strings on an otherwise
+fine payload, so the toast counts them and reports an error rather than a green
+"complete" contradicting the red text rendered directly beneath it.
+
 **The pair editor renders scoped, not wholesale.** A provider can offer a
 hundred lists, so rebuilding every card on every keystroke is what made the
 editor lag. Events are delegated once onto `#pairs-list`; `renderPairs()`
@@ -258,6 +288,28 @@ succeed.
 matcher declined (unverified zero-vote community data, or a blocklisted id) purely
 as a hint for the user. Never return it as an automatic resolution — that
 re-applies the mapping the safety guards refused.
+
+**The profile UUID is a handle, not a credential.** It is printed in the UI, kept
+in `localStorage`, and `_public_profile_by_request_id` accepts it unauthenticated
+for read-only dashboard state — so nothing that grants *authority* may rest on
+knowing it. `/api/profile/password/reset` therefore requires `current_password`
+whether or not a session is present (`ProfileStore.change_profile_password`
+authenticates before rehashing; there is no unauthenticated
+`reset_..._by_id` path, and adding one back is an account takeover: the endpoint
+also mints a session cookie). It shares `_login_limiter` with sign-in, since a
+password-verifying endpoint without a limiter is a guessing oracle. A successful
+change calls `ServerSessionStore.destroy_profile_sessions`, which bumps an
+in-memory per-profile epoch stamped into every signed token — sessions are
+stateless, so this is the only way to evict cookies issued earlier, and like
+`_revoked` it is best-effort across a process restart. There is no
+forgot-password path by design; recovery is the operator's `profiles.json`.
+
+**Every door that checks a password shares `_login_limiter`.** `/api/profile/save`
+with a UUID + password and no session authenticates and mints a session cookie —
+it is a second sign-in path, not just a write — so it throttles on the same
+client key as `/api/profile/login` and `/api/profile/password/reset`. Note config
+validation runs *before* authentication there, so a limiter-exempt branch must
+stay limited to requests that never reach `update_profile`.
 
 **Log endpoints are session-scoped.** `/api/logs` and `/api/logs/clear` take the
 profile from the session and ignore any caller-supplied value;

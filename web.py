@@ -143,15 +143,32 @@ class ServerSessionStore:
         self._lock = threading.RLock()
         self._sessions: dict[str, dict] = {}
         self._revoked: dict[str, float] = {}
+        # Sessions are stateless signed tokens, so there is no list of issued
+        # cookies to walk when a profile needs every device signed out. Each
+        # token carries the profile's epoch instead; bumping it strands every
+        # token minted before the bump. Best effort, like _revoked: an in-memory
+        # counter does not survive a process restart.
+        self._epochs: dict[str, int] = {}
 
     def create(self, profile_id: str) -> str:
         now = time.time()
+        with self._lock:
+            epoch = self._epochs.get(profile_id, 0)
         payload = {
             "profile_id": profile_id,
             "nonce": secrets.token_urlsafe(8),
             "iat": int(now),
+            "epoch": epoch,
         }
         return self._signer.dumps(payload)
+
+    def destroy_profile_sessions(self, profile_id: str) -> None:
+        """Invalidate every signed session previously issued for a profile."""
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return
+        with self._lock:
+            self._epochs[profile_id] = self._epochs.get(profile_id, 0) + 1
 
     def get_profile_id(self, token: str | None) -> str | None:
         if not token:
@@ -163,8 +180,16 @@ class ServerSessionStore:
                 return None
         try:
             payload = self._signer.loads(token, max_age=self._ttl_seconds)
-            profile_id = str(payload.get("profile_id", "")).strip() if isinstance(payload, dict) else ""
-            return profile_id or None
+            if not isinstance(payload, dict):
+                return None
+            profile_id = str(payload.get("profile_id", "")).strip()
+            if not profile_id:
+                return None
+            with self._lock:
+                current_epoch = self._epochs.get(profile_id, 0)
+            if int(payload.get("epoch", 0) or 0) < current_epoch:
+                return None
+            return profile_id
         except SignatureExpired:
             return None
         except BadSignature:
@@ -1562,18 +1587,39 @@ def api_profile_logout():
 def api_profile_password_reset():
     body = request.get_json(silent=True) or {}
     new_password = str(body.get("new_password", ""))
+    current_password = str(body.get("current_password", "") or body.get("password", ""))
     profile_id = _current_profile_id() or str(body.get("profile_id", "")).strip()
+    client_key = _request_client_key()
 
     if not profile_id:
         return _json_error("Profile UUID is required", 400)
+    if not current_password:
+        return _json_error("Current profile password is required", 400)
+
+    # Same limiter as sign-in: this endpoint verifies a password, so without it
+    # it would be an unthrottled oracle for guessing one.
+    if _login_limiter.is_limited(client_key):
+        return _json_error(
+            "Too many password attempts. Please wait and try again.",
+            429,
+            hint=f"Locked for up to {LOGIN_WINDOW_SECONDS // 60} minutes. Wait before retrying.",
+        )
 
     try:
-        profile = _profile_store.reset_profile_password_by_id(profile_id, new_password)
+        profile = _profile_store.change_profile_password(profile_id, current_password, new_password)
     except KeyError:
+        _login_limiter.record_failure(client_key)
         return _json_error("Profile not found", 404)
+    except PermissionError:
+        _login_limiter.record_failure(client_key)
+        return _json_error("Invalid profile password", 401)
     except ValueError as exc:
         return _json_error(str(exc), 400)
 
+    _login_limiter.clear(client_key)
+    # Any other browser holding a session for this profile is invalidated: a
+    # password change is how an owner locks out a device they no longer trust.
+    _session_store.destroy_profile_sessions(profile["profile_id"])
     session_token = _session_store.create(profile["profile_id"])
     return _with_session_cookie(_profile_response(profile, include_credentials=True), session_token)
 
@@ -1945,6 +1991,18 @@ def api_profile_save():
     session_profile_id = _current_profile_id()
     validation_credentials = credentials
 
+    # Saving with a UUID + password and no session authenticates and mints a
+    # session cookie, so it is a second sign-in door. Without the limiter it is
+    # an unthrottled way to guess a password that /api/profile/login rate-limits.
+    guesses_password = not session_profile_id and bool(profile_id)
+    client_key = _request_client_key()
+    if guesses_password and _login_limiter.is_limited(client_key):
+        return _json_error(
+            "Too many sign-in attempts. Please wait and try again.",
+            429,
+            hint=f"Locked for up to {LOGIN_WINDOW_SECONDS // 60} minutes. Wait before retrying.",
+        )
+
     try:
         if session_profile_id:
             existing_profile = _profile_store.get_private_profile_by_id(session_profile_id)
@@ -1975,12 +2033,18 @@ def api_profile_save():
             created = True
             session_token = _session_store.create(profile["profile_id"])
     except KeyError:
+        if guesses_password:
+            _login_limiter.record_failure(client_key)
         return _json_error("Profile not found", 404)
     except PermissionError:
+        if guesses_password:
+            _login_limiter.record_failure(client_key)
         return _json_error("Invalid profile password", 401)
     except ValueError as exc:
         return _json_error(str(exc), 400)
 
+    if guesses_password:
+        _login_limiter.clear(client_key)
     response = {"profile": profile, "created": created}
     return _with_session_cookie(make_response(jsonify(response)), session_token)
 

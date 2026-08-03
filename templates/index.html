@@ -144,6 +144,17 @@
     /* Pair editor. Each card is a stack of labelled sections rather than a run
        of form rows, so the shape of a pair — what flows where, then what may be
        deleted — is readable before any of the controls are. */
+    /* Which services a pair can use, in the same dot vocabulary the dashboard
+       service cards use. This was a run of prose lines ("Trakt: not connected",
+       "AniList: readable only — ...") joined by <br>, which is the one place in
+       the app where a service state is not a dot next to a name. */
+    .pair-caps{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+    .pair-cap{display:inline-flex;align-items:center;gap:8px;padding:6px 11px;border:1px solid var(--line);border-radius:999px;background:var(--z950);font-size:12px;color:var(--z400);max-width:100%}
+    .pair-cap-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--z600)}
+    .pair-cap-name{color:var(--z100);font-weight:500}
+    .pair-cap-state{color:var(--label)}
+    .pair-cap-full .pair-cap-dot{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,.12)}
+    .pair-cap-read .pair-cap-dot{background:var(--orange);box-shadow:0 0 0 3px rgba(251,191,36,.12)}
     .pair-card{border:1px solid var(--line);border-radius:12px;background:var(--z950);margin-bottom:14px;overflow:hidden}
     .pair-card.is-disabled{opacity:.62}
     .pair-card-top{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -157,6 +168,11 @@
     .pair-flow-row{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
     .pair-flow-end{flex:1;min-width:150px;display:flex;flex-direction:column;gap:5px}
     .pair-flow-end > span{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--label)}
+    /* The dark control treatment used to live only on `.form-row select`, so the
+       selects here and in the library picker — which sit outside a form row —
+       rendered as the browser's native light control on a black page. */
+    .pair-flow-end select,.library-picker-controls select{width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:13px;font-family:inherit}
+    .pair-flow-end select:focus,.library-picker-controls select:focus{border-color:var(--accent)}
     .pair-dir{display:flex;flex-direction:column;gap:4px;align-items:center;padding-bottom:2px}
     .pair-dir-btn{width:46px;padding:7px 0;border:1px solid var(--line);border-radius:8px;background:var(--z900);color:var(--z400);font-size:15px;font-family:inherit;cursor:pointer;line-height:1;transition:border-color .15s,color .15s,background .15s}
     .pair-dir-btn:hover{border-color:var(--z600);color:var(--z100)}
@@ -466,7 +482,10 @@
       .cards{grid-template-columns:1fr 1fr}
       th,td{padding:8px 10px}
       .catalog-search{flex-direction:column}
-      .settings-layout{grid-template-columns:1fr;padding:16px 0 48px;gap:0}
+      /* minmax(0,1fr), not 1fr: a grid item's default min-width is auto, so a
+         wide child (the settings nav row) stretched the track past the viewport
+         and gave the whole page a horizontal scroll at narrow widths. */
+      .settings-layout{grid-template-columns:minmax(0,1fr);padding:16px 0 48px;gap:0}
       .settings-sidebar{position:static;margin-bottom:4px}
       .settings-nav{display:flex;flex-direction:row;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding:0 0 1px;border-bottom:1px solid var(--z800);gap:0;background:transparent}
       .settings-nav::-webkit-scrollbar{display:none}
@@ -491,15 +510,27 @@
       .inline-actions{min-width:0;flex-wrap:wrap}
       .next-sync-badge{font-size:11px;padding:5px 10px}
       .actions-meta{font-size:12px}
+      /* "SIMKL → PublicMetaDB" was nowrap, so on a narrow phone it pushed the
+         row's chevron off the right edge instead of wrapping. */
+      .pipeline-head{gap:8px;padding:12px 14px}
+      .pipeline-title{white-space:normal}
+      .pipeline-summary{min-width:0}
+      /* Seven nav items do not fit a phone. They used to be clipped by the flex
+         row with a hidden scrollbar, so Settings — which holds Connections, and
+         is where a new user has to go first — was off the right edge with
+         nothing on screen suggesting it existed. They wrap to a second row
+         instead: every destination stays visible and nothing depends on
+         guessing that the bar scrolls. */
+      .nav-inner{flex-direction:column;align-items:stretch;height:auto;gap:2px;padding:8px 0 0}
+      .nav-links{flex-wrap:wrap;justify-content:center;row-gap:0}
+      .nav-link{padding:10px 12px;font-size:13px}
+      .nav-external{padding:10px 12px;font-size:13px}
     }
     @media (max-width:480px){
       nav{padding:0 12px}
-      .nav-inner{height:50px}
       .nav-logo{font-size:16px}
-      .nav-links{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex-shrink:1}
-      .nav-links::-webkit-scrollbar{display:none}
-      .nav-link{padding:12px 10px;font-size:13px}
-      .nav-external{padding:12px 8px;font-size:13px}
+      .nav-link{padding:9px 10px;font-size:13px}
+      .nav-external{padding:9px 10px;font-size:13px}
       .page{padding:0 12px}
       .hero{padding:40px 12px}
       .hero-card{padding:28px 16px 24px;border-radius:12px}
@@ -682,10 +713,6 @@
           <div>
             <h1 class="page-title">Sync</h1>
             <div class="page-sub" id="sync-pairs-sub">Your service pipelines into PublicMetaDB, plus custom pairs between any services.</div>
-          </div>
-          <div class="inline-actions">
-            <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
-            <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-run">Run All</button>
           </div>
         </div>
         <div class="cards" id="sync-cards"></div>
@@ -929,29 +956,31 @@
         </div>
 
         <div class="panel">
-          <div class="panel-header"><span>Sync Pairs</span><span class="catalog-note" id="pairs-count"></span></div>
-            
-              <div class="form-section">
-                <div class="form-section-title">Cross-Service Sync Pairs</div>
-                <div class="hint" style="margin-bottom:12px">
-                  A pair connects two services. <strong>One-way</strong> copies from the
-                  first to the second. <strong>Two-way</strong> keeps both holding the
-                  same items — use the arrow button to switch. Several pairs can share
-                  a service, so you can send multiple sources into one target by adding
-                  one pair each. Two-way needs both services to be writable, which rules
-                  out MDBList and an AniList without an access token.
-                </div>
-                <div id="pairs-capabilities" class="catalog-note" style="margin-bottom:12px"></div>
-                <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
-                <div class="inline-actions" style="justify-content:flex-start;margin-top:12px">
-                  <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
-                  <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
-                  <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run All</button>
-                  <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
-                </div>
-                <div id="pairs-results" style="margin-top:12px"></div>
-              </div>
-            
+          <!-- The run actions live in this header rather than the page topbar.
+               They used to sit in both places under the same element ids, so
+               getElementById bound only the topbar copy and the buttons down
+               here were dead — and "Run All" on a page that also holds the
+               service pipelines read as if it ran those too. -->
+          <div class="panel-header">
+            <span>Sync Pairs</span>
+            <span class="actions-bar" style="margin-top:0">
+              <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
+              <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
+              <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
+            </span>
+          </div>
+          <div class="panel-body">
+            <div class="desc" style="margin-bottom:14px;max-width:74ch">
+              A pair copies items between two services. <strong>One-way</strong> sends
+              from the first to the second; <strong>two-way</strong> keeps both holding
+              the same items. To feed one target from several sources, add a pair each.
+            </div>
+            <div id="pairs-capabilities" class="pair-caps"></div>
+            <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
+            <div id="pairs-results" style="margin-top:12px"></div>
+          </div>
         </div>
       </div>
 
@@ -1038,15 +1067,25 @@
               <div class="settings-page-title">Profile</div>
               <div class="settings-page-desc">Each profile keeps its own saved tokens, list picks, sync history, and background schedule.</div>
               <div class="settings-group form-section">
-                <div class="settings-group-title">Quick Setup</div>
-                <div class="guide-list" style="margin-bottom:20px">
-                  <div class="guide-step"><div class="guide-step-num">1</div><div>Enter a profile password. Leave UUID blank for a new profile. Click <strong>Save Profile</strong>.</div></div>
-                  <div class="guide-step"><div class="guide-step-num">2</div><div>Add your PublicMetaDB API key in <strong>Connections</strong>. Connect SIMKL, Trakt, AniList, or MDBList.</div></div>
-                  <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists and behavior in <strong>Sync</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
+                <!-- Hidden once a profile is open: step 1 tells a signed-in user
+                     to leave the UUID blank while their own UUID is sitting in
+                     the field below it. -->
+                <div id="profile-quick-setup">
+                  <div class="settings-group-title">Quick Setup</div>
+                  <div class="guide-list" style="margin-bottom:20px">
+                    <div class="guide-step"><div class="guide-step-num">1</div><div>Enter a profile password. Leave UUID blank for a new profile. Click <strong>Save Profile</strong>.</div></div>
+                    <div class="guide-step"><div class="guide-step-num">2</div><div>Add your PublicMetaDB API key in <strong>Connections</strong>. Connect SIMKL, Trakt, AniList, or MDBList.</div></div>
+                    <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists and behavior in <strong>Sync</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
+                  </div>
                 </div>
                 <div class="form-row">
                   <label for="profile-id">Profile UUID</label>
-                  <input type="text" id="profile-id" class="mono" placeholder="Leave blank to create a new profile" autocomplete="off">
+                  <div class="copy-row">
+                    <input type="text" id="profile-id" class="mono" placeholder="Leave blank to create a new profile" autocomplete="off">
+                    <!-- This string plus the password is the only way back into
+                         the profile, so it needs to be one click to keep. -->
+                    <button class="btn btn-sm" type="button" id="btn-copy-profile-id" onclick="copyProfileId()">Copy</button>
+                  </div>
                   <div class="hint">Use this UUID + password to reopen the same profile in another browser or server.</div>
                 </div>
                 <div class="form-row">
@@ -1055,13 +1094,13 @@
                 </div>
                 <div class="form-row">
                   <label for="profile-new-password">New Profile Password</label>
-                  <input type="password" id="profile-new-password" placeholder="Only fill this to reset your profile password" autocomplete="off">
-                  <div class="hint">Use your profile UUID plus a new password to reset access.</div>
+                  <input type="password" id="profile-new-password" placeholder="Only fill this to change your profile password" autocomplete="new-password">
+                  <div class="hint">Changing it needs your current password above, and signs this profile out everywhere else.</div>
                 </div>
                 <div class="actions-bar" style="margin-top:4px">
                   <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
                   <button class="btn" onclick="loadProfile()">Load Profile</button>
-                  <button class="btn btn-danger" onclick="resetProfilePassword()">Reset Password</button>
+                  <button class="btn" onclick="resetProfilePassword()">Change Password</button>
                   <button class="btn btn-ghost btn-sm" onclick="logoutProfile()">Log Out</button>
                   <span class="save-flash" id="save-flash">Saved</span>
                 </div>
@@ -1373,10 +1412,25 @@
       }
       pollingIntervalMs = 0;
       if (nextMs > 0) {
-        polling = setInterval(() => fetchStatus(false), nextMs);
+        polling = setInterval(() => { if (!document.hidden) fetchStatus(false); }, nextMs);
         pollingIntervalMs = nextMs;
       }
     }
+
+    // A background tab still runs its timers, so an unattended dashboard kept
+    // asking for /status every 2s for the whole length of a sync — plus a log
+    // tail and a live-activity tail at 2s each — for nothing anyone could see.
+    // The intervals are left in place and their *work* is skipped, so no polling
+    // state has to be torn down and rebuilt; returning to the tab forces a fresh
+    // render immediately, so a hidden tab never comes back showing stale numbers.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      if (polling) _forceStatusRefresh();
+      if (profileLogsPolling) fetchProfileLogs(false);
+      if (liveActivityPolling) fetchLiveActivity();
+      if (siteStatsPolling) fetchSiteStats();
+      if (nextSyncTicker) updateNextSyncBadge();
+    });
 
     // A just-triggered sync is queued before it starts running, so the next
     // status response can still report sync_running=false. Without a hold the
@@ -1516,6 +1570,29 @@
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Finish Connecting'; }
       }
+    }
+
+    async function copyProfileId() {
+      const input = el('profile-id');
+      const value = input ? input.value.trim() : '';
+      if (!value) {
+        showToast('No profile UUID yet — save a profile first.', true, false);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        input.select();
+        document.execCommand('copy');
+      }
+      showToast('Profile UUID copied. Keep it with your password.', false, true);
+    }
+
+    // The setup steps are for someone who has no profile yet. Hidden once one is
+    // open, where step 1's "leave UUID blank" contradicts the filled field.
+    function renderQuickSetupVisibility() {
+      const node = el('profile-quick-setup');
+      if (node) node.style.display = sessionProfileId ? 'none' : '';
     }
 
     async function copyRedirectUrl(inputId) {
@@ -2015,6 +2092,7 @@
       setDot('dot-pipe-trakt', !!(creds.trakt.client_id && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved')));
       setDot('dot-pipe-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
       updatePipelineSummaries();
+      renderQuickSetupVisibility();
     }
 
     // 'state' is 'ok' | 'off' | 'err'
@@ -2243,7 +2321,7 @@
       if (name === 'stats') {
         fetchSiteStats();
         if (!siteStatsPolling) {
-          siteStatsPolling = setInterval(fetchSiteStats, 30000);
+          siteStatsPolling = setInterval(() => { if (!document.hidden) fetchSiteStats(); }, 30000);
         }
       } else if (siteStatsPolling) {
         clearInterval(siteStatsPolling);
@@ -2338,7 +2416,7 @@
 
     function startProfileLogPolling() {
       if (!profileLogsLive || profileLogsPolling) return;
-      profileLogsPolling = setInterval(() => fetchProfileLogs(false), 2000);
+      profileLogsPolling = setInterval(() => { if (!document.hidden) fetchProfileLogs(false); }, 2000);
     }
 
     function stopProfileLogPolling() {
@@ -2450,7 +2528,7 @@
     function startLiveActivityFeed() {
       if (liveActivityPolling) return;
       fetchLiveActivity();
-      liveActivityPolling = setInterval(fetchLiveActivity, 2000);
+      liveActivityPolling = setInterval(() => { if (!document.hidden) fetchLiveActivity(); }, 2000);
     }
 
     function stopLiveActivityFeed() {
@@ -4318,7 +4396,7 @@
 
     function ensureNextSyncTicker() {
       if (nextSyncTicker) return;
-      nextSyncTicker = setInterval(updateNextSyncBadge, 1000);
+      nextSyncTicker = setInterval(() => { if (!document.hidden) updateNextSyncBadge(); }, 1000);
     }
 
     function stopNextSyncTicker() {
@@ -5232,7 +5310,7 @@
     const pairAddBtn = el('btn-pair-add');
     if (pairAddBtn) pairAddBtn.addEventListener('click', addPair);
     const pairsSaveBtn = el('btn-pairs-save');
-    if (pairsSaveBtn) pairsSaveBtn.addEventListener('click', savePairs);
+    if (pairsSaveBtn) pairsSaveBtn.addEventListener('click', () => savePairs(true));
     const pairsRunBtn = el('btn-pairs-run');
     if (pairsRunBtn) pairsRunBtn.addEventListener('click', () => runPairs('', false));
     const pairsDryRunBtn = el('btn-pairs-dry-run');
@@ -5877,10 +5955,15 @@
 
     async function resetProfilePassword() {
       const profileId = (el('profile-id').value || sessionProfileId || '').trim();
+      const currentPassword = el('profile-password').value;
       const newPassword = el('profile-new-password').value;
 
       if (!profileId) {
         showToast('Enter your profile UUID first.', true, false);
+        return;
+      }
+      if (!currentPassword) {
+        showToast('Enter your current profile password first.', true, false);
         return;
       }
       if (!newPassword) {
@@ -5891,6 +5974,7 @@
       try {
         const result = await apiPost('/api/profile/password/reset', {
           profile_id: profileId,
+          current_password: currentPassword,
           new_password: newPassword,
         });
         if (!result.ok) {
@@ -5908,9 +5992,9 @@
         }
         saveDraft(false);
         clearDraftDirty();
-        showToast('Profile password updated.', false, true);
+        showToast('Profile password changed. Other browsers were signed out.', false, true);
       } catch {
-        showToast('Network error while resetting profile password.', true, false);
+        showToast('Network error while changing profile password.', true, false);
       }
     }
 
@@ -6011,6 +6095,7 @@
     if (storedProfileId && !el('profile-id').value.trim()) {
       el('profile-id').value = storedProfileId;
       sessionProfileId = storedProfileId;
+      renderQuickSetupVisibility();
     }
     credentialsHydrated = false;
     resumeSimklPinState();
@@ -6079,6 +6164,10 @@
     // ── Cross-service sync pairs ───────────────────────────────────────────
 
     let pairsState = { pairs: [], providers: [], categories: [], removal_modes: [] };
+    // The pairs as the server last reported them, serialized. See
+    // pairsHaveUnsavedEdits(): declared with the rest of the pairs state so it
+    // cannot land in the temporal dead zone if fetchPairs() ever runs earlier.
+    let pairsSavedSnapshot = '[]';
     // provider key -> list_sources(), fetched lazily. Enumerating lists calls
     // each provider's API, so it must not block opening the view.
     let pairListsByProvider = {};
@@ -6216,15 +6305,28 @@
     function renderPairCapabilities() {
       const node = el('pairs-capabilities');
       if (!node) return;
-      if (!pairsState.providers.length) { node.textContent = ''; return; }
-      const parts = pairsState.providers.map(provider => {
-        if (!provider.configured) return `${esc(provider.label)}: not connected`;
-        if (provider.write_blocked_reason) {
-          return `${esc(provider.label)}: readable only — ${esc(provider.write_blocked_reason)}`;
+      if (!pairsState.providers.length) { node.innerHTML = ''; return; }
+      // The long "why" stays as a tooltip: the chip row is scanned to see which
+      // services are usable, and the reason only matters once one is picked —
+      // where the From/To options already spell it out on the disabled entry.
+      const chips = pairsState.providers.map(provider => {
+        let cls = '';
+        let state = 'not connected';
+        let why = '';
+        if (provider.configured && provider.write_blocked_reason) {
+          cls = 'pair-cap-read';
+          state = 'source only';
+          why = provider.write_blocked_reason;
+        } else if (provider.configured) {
+          cls = 'pair-cap-full';
+          state = 'source or target';
         }
-        return `${esc(provider.label)}: can send and receive`;
+        return `<span class="pair-cap ${cls}"${why ? ` title="${escAttr(why)}"` : ''}>`
+          + `<span class="pair-cap-dot"></span>`
+          + `<span class="pair-cap-name">${esc(provider.label)}</span>`
+          + `<span class="pair-cap-state">${esc(state)}</span></span>`;
       });
-      node.innerHTML = parts.join('<br>');
+      node.innerHTML = chips.join('');
     }
 
     // Every provider is listed in the From/To pickers, but ones that cannot
@@ -6805,6 +6907,11 @@
         two_way_removal_modes: Array.isArray(result.data.two_way_removal_modes)
           ? result.data.two_way_removal_modes : ['additive', 'managed'],
       };
+      try {
+        pairsSavedSnapshot = JSON.stringify(pairsPayload());
+      } catch {
+        pairsSavedSnapshot = '';
+      }
       renderPairCapabilities();
       renderSyncCards();
       renderPairs();
@@ -6834,31 +6941,49 @@
       renderPairs();
     }
 
-    async function savePairs() {
+    function pairsPayload() {
+      return pairsState.pairs.map(pair => ({
+        pair_id: pair.pair_id || '',
+        name: pair.name || '',
+        source: pair.source,
+        target: pair.target,
+        categories: pair.categories || [],
+        source_lists: pair.source_lists || [],
+        target_list: pair.target_list || '',
+        removal_mode: pair.removal_mode || 'additive',
+        mode: pair.mode || 'one_way',
+        enabled: pair.enabled !== false,
+      }));
+    }
+
+    // A run happens server-side against the *saved* pairs, so a freshly added
+    // card the user can see is invisible to it — pressing Run All on a screen
+    // showing one pair answered "No sync pairs configured". Compared against
+    // the last server snapshot rather than a dirty flag, so the many places
+    // that mutate a pair do not each have to remember to set one.
+    function pairsHaveUnsavedEdits() {
+      try {
+        return JSON.stringify(pairsPayload()) !== pairsSavedSnapshot;
+      } catch {
+        return true;
+      }
+    }
+
+    async function savePairs(announce) {
       const btn = el('btn-pairs-save');
       if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
       try {
-        const payload = pairsState.pairs.map(pair => ({
-          pair_id: pair.pair_id || '',
-          name: pair.name || '',
-          source: pair.source,
-          target: pair.target,
-          categories: pair.categories || [],
-          source_lists: pair.source_lists || [],
-          target_list: pair.target_list || '',
-          removal_mode: pair.removal_mode || 'additive',
-          mode: pair.mode || 'one_way',
-          enabled: pair.enabled !== false,
-        }));
-        const result = await apiPost('/api/profile/pairs/save', { pairs: payload });
+        const result = await apiPost('/api/profile/pairs/save', { pairs: pairsPayload() });
         if (!result.ok) {
           showToast(formatApiError(result.data, 'Could not save sync pairs.'), true, false);
-          return;
+          return false;
         }
-        showToast('Sync pairs saved.', false, true);
+        if (announce !== false) showToast('Sync pairs saved.', false, true);
         await fetchPairs();
+        return true;
       } catch {
         showToast('Network error while saving sync pairs.', true);
+        return false;
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Save Pairs'; }
       }
@@ -6892,6 +7017,13 @@
       const node = el('pairs-results');
       if (node) node.innerHTML = '<div class="empty">Running...</div>';
       try {
+        // Running what is on screen implies saving it; a dry run is the safe
+        // way to preview a pair, so it must not be the one thing that silently
+        // runs the previous configuration.
+        if (pairsHaveUnsavedEdits() && !(await savePairs(false))) {
+          if (node) node.innerHTML = '';
+          return;
+        }
         const body = { dry_run: !!dryRun };
         if (pairId) body.pair_id = pairId;
         const result = await apiPost('/api/profile/pairs/run', body);
@@ -6900,15 +7032,30 @@
           showToast(formatApiError(result.data, 'Sync pair run failed.'), true, false);
           return;
         }
-        renderPairResults(result.data.results, result.data.dry_run);
-        const totalAdded = (result.data.results || []).reduce((sum, r) => sum + (r.added || 0), 0);
+        const runs = result.data.results || [];
+        renderPairResults(runs, result.data.dry_run);
+        const totalAdded = runs.reduce((sum, r) => sum + (r.added || 0), 0);
         const cached = Number(result.data.cached_reads || 0);
         const savedNote = cached ? ` (${cached} read${cached === 1 ? '' : 's'} served from cache)` : '';
-        showToast(
-          dryRun ? `Dry run complete — ${totalAdded} item(s) would be added${savedNote}.`
-                 : `Sync complete — ${totalAdded} item(s) added${savedNote}.`,
-          false, true,
-        );
+        // The HTTP call succeeding does not mean the run did: a provider read or
+        // write can fail per category and comes back as an error string on an
+        // otherwise-200 payload. Reporting that as a green "complete" left the
+        // toast contradicting the red error printed directly beneath it.
+        const failures = runs.reduce((sum, r) => sum
+          + (r.errors || []).length
+          + (r.categories || []).reduce((n, cat) => n + (cat.errors || []).length, 0), 0);
+        if (failures) {
+          showToast({
+            message: `${dryRun ? 'Dry run' : 'Sync'} finished with ${failures} error${failures === 1 ? '' : 's'}.`,
+            hint: 'See the run details below for what failed.',
+          }, true, false);
+        } else {
+          showToast(
+            dryRun ? `Dry run complete — ${totalAdded} item(s) would be added${savedNote}.`
+                   : `Sync complete — ${totalAdded} item(s) added${savedNote}.`,
+            false, true,
+          );
+        }
         // Ownership records changed, so refresh to pick up any new problems.
         await fetchPairs();
         // The dashboard renders the same last-run data, so keep it in step.

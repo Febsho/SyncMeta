@@ -33,6 +33,9 @@ This file is a compact working memory for future code changes. Keep it current w
 ## Web Flow
 
 - Browser auth uses server-side sessions.
+- Changing a profile password requires the current password (`current_password`),
+  signed in or not; the profile UUID alone is never enough. A successful change
+  invalidates sessions issued before it.
 - Optional site-wide gate is controlled by `SITE_ACCESS_PASSWORD`.
 - Important routes in `web.py`:
   - `/api/profile/save`
@@ -138,10 +141,22 @@ This file is a compact working memory for future code changes. Keep it current w
   - Activity Sync
   - Latest Sync Results
   - Sync History
+- Sync Pairs run controls live in that panel's header only; duplicating them in
+  the page topbar under the same ids left the lower copies unbound and dead.
+- Running pairs saves unsaved edits first, and a run that reports per-category
+  errors gets an error toast, not a green "complete".
 - Latest Sync Results is paginated at 25 rows per page.
 - Sync History displays only the newest 25 runs.
 - Mobile tables should allow horizontal scroll.
+- The nav wraps to a second row below 700px; it must never clip a destination,
+  since Settings (Connections) is where a new user has to start.
+- Mobile check: no view may give the page a horizontal scrollbar at 320-390px.
+  Grid tracks set to `1fr` need `minmax(0,1fr)` or a wide child blows them out.
 - Service connection dots show connected state based on credentials, not selected lists.
+- Settings -> Profile hides the Quick Setup steps once a profile is open, and the
+  profile UUID has a Copy button next to it.
+- All pollers skip their work while the browser tab is hidden and force a fresh
+  render on return.
 
 ## Tests
 

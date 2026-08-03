@@ -3,20 +3,14 @@
 [![Deploy to Docker](https://github.com/Febsho/SyncMeta-for-PublicMetaDB/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta-for-PublicMetaDB/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Self-hosted web app that syncs watchlists, watch history, resume progress, and selected catalog lists from SIMKL, AniList, Trakt, and MDBList into [PublicMetaDB](https://publicmetadb.com).
+Self-hosted web app that keeps your watchlists, watch history and resume
+progress in [PublicMetaDB](https://publicmetadb.com) up to date from SIMKL,
+AniList, Trakt and MDBList.
 
-## Features
+You run it in Docker, open it in a browser, connect your accounts, and it syncs
+in the background.
 
-- Multi-profile web dashboard with encrypted per-profile credentials.
-- Core sync rules for PMDB watchlist, watched history, and resume progress.
-- Catalog imports for SIMKL/AniList statuses, Trakt selected lists, and MDBList selected lists.
-- Anime-aware mapping with Fribb anime-lists, Anime-Lists XML, AniList/MAL/SIMKL/TMDB IDs, manual overrides, and unresolved mapping review.
-- Detailed sync diagnostics: latest results, row-level errors, failed/unresolved samples, timings, and last 25 detailed run records.
-- Dry-run mode for previewing sync work before writing to PMDB.
-- Admin dashboard with profile overview, queue state, API request counters, anime cache repair, and anime mapping refresh.
-- Docker-first deployment with health checks and conservative defaults for small VPS hosts.
-
-## Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/Febsho/SyncMeta-for-PublicMetaDB
@@ -25,66 +19,187 @@ cp .env.example .env
 docker compose up -d syncmeta
 ```
 
-Open `http://127.0.0.1:8080`.
+Open `http://127.0.0.1:8080` and:
 
-1. Create or load a profile with a UUID and password.
-2. Add a PublicMetaDB API key.
-3. Connect SIMKL, AniList, Trakt, and/or MDBList.
-4. Choose core sync rules and catalog imports.
-5. Run a dry run first, then run a real sync.
+1. Enter a password and click **Save Profile**. You get a profile UUID back —
+   copy it and keep it with the password. Together they are the only way back
+   into the profile.
+2. In **Settings -> Connections**, paste your PublicMetaDB API key, then connect
+   SIMKL, Trakt, AniList or MDBList.
+3. In **Sync**, choose which lists each service should send to PublicMetaDB.
+4. On the **Dashboard**, click **Dry Run** to preview, then **Sync Lists**.
 
-## Scheduling Defaults
+After that it runs on its own every 12 hours.
 
-SyncMeta is intentionally conservative so it does not slow down other containers on small servers.
+## What it does
 
-| Sync type | Default | Minimum | Notes |
-|---|---:|---:|---|
-| Lists/catalog imports | automatic every 12h | 6h | Per-profile deterministic jitter prevents all profiles from starting together. |
-| Watch history | manual | 24h | Can be enabled for automatic background sync. |
-| Resume progress | manual | 24h | Can be enabled for automatic background sync. |
+**Sync into PublicMetaDB.** Every connected service feeds PublicMetaDB. For each
+one you pick which lists or statuses to send, whether entries may be removed
+again, and whether they are public or private in PublicMetaDB.
 
-Manual sync and dry-run buttons are still immediate.
+| Service | Reads | Writes |
+|---|---|---|
+| SIMKL | Watch statuses for shows, movies and anime; watch history | yes |
+| Trakt | Watchlist, collection, history, your lists, liked lists, resume | yes |
+| AniList | Lists by status | only with an access token |
+| MDBList | Your lists and public lists | no, source only |
+| PublicMetaDB | Watchlist and lists | yes |
 
-## Environment Variables
+**Watch history and resume progress.** Optional and off by default. Watch
+history can come from SIMKL or Trakt; resume progress is Trakt only. History is
+manual by default, resume can run automatically.
 
-Most API credentials and sync rules are configured per profile in the UI. Server-level settings belong in `.env`.
+**Sync pairs.** Beyond the built-in service-to-PublicMetaDB pipelines, you can
+copy a list from any service to any other. A pair is one-way or two-way, and
+chooses what happens when an item disappears from the source: never remove,
+remove only what this pair added, or mirror the source exactly.
+
+**Anime matching.** Anime is matched across AniList, MAL, SIMKL, TMDB and IMDB
+using the Fribb anime-lists data, with sequel seasons resolved back to the root
+series. Anything it cannot match with confidence is listed as unresolved for you
+to map by hand rather than guessed at.
+
+**Library.** Browse what SyncMeta has put in PublicMetaDB, with posters and
+titles if you add a free TMDB API key. Without one it still works and shows ids.
+
+**Diagnostics.** Per-list results, row-level errors, failed and unresolved
+samples, timings, and the last 25 detailed run records. A dry run previews
+everything without writing.
+
+**Admin page.** Set `ADMIN_PASSWORD` to enable `/admin`: profile overview, queue
+state, API request counters, anime cache repair and anime mapping refresh.
+
+## Profiles and access
+
+Each profile has its own credentials, list choices, history and schedule.
+Credentials are encrypted at rest and are never sent back to the browser.
+
+- Signing in needs the profile UUID and its password.
+- Changing the password needs the current password, whether or not you are
+  signed in. The UUID alone is not enough, because it is not a secret.
+- A password change signs the profile out of every other browser.
+- There is no password recovery. If both are lost, the profile is lost.
+- `SITE_ACCESS_PASSWORD` optionally puts one shared password in front of the
+  whole app before any of this.
+
+## Scheduling
+
+Defaults are deliberately gentle so SyncMeta does not crowd out other containers
+on a small server.
+
+| Sync | Default | Minimum |
+|---|---:|---:|
+| Lists | automatic, every 12h | 6h |
+| Watch history | manual | 24h |
+| Resume progress | manual | 24h |
+
+Automatic runs are staggered by a per-profile jitter so profiles do not all
+start at once. Manual sync and dry run are always immediate.
+
+## Environment variables
+
+Only server-level settings belong in `.env`. API keys, list choices and sync
+rules are per profile in the web UI.
+
+Worker counts are clamped to the maximum shown; values above it are capped
+rather than rejected. Where the shipped `.env.example` sets something lower than
+the code default, both are listed.
+
+### Storage and encryption
 
 | Variable | Default | Description |
 |---|---:|---|
-| `PROFILE_STORE_FILE` | `/app/data/profiles.json` | JSON profile database path. Mount `/app/data` for persistence. |
-| `SYNCMETA_MASTER_KEY` | generated | Fernet key for profile credentials. Keep stable across restarts. |
-| `SYNCMETA_MASTER_KEY_FILE` | `/app/data/profiles.key` | File used when `SYNCMETA_MASTER_KEY` is empty. |
+| `PROFILE_STORE_FILE` | `/app/data/profiles.json` | Profile database. Mount `/app/data` or you lose everything on redeploy. |
+| `SYNCMETA_MASTER_KEY` | generated | Fernet key encrypting stored credentials. Must stay stable across restarts. |
+| `SYNCMETA_MASTER_KEY_FILE` | `/app/data/profiles.key` | File used when `SYNCMETA_MASTER_KEY` is empty. Never commit it. |
+| `ANILIST_ROOT_CACHE_FILE` | `data/anilist_root_cache.json` | Anime prequel-chain cache location. |
+
+### Access control
+
+| Variable | Default | Description |
+|---|---:|---|
 | `ADMIN_PASSWORD` | empty | Enables `/admin` when set. |
-| `SITE_ACCESS_PASSWORD` | empty | Optional password gate before the app loads. |
-| `SYNCMETA_MAX_CONCURRENT_SYNCS` | `1` | Number of profiles that may sync at the same time. |
-| `SYNCMETA_SOURCE_SYNC_WORKERS` | `2` | Source fetch worker cap per sync. |
-| `SYNCMETA_SIMKL_FETCH_WORKERS` | `2` | SIMKL status fetch worker cap. |
-| `SYNCMETA_LIST_RESOLVE_WORKERS` | `2` | Mapping/resolve worker cap for list rows. |
-| `SYNCMETA_LIST_WRITE_WORKERS` | `1` | PMDB list write worker cap. |
-| `SYNCMETA_ACTIVITY_SOURCE_WORKERS` | `2` | History/resume source worker cap. |
-| `SYNCMETA_ACTIVITY_WRITE_WORKERS` | `1` | History/resume PMDB write worker cap. |
-| `SYNCMETA_PREWARM_WORKERS` | `2` | Anime prewarm worker cap. |
-| `SYNCMETA_ANILIST_PREWARM_LIMIT` | `50` | Max AniList root-context prewarm items per run. Use `0` to disable. |
-| `SYNCMETA_SCHEDULE_JITTER_SECONDS` | `900` | Default max jitter for automatic schedules. |
-| `SYNCMETA_LIST_SYNC_JITTER_SECONDS` | schedule jitter | List-specific jitter override. |
-| `SYNCMETA_HISTORY_SYNC_JITTER_SECONDS` | schedule jitter | History-specific jitter override. |
-| `SYNCMETA_RESUME_SYNC_JITTER_SECONDS` | schedule jitter | Resume-specific jitter override. |
-| `SYNCMETA_GUNICORN_WORKERS` | `1` | Gunicorn worker count. |
-| `SYNCMETA_GUNICORN_THREADS` | `2` | Gunicorn thread count. |
-| `SYNCMETA_GUNICORN_TIMEOUT` | `120` | Gunicorn request timeout. |
-| `DISABLE_PROFILE_SCHEDULER` | `0` | Set to `1` to disable background automatic sync. |
+| `SITE_ACCESS_PASSWORD` | empty | Shared password gate in front of the whole app. |
+| `SYNCMETA_SESSION_SECRET` | master key | Signs browser session cookies. |
+| `SYNCMETA_SESSION_TTL_SECONDS` | `2592000` | Session lifetime, 30 days. |
+| `SYNCMETA_LOGIN_MAX_ATTEMPTS` | `10` | Failed profile sign-ins before a lockout. |
+| `SYNCMETA_LOGIN_WINDOW_SECONDS` | `900` | Lockout window for sign-in and password changes. |
+| `SYNCMETA_ACCESS_MAX_ATTEMPTS` | `10` | Same, for the `SITE_ACCESS_PASSWORD` gate. |
+| `SYNCMETA_ACCESS_WINDOW_SECONDS` | `900` | Lockout window for the site gate. |
 
-## Oracle Free VPS Guidance
+### Scheduler
 
-The checked-in `docker-compose.yml` is tuned for a small shared host:
+| Variable | Default | Description |
+|---|---:|---|
+| `DISABLE_PROFILE_SCHEDULER` | `0` | `1` turns off all automatic background sync. |
+| `SYNCMETA_SCHEDULER_POLL_SECONDS` | `5` | How often due profiles are checked. Minimum 5. |
+| `SYNCMETA_MAX_CONCURRENT_SYNCS` | `1` | Profiles allowed to sync at the same time. |
+| `SYNCMETA_SCHEDULE_JITTER_SECONDS` | `900` | Maximum stagger applied to automatic runs. |
+| `SYNCMETA_LIST_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for list sync. |
+| `SYNCMETA_HISTORY_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for watch history. |
+| `SYNCMETA_RESUME_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for resume progress. |
 
-- `SYNCMETA_MAX_CONCURRENT_SYNCS=1`
-- PMDB writes limited to one worker by default
-- Gunicorn limited to one worker and two threads
-- Docker CPU/memory limits available through `.env`
-- Automatic schedules staggered by deterministic jitter
+### Sync workers
 
-Start with the defaults. If SyncMeta still competes with other containers, lower:
+| Variable | Default | `.env.example` | Max | Description |
+|---|---:|---:|---:|---|
+| `SYNCMETA_SOURCE_SYNC_WORKERS` | `3` | `2` | 4 | Services fetched in parallel. |
+| `SYNCMETA_SIMKL_FETCH_WORKERS` | `3` | `2` | 8 | SIMKL status requests in parallel. |
+| `SYNCMETA_LIST_RESOLVE_WORKERS` | `2` | `2` | 6 | Id resolution for list rows. |
+| `SYNCMETA_LIST_WRITE_WORKERS` | `2` | `1` | 4 | Writes into PublicMetaDB lists. |
+| `SYNCMETA_ACTIVITY_SOURCE_WORKERS` | `2` | `2` | 3 | History and resume reads. |
+| `SYNCMETA_ACTIVITY_WRITE_WORKERS` | `1` | `1` | 4 | History and resume writes. |
+| `SYNCMETA_MAPPING_WRITE_WORKERS` | `1` | `1` | 4 | Mapping contribution writes. |
+| `SYNCMETA_PREWARM_WORKERS` | `2` | `2` | 4 | Anime prewarm workers. |
+| `SYNCMETA_ANILIST_PREWARM_LIMIT` | `100` | `50` | 200 | AniList root lookups prewarmed per run. `0` disables. |
+
+### Logging and serving
+
+| Variable | Default | Description |
+|---|---:|---|
+| `SYNCMETA_PROFILE_LOG_LIMIT` | `500` | Log lines kept per profile. Minimum 100. |
+| `SYNCMETA_GUNICORN_WORKERS` | `1` | Gunicorn workers. |
+| `SYNCMETA_GUNICORN_THREADS` | `2` | Gunicorn threads. |
+| `SYNCMETA_GUNICORN_TIMEOUT` | `120` | Gunicorn request timeout in seconds. |
+
+### Docker limits
+
+Read by `docker-compose.yml`, not by the app.
+
+| Variable | Default | Description |
+|---|---:|---|
+| `SYNCMETA_CPU_LIMIT` | `1.0` | CPU limit for the container. |
+| `SYNCMETA_MEMORY_LIMIT` | `1536m` | Memory limit. |
+| `SYNCMETA_MEMORY_RESERVATION` | `768m` | Memory reservation. |
+
+### Two things to know
+
+**The shipped `docker-compose.yml` forwards only some of these.** Putting a
+variable in `.env` is not enough on its own — Compose passes through just the
+list under `environment:`. `ADMIN_PASSWORD`, `SITE_ACCESS_PASSWORD`, the session,
+login and access limits, `DISABLE_PROFILE_SCHEDULER`,
+`SYNCMETA_SCHEDULER_POLL_SECONDS`, `SYNCMETA_MASTER_KEY_FILE`,
+`SYNCMETA_MAPPING_WRITE_WORKERS`, the per-mode jitter overrides,
+`SYNCMETA_PROFILE_LOG_LIMIT` and `SYNCMETA_GUNICORN_TIMEOUT` are not forwarded.
+To use them, add them under `environment:` yourself, or point the service at
+your `.env`:
+
+```yaml
+services:
+  syncmeta:
+    env_file: .env
+```
+
+**Provider variables in `src/config.py` are dead.** `SIMKL_*`, `TRAKT_*`,
+`ANILIST_*`, `MDBLIST_*`, `PMDB_API_KEY` and `SYNC_*` are left over from the
+removed command-line entry point; nothing reads them. Configure providers in
+the UI.
+
+## Running on a small VPS
+
+The shipped `docker-compose.yml` already limits SyncMeta to one concurrent sync,
+one PublicMetaDB write worker, and one Gunicorn worker with two threads. Start
+there. If it still competes with your other containers:
 
 ```env
 SYNCMETA_CPU_LIMIT=0.5
@@ -92,50 +207,46 @@ SYNCMETA_MEMORY_LIMIT=1024m
 SYNCMETA_ANILIST_PREWARM_LIMIT=0
 ```
 
-## Sync Diagnostics
+Then raise the list sync interval in the UI.
 
-The dashboard keeps `/api/profile/status` lightweight for polling. Detailed error data is loaded only when needed:
-
-- `POST /api/profile/sync/runs` returns recent detailed run summaries.
-- `POST /api/profile/sync/run-details` returns one run with row diagnostics.
-
-Run details include sanitized errors, row type, provider/list name, unresolved reasons, failed title samples, timing counters, and PMDB metrics.
-
-## Docker Verification
+## Health check
 
 ```bash
-docker compose config
-docker compose pull
-docker compose up -d syncmeta
-docker compose ps
-docker compose logs -f syncmeta
 curl http://127.0.0.1:8080/healthz
 ```
 
-Expected health response:
-
 ```json
-{"ok":true}
+{"ok":true,"service":"syncmeta"}
 ```
 
 ## Development
 
 ```bash
 pip install -r requirements.txt
-python web.py
-python -m unittest discover -v
-python -m compileall src web.py
+python web.py                      # http://127.0.0.1:8080
+python -m unittest discover -v     # full suite, no exclusions
 ```
 
-The app runs at `http://127.0.0.1:8080`.
+If `cryptography` fails to import with a `pyo3_runtime.PanicException`, the
+distro package is broken; reinstall the wheel:
+
+```bash
+pip install --ignore-installed "cryptography>=42,<44"
+```
 
 ## Troubleshooting
 
-- High CPU: keep one concurrent sync, increase list/history/resume intervals, lower `SYNCMETA_ANILIST_PREWARM_LIMIT`, and keep PMDB write workers at `1`.
-- Bad anime mappings: use the dashboard unresolved mapping tools or `/admin` anime cache repair actions.
-- Stale Fribb/Anime-Lists data: use `/admin` -> `Update Anime Lists`; SyncMeta uses ETag-aware refresh and preserves current data if refresh fails.
-- Expired tokens: reconnect the affected provider in the Connections area.
-- PMDB write errors: open Latest Sync Results -> Details or Sync History -> Details to inspect sanitized row errors.
+- **High CPU.** Keep one concurrent sync, raise the sync intervals, set
+  `SYNCMETA_ANILIST_PREWARM_LIMIT=0`, keep write workers at 1.
+- **Wrong anime matches.** Use the unresolved mapping tools on the dashboard, or
+  the anime cache repair action in `/admin`.
+- **Stale anime data.** `/admin` -> Update Anime Lists. Refresh is ETag-aware and
+  keeps the current data if it fails.
+- **Expired tokens.** Reconnect that service in Settings -> Connections.
+- **PublicMetaDB write errors.** Latest Sync Results -> Details, or Sync History
+  -> Details, for the row-level error.
+- **Empty Library.** Add a TMDB API key in Settings -> Connections for titles and
+  posters.
 
 ## License
 
