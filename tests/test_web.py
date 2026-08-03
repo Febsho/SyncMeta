@@ -107,6 +107,10 @@ class WebTests(unittest.TestCase):
         self.assertIn("Sync Watch History", html)
         self.assertIn("Clear PMDB History", html)
         self.assertIn("Sync Resume Progress", html)
+        self.assertIn('id="connection-readiness" role="status"', html)
+        self.assertIn('id="dashboard-readiness" role="status"', html)
+        self.assertIn("Test all", html)
+        self.assertIn("/api/profile/connections/check", html)
         self.assertIn("Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.", html)
         self.assertIn("Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.", html)
         self.assertIn("Queued", html)
@@ -135,6 +139,97 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["ok"], True)
+
+    def test_connection_check_requires_session(self) -> None:
+        response = self.client.post("/api/profile/connections/check", json={})
+        self.assertEqual(response.status_code, 401)
+
+    @patch("web.check_connections")
+    def test_connection_check_persists_only_saved_credential_results(self, check_connections_mock) -> None:
+        credentials = _blank_credentials()
+        credentials["pmdb"]["api_key"] = "saved-key"
+        credentials["simkl"]["client_id"] = "client"
+        credentials["simkl"]["access_token"] = "token"
+        profile = web._profile_store.create_profile("secret", credentials, {
+            "auto_sync": False,
+            "media_types": ["shows", "movies", "anime"],
+        })
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        def fake_checks(creds, providers, **_kwargs):
+            status = "error" if creds["pmdb"]["api_key"] == "draft-key" else "healthy"
+            return [{
+                "provider": provider,
+                "status": status if provider == "pmdb" else "healthy",
+                "code": "auth_invalid" if status == "error" and provider == "pmdb" else "ok",
+                "message": "checked",
+                "checked_at": "2026-08-03T12:00:00+00:00",
+                "capabilities": {"readable": True, "writable": provider != "mdblist"},
+                "identity": "",
+                "recovery_action": "none",
+            } for provider in providers]
+
+        check_connections_mock.side_effect = fake_checks
+        saved = self.client.post("/api/profile/connections/check", json={"providers": ["pmdb", "simkl"]})
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.get_json()["readiness"]["ready"])
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["connection_health"]
+        self.assertEqual(stored["pmdb"]["status"], "healthy")
+
+        draft = self.client.post("/api/profile/connections/check", json={
+            "providers": ["pmdb"],
+            "credentials": {"pmdb": {"api_key": "draft-key"}},
+        })
+        self.assertEqual(draft.get_json()["checks"][0]["status"], "error")
+        self.assertNotIn("draft-key", draft.get_data(as_text=True))
+        self.assertNotIn("saved-key", draft.get_data(as_text=True))
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["connection_health"]
+        self.assertEqual(stored["pmdb"]["status"], "healthy")
+
+    @patch("web.check_connections")
+    def test_connection_check_uses_fresh_cached_result(self, check_connections_mock) -> None:
+        credentials = _blank_credentials()
+        credentials["pmdb"]["api_key"] = "saved-key"
+        profile = web._profile_store.create_profile("secret", credentials, {"auto_sync": False, "media_types": ["movies"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        web._profile_store.record_connection_health(profile["profile_id"], [{
+            "provider": "pmdb", "status": "healthy", "code": "ok", "message": "cached",
+            "checked_at": web.datetime.now(web.timezone.utc).isoformat(),
+            "capabilities": {"readable": True, "writable": True}, "identity": "", "recovery_action": "none",
+        }])
+
+        response = self.client.post("/api/profile/connections/check", json={"providers": ["pmdb"], "force": False})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["checks"][0]["message"], "cached")
+        check_connections_mock.assert_not_called()
+
+    def test_connection_readiness_reports_required_services_and_bad_pairs(self) -> None:
+        profile = {
+            "credentials": _blank_credentials(),
+            "options": {"auto_sync": False, "media_types": ["movies"]},
+        }
+        empty = web._connection_readiness(web._config_from_profile(profile), [])
+        self.assertFalse(empty["ready"])
+        self.assertIn("Connect and verify PublicMetaDB.", empty["blockers"])
+        self.assertIn("Connect and verify at least one sync source.", empty["blockers"])
+
+        profile["credentials"]["pmdb"]["api_key"] = "pm-key"
+        profile["credentials"]["simkl"]["client_id"] = "simkl-client"
+        profile["credentials"]["simkl"]["access_token"] = "simkl-token"
+        profile["credentials"]["mdblist"]["api_key"] = "mdb-key"
+        profile["options"]["sync_pairs"] = [{
+            "pair_id": "bad-target", "name": "Bad target", "source": "simkl", "target": "mdblist",
+            "categories": ["watchlist"], "enabled": True,
+        }]
+        health = [
+            {"provider": "pmdb", "status": "healthy", "capabilities": {"readable": True, "writable": True}},
+            {"provider": "simkl", "status": "healthy", "capabilities": {"readable": True, "writable": True}},
+            {"provider": "mdblist", "status": "healthy", "capabilities": {"readable": True, "writable": False}},
+        ]
+        blocked = web._connection_readiness(web._config_from_profile(profile), health)
+        self.assertFalse(blocked["ready"])
+        self.assertTrue(any("Bad target" in item for item in blocked["blockers"]))
 
     def test_parse_tmdb_id_accepts_slug_or_url(self) -> None:
         self.assertEqual(web._parse_tmdb_id("1600672"), 1600672)
@@ -668,6 +763,24 @@ class WebTests(unittest.TestCase):
         self.assertTrue(listed[0]["pair_id"])
         # Trakt is not configured on this profile, so the pair explains itself.
         self.assertIn("not configured", listed[0]["problem"])
+
+    def test_saving_simkl_pmdb_collection_pair_is_supported(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "name": "SIMKL ↔ PublicMetaDB",
+            "source": "simkl",
+            "target": "pmdb",
+            "mode": "two_way",
+            "categories": ["collection"],
+            "source_lists": ["status:completed:movies"],
+        }]})
+
+        self.assertEqual(response.status_code, 200)
+        saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
+        self.assertEqual(saved["categories"], ["collection"])
+        self.assertEqual(saved["mode"], "two_way")
 
     def test_saving_an_invalid_pair_is_rejected_with_a_reason(self) -> None:
         profile = self._make_bare_profile()

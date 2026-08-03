@@ -93,7 +93,7 @@
     .toggle-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}.toggle-row:last-child{margin-bottom:0}.toggle-row>label:last-child{margin-bottom:0;text-transform:none;font-size:13px;color:var(--z300);font-weight:400}
     .toggle{position:relative;width:36px;height:20px;flex-shrink:0}.toggle input{opacity:0;width:0;height:0}.toggle .slider{position:absolute;inset:0;background:var(--z800);border:1px solid var(--z700);border-radius:10px;cursor:pointer}.toggle .slider:before{content:'';position:absolute;width:14px;height:14px;left:2px;top:2px;background:var(--z500);border-radius:50%;transition:all .2s}.toggle input:checked + .slider{background:var(--accent2);border-color:var(--accent)}.toggle input:checked + .slider:before{transform:translateX(16px);background:var(--white)}
     .btn{padding:9px 18px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z300);font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px}.btn:hover{border-color:var(--z600);color:var(--z100)}.btn:disabled{opacity:.4;cursor:not-allowed}.btn-primary{background:var(--accent2);border-color:var(--accent2);color:var(--white);font-weight:600}.btn-primary:hover{background:var(--accent)}.btn-danger{background:rgba(127,29,29,.9);border-color:rgba(248,113,113,.35);color:var(--white);font-weight:700}.btn-danger:hover{background:rgba(153,27,27,.95);border-color:rgba(248,113,113,.55);color:var(--white)}.btn-sm{padding:6px 12px;font-size:12px}.btn-ghost{background:transparent;border-color:transparent;color:var(--z400)}.btn-ghost:hover{color:var(--red)}
-    .dot{width:8px;height:8px;border-radius:50%;display:inline-block}.dot-ok{background:var(--green)}.dot-off{background:var(--z700)}.dot-err{background:var(--red);box-shadow:0 0 0 2px rgba(248,113,113,.25);animation:dot-pulse 2s infinite}@keyframes dot-pulse{0%,100%{box-shadow:0 0 0 2px rgba(248,113,113,.25)}50%{box-shadow:0 0 0 4px rgba(248,113,113,.1)}}
+    .dot{width:8px;height:8px;border-radius:50%;display:inline-block}.dot-ok{background:var(--green)}.dot-off{background:var(--z700)}.dot-warn{background:var(--orange)}.dot-err{background:var(--red);box-shadow:0 0 0 2px rgba(248,113,113,.25);animation:dot-pulse 2s infinite}@keyframes dot-pulse{0%,100%{box-shadow:0 0 0 2px rgba(248,113,113,.25)}50%{box-shadow:0 0 0 4px rgba(248,113,113,.1)}}
     .conn-token-error{display:none;margin-top:8px;padding:8px 12px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25);border-radius:7px;font-size:12px;color:var(--red);gap:6px;align-items:flex-start}
     .conn-token-error.visible{display:flex}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--z800);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
@@ -282,6 +282,17 @@
     .conn-card-title{font-size:15px;font-weight:700;color:var(--z100);margin-bottom:4px;display:flex;align-items:center;gap:8px}
     .conn-card-desc{font-size:12px;color:var(--z500);margin-bottom:14px}
     .conn-card.full{grid-column:1 / -1;margin-bottom:0}
+    .connection-readiness{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:12px 14px;margin:12px 0 14px;border:1px solid var(--z800);border-radius:9px;background:var(--z950)}
+    .connection-readiness.ready{border-color:rgba(52,211,153,.35)}
+    .connection-readiness.blocked{border-color:rgba(248,113,113,.35)}
+    .connection-readiness-title{font-size:13px;font-weight:700;color:var(--z100)}
+    .connection-readiness-detail{font-size:12px;color:var(--z500);margin-top:3px}
+    .connection-health{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--z900)}
+    .connection-health-copy{min-width:0;font-size:11px;color:var(--z500)}
+    .connection-health-copy strong{display:block;color:var(--z300);font-size:12px;margin-bottom:2px}
+    .connection-health[data-status="error"] strong{color:var(--red)}
+    .connection-health[data-status="degraded"] strong{color:var(--orange)}
+    .connection-health[data-status="healthy"] strong{color:var(--green)}
     .result-list{display:flex;flex-direction:column;gap:1px;background:var(--line)}
     .result-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:15px 20px;background:var(--surface);cursor:default;transition:background .15s}
     .result-row:hover{background:rgba(255,255,255,.02)}
@@ -619,6 +630,8 @@
             <button class="btn btn-danger hidden" id="btn-stop" onclick="stopSync()">Stop</button>
           </div>
         </div>
+
+        <div class="connection-readiness hidden" id="dashboard-readiness" role="status"></div>
 
         <!-- Stat cards -->
         <div class="cards" id="cards"></div>
@@ -1121,7 +1134,11 @@
             <div class="settings-tab" id="stab-connections">
               <div class="settings-page-title">Connections</div>
               <div class="settings-page-desc">Connect your accounts. PublicMetaDB is required; all others are optional.</div>
-              <div class="conn-card form-section" style="margin-bottom:14px">
+              <div class="connection-readiness" id="connection-readiness" role="status">
+                <div><div class="connection-readiness-title">Connection readiness not checked</div><div class="connection-readiness-detail">Save or sign into a profile, then test your connections.</div></div>
+                <button class="btn btn-sm" type="button" id="btn-test-all-connections" onclick="testConnections()">Test all</button>
+              </div>
+              <div class="conn-card form-section" id="connection-card-pmdb" style="margin-bottom:14px">
                 <div class="conn-card-pmdb">
                   <div class="conn-card-pmdb-meta">
                     <div class="conn-card-title" style="margin-bottom:4px"><span class="dot" id="dot-pmdb"></span> PublicMetaDB</div>
@@ -1131,8 +1148,9 @@
                     <div class="form-row" style="margin-bottom:0"><label for="pmdb-api-key">API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
                   </div>
                 </div>
+                <div class="connection-health" id="connection-health-pmdb"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('pmdb')">Test</button></div>
               </div>
-              <div class="conn-card form-section" style="margin-bottom:14px">
+              <div class="conn-card form-section" id="connection-card-tmdb" style="margin-bottom:14px">
                 <div class="conn-card-pmdb">
                   <div class="conn-card-pmdb-meta">
                     <div class="conn-card-title" style="margin-bottom:4px"><span class="dot" id="dot-tmdb"></span> TMDB <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:8px">Optional</span></div>
@@ -1142,9 +1160,10 @@
                     <div class="form-row" style="margin-bottom:0"><label for="tmdb-api-key">API Key</label><input type="password" id="tmdb-api-key" placeholder="v3 API key or v4 read access token" autocomplete="off"><div class="hint"><a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Get a free API key from themoviedb.org</a></div></div>
                   </div>
                 </div>
+                <div class="connection-health" id="connection-health-tmdb"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('tmdb')">Test</button></div>
               </div>
               <div class="conn-grid">
-                <div class="conn-card form-section">
+                <div class="conn-card form-section" id="connection-card-simkl">
                   <div class="conn-card-title"><span class="dot" id="dot-simkl"></span> SIMKL</div>
                   <div class="conn-card-desc">Movies, shows, anime, watch history, and PIN auth.</div>
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
@@ -1174,8 +1193,9 @@
                   <div class="conn-token-error" id="token-error-simkl">
                     <span>⚠</span><span id="token-error-simkl-msg"></span>
                   </div>
+                  <div class="connection-health" id="connection-health-simkl"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('simkl')">Test</button></div>
                 </div>
-                <div class="conn-card form-section">
+                <div class="conn-card form-section" id="connection-card-trakt">
                   <div class="conn-card-title"><span class="dot" id="dot-trakt"></span> Trakt <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Watchlist, watch history, resume progress, and device auth. Custom Trakt lists are legacy imports.</div>
                   <input type="checkbox" id="trakt-watchlist-movies-toggle" checked class="hidden">
@@ -1208,10 +1228,11 @@
                   <div class="conn-token-error" id="token-error-trakt">
                     <span>⚠</span><span id="token-error-trakt-msg"></span>
                   </div>
+                  <div class="connection-health" id="connection-health-trakt"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('trakt')">Test</button></div>
                 </div>
               </div>
               <div class="conn-grid" style="margin-bottom:0">
-                <div class="conn-card form-section">
+                <div class="conn-card form-section" id="connection-card-anilist">
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
                   <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
@@ -1245,11 +1266,13 @@
                       <button class="btn btn-sm btn-ghost" type="button" onclick="cancelAniListAuth()">Cancel</button>
                     </div>
                   </div>
+                  <div class="connection-health" id="connection-health-anilist"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('anilist')">Test</button></div>
                 </div>
-                <div class="conn-card form-section">
+                <div class="conn-card form-section" id="connection-card-mdblist">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Selected MDBList catalog lists. MDBList watch status sync is handled by MDBList's own Trakt/Plex integrations.</div>
                   <div class="form-row" style="margin-bottom:0"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
+                  <div class="connection-health" id="connection-health-mdblist"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('mdblist')">Test</button></div>
                 </div>
               </div>
             </div>
@@ -1371,6 +1394,9 @@
     let sessionProfileId = '';
     let secretState = emptySecretState();
     let lastDashboardProfile = null;
+    let connectionHealth = {};
+    let connectionReadiness = null;
+    let connectionCheckRunning = false;
     let lastSiteStats = null;
     let currentResultsPage = 1;
     let currentResultsFilter = 'all';
@@ -1575,6 +1601,7 @@
         );
         showToast('AniList connected.', false, true);
         updateDots();
+        if (sessionProfileId) testConnections('anilist');
       } catch {
         setAniListAuthStatus('Network error while connecting AniList.', true);
       } finally {
@@ -2103,10 +2130,13 @@
       setDot('dot-pipe-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
       updatePipelineSummaries();
       renderQuickSetupVisibility();
+      if (!profileDraftDirty && Object.keys(connectionHealth).length) {
+        renderConnectionHealth(connectionHealth, connectionReadiness);
+      }
     }
 
     // 'state' is 'ok' | 'off' | 'err'
-    const DOT_STATE_TEXT = { ok: 'Connected', off: 'Not connected', err: 'Connection error' };
+    const DOT_STATE_TEXT = { ok: 'Verified', off: 'Not configured', warn: 'Connection degraded', err: 'Connection error' };
 
     function setDot(id, okOrState, errorMsg) {
       const node = el(id);
@@ -2122,6 +2152,101 @@
       // screen readers and to anyone who cannot distinguish the hues.
       node.setAttribute('role', 'img');
       node.setAttribute('aria-label', DOT_STATE_TEXT[state] || '');
+    }
+
+    const CONNECTION_LABELS = { pmdb: 'PublicMetaDB', tmdb: 'TMDB', simkl: 'SIMKL', trakt: 'Trakt', anilist: 'AniList', mdblist: 'MDBList' };
+    const CONNECTION_FIELDS = { pmdb: 'pmdb-api-key', tmdb: 'tmdb-api-key', simkl: 'simkl-client-id', trakt: 'trakt-client-id', anilist: 'anilist-username', mdblist: 'mdblist-api-key' };
+
+    function recoveryButtonHtml(row) {
+      if (!row || !row.recovery_action || row.recovery_action === 'none') return '';
+      const provider = row.provider;
+      if (row.recovery_action === 'reconnect' && provider === 'trakt') return '<button class="btn btn-sm" type="button" onclick="startTraktAuth()">Reconnect</button>';
+      if (row.recovery_action === 'reconnect' && provider === 'simkl') return '<button class="btn btn-sm" type="button" onclick="startSimklAuth()">Reconnect</button>';
+      if (row.recovery_action === 'reconnect' && provider === 'anilist') return '<button class="btn btn-sm" type="button" onclick="startAniListAuth()">Reconnect</button>';
+      if (row.recovery_action === 'edit_credentials' || row.recovery_action === 'correct_username') {
+        return `<button class="btn btn-sm" type="button" onclick="focusConnectionField('${provider}')">Edit</button>`;
+      }
+      return '';
+    }
+
+    function focusConnectionField(provider) {
+      const node = el(CONNECTION_FIELDS[provider]);
+      if (node) { node.focus(); node.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    }
+
+    function renderConnectionHealth(health, readiness) {
+      if (health && !Array.isArray(health)) connectionHealth = { ...connectionHealth, ...health };
+      if (readiness) connectionReadiness = readiness;
+      for (const provider of Object.keys(CONNECTION_LABELS)) {
+        const host = el(`connection-health-${provider}`);
+        const row = connectionHealth[provider];
+        if (!host) continue;
+        const status = row ? row.status : 'unconfigured';
+        host.dataset.status = status;
+        const title = !row ? 'Not checked' : ({ healthy: 'Verified', degraded: 'Degraded', error: 'Needs attention', unconfigured: 'Not configured' }[status] || 'Not checked');
+        const modes = row && row.capabilities && row.capabilities.readable
+          ? ` · Read${row.capabilities.writable ? ' + write' : ' only'}` : '';
+        const identity = row && row.identity ? ` · ${row.identity}` : '';
+        const stamp = row && row.checked_at ? ` · ${timeAgo(row.checked_at)}` : '';
+        const message = row ? `${row.message || ''}${identity}${modes}${stamp}` : 'Test this saved connection.';
+        host.innerHTML = `<div class="connection-health-copy"><strong>${esc(title)}</strong><span>${esc(message)}</span></div><div class="actions-bar" style="margin-top:0">${recoveryButtonHtml(row)}<button class="btn btn-sm" type="button" onclick="testConnections('${provider}')" ${connectionCheckRunning ? 'disabled' : ''}>${connectionCheckRunning ? 'Checking…' : 'Test'}</button></div>`;
+        const dotState = status === 'healthy' ? 'ok' : (status === 'degraded' ? 'warn' : (status === 'error' ? 'err' : 'off'));
+        setDot(`dot-${provider}`, dotState, row ? row.message : '');
+      }
+      renderConnectionReadiness(connectionReadiness);
+    }
+
+    function renderConnectionReadiness(readiness) {
+      const settingsNode = el('connection-readiness');
+      const dashboardNode = el('dashboard-readiness');
+      if (!readiness) {
+        if (dashboardNode) dashboardNode.classList.add('hidden');
+        return;
+      }
+      const blockers = readiness.blockers || [];
+      const warnings = readiness.warnings || [];
+      const ready = !!readiness.ready;
+      const title = ready ? 'Connections ready' : 'Connections need attention';
+      const details = blockers.length ? blockers.join(' ') : (warnings.length ? warnings.join(' ') : 'PublicMetaDB and at least one source are verified.');
+      if (settingsNode) {
+        settingsNode.className = `connection-readiness ${ready ? 'ready' : 'blocked'}`;
+        settingsNode.innerHTML = `<div><div class="connection-readiness-title">${esc(title)}</div><div class="connection-readiness-detail">${esc(details)}</div></div><button class="btn btn-sm" type="button" id="btn-test-all-connections" onclick="testConnections()" ${connectionCheckRunning ? 'disabled' : ''}>${connectionCheckRunning ? 'Checking…' : 'Test all'}</button>`;
+      }
+      if (dashboardNode) {
+        dashboardNode.className = `connection-readiness ${ready ? 'ready' : 'blocked'}`;
+        dashboardNode.innerHTML = `<div><div class="connection-readiness-title">${esc(title)}</div><div class="connection-readiness-detail">${esc(details)}</div></div>${ready ? '' : '<button class="btn btn-sm" type="button" onclick="switchView(\'connections\')">Review connections</button>'}`;
+      }
+    }
+
+    async function testConnections(provider, useCache) {
+      if (!sessionProfileId || connectionCheckRunning) {
+        if (!sessionProfileId) showToast('Save or sign into a profile before testing connections.', true, false);
+        return;
+      }
+      connectionCheckRunning = true;
+      renderConnectionHealth(connectionHealth, connectionReadiness);
+      const payload = { force: useCache ? false : true };
+      if (provider) payload.providers = [provider];
+      if (profileDraftDirty) payload.credentials = gatherCreds();
+      try {
+        const result = await apiPost('/api/profile/connections/check', payload);
+        if (!result.ok) {
+          showToast(formatApiError(result.data, 'Could not check connections.'), true, false);
+          return;
+        }
+        const rows = {};
+        for (const row of result.data.checks || []) rows[row.provider] = row;
+        renderConnectionHealth(rows, result.data.readiness);
+        if (lastDashboardProfile) {
+          lastDashboardProfile.connection_health = { ...(lastDashboardProfile.connection_health || {}), ...rows };
+          lastDashboardProfile.connection_readiness = result.data.readiness;
+        }
+      } catch {
+        showToast('Network error while checking connections.', true, false);
+      } finally {
+        connectionCheckRunning = false;
+        renderConnectionHealth(connectionHealth, connectionReadiness);
+      }
     }
 
     // Parse sync_error text to figure out which provider is broken and show
@@ -2316,6 +2441,7 @@
       }
       if (navTarget === 'connections') {
         showSettingsTab('connections');
+        if (sessionProfileId) testConnections(undefined, true);
       } else if (navTarget === 'sync-now') {
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } else if (navTarget === 'mapping') {
@@ -4267,6 +4393,7 @@
           saveDraft();
           setSimklAuthStatus('SIMKL access token received and filled in.', false);
           showToast('SIMKL token added.', false, true);
+          if (sessionProfileId) testConnections('simkl');
           return;
         }
 
@@ -4314,6 +4441,7 @@
           refreshTraktLists(true);
           setTraktAuthStatus(result.data.saved ? 'Trakt token received and saved to this profile.' : 'Trakt token received. Save the profile to persist it.', false);
           showToast(result.data.saved ? 'Trakt token saved.' : 'Trakt token added. Save the profile.', false, true);
+          if (sessionProfileId) testConnections('trakt');
           return;
         }
 
@@ -4739,6 +4867,9 @@
         localStorage.setItem(PROFILE_KEY, profile.profile_id);
       }
       lastDashboardProfile = profile;
+      connectionHealth = { ...(profile.connection_health || connectionHealth || {}) };
+      connectionReadiness = profile.connection_readiness || connectionReadiness;
+      renderConnectionHealth(connectionHealth, connectionReadiness);
       reconcileQueuedPairRun(profile);
       if (!resultsHaveList(profile.last_results || [], pendingDeleteListName)) {
         pendingDeleteListName = '';
@@ -5682,6 +5813,9 @@
         populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
         renderDashboard(profile);
         clearDraftDirty();
+        connectionHealth = { ...(profile.connection_health || {}) };
+        connectionReadiness = profile.connection_readiness || null;
+        renderConnectionHealth(connectionHealth, connectionReadiness);
         flashSaved();
         saveBtns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText || 'Save Profile'; });
         if (shouldRefreshSources && profile.credentials && profile.credentials.trakt && profile.credentials.trakt.client_id && profile.credentials.trakt.access_token_saved) {
@@ -5691,6 +5825,7 @@
           refreshMdbListLists(true);
         }
         if (announce) showToast(result.data.created ? 'Profile created.' : 'Profile updated.', false, true);
+        testConnections();
         return profile;
       } catch {
         saveBtns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText || 'Save Profile'; });

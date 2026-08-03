@@ -766,6 +766,26 @@ class TargetListTests(unittest.TestCase):
 
         self.assertEqual(target.target_lists_used, [""])
 
+    def test_two_way_pair_reads_and_writes_the_selected_target_list(self) -> None:
+        source = FakeAdapter(
+            "simkl", {CATEGORY_COLLECTION: [_movie("1")]},
+            reads=(CATEGORY_COLLECTION,), writes=(CATEGORY_COLLECTION,),
+        )
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_COLLECTION: []},
+            reads=(CATEGORY_COLLECTION,), writes=(CATEGORY_COLLECTION,),
+        )
+        service = CrossSyncService({"simkl": source, "pmdb": target})
+
+        result = service.run_pair(_pair(
+            source="simkl", target="pmdb", mode="two_way",
+            categories=[CATEGORY_COLLECTION], target_list="list:42",
+        ))
+
+        self.assertEqual(result.added, 1)
+        self.assertIn((CATEGORY_COLLECTION, ["list:42"]), target.fetched)
+        self.assertEqual(target.target_lists_used, ["list:42"])
+
     def test_only_providers_that_support_it_advertise_target_lists(self) -> None:
         from src.providers import (
             AniListAdapter, MdbListAdapter, PmdbAdapter, SimklAdapter, TraktAdapter,
@@ -799,6 +819,106 @@ class TargetListTests(unittest.TestCase):
             def write_blocked_reason(self): return "needs a token"
 
         self.assertEqual(AniListAdapter(_Client()).safe_target_lists(), [])
+
+
+class PmdbCollectionTargetTests(unittest.TestCase):
+    class FakePmdbClient:
+        def __init__(self, existing=None):
+            from types import SimpleNamespace
+            self._config = SimpleNamespace(api_key="pm-key")
+            self.existing = existing
+            self.created = []
+            self.added = []
+            self.removed = []
+            self.items = {}
+
+        def find_list_by_name(self, name):
+            return self.existing if self.existing and self.existing.get("name") == name else None
+
+        def get_or_create_list(self, name, description="", is_public=False, list_type="custom"):
+            self.created.append((name, description, is_public, list_type))
+            self.existing = {"id": "collection-id", "name": name, "type": list_type}
+            return self.existing
+
+        def get_lists(self):
+            return [self.existing] if self.existing else []
+
+        def get_list_items(self, list_id):
+            return list(self.items.get(str(list_id), []))
+
+        def add_items_to_list_batch(self, list_id, payload):
+            self.added.append((str(list_id), list(payload)))
+
+        def remove_item_from_list(self, list_id, item_id):
+            self.removed.append((str(list_id), str(item_id)))
+
+        def find_list_by_type(self, _list_type):
+            return None
+
+    def test_collection_is_a_declared_read_write_capability(self) -> None:
+        from src.providers import PmdbAdapter
+        self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.reads)
+        self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.writes)
+        self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.target_list_categories)
+
+    def test_default_collection_read_never_creates_a_list(self) -> None:
+        from src.providers import PmdbAdapter
+        client = self.FakePmdbClient()
+        adapter = PmdbAdapter(client)
+
+        self.assertEqual(adapter.fetch(CATEGORY_COLLECTION), [])
+        self.assertEqual(client.created, [])
+
+    def test_default_collection_write_creates_and_reuses_managed_custom_list(self) -> None:
+        from src.providers import PmdbAdapter
+        client = self.FakePmdbClient()
+        adapter = PmdbAdapter(client)
+
+        result = adapter.add(CATEGORY_COLLECTION, [_movie("42")])
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(client.created[0][0], "SyncMeta · Collection")
+        self.assertEqual(client.created[0][3], "custom")
+        self.assertEqual(client.added, [("collection-id", [{"tmdb_id": 42, "media_type": "movie"}])])
+
+    def test_named_custom_list_accepts_collection_without_creating_default(self) -> None:
+        from src.providers import PmdbAdapter
+        client = self.FakePmdbClient()
+        adapter = PmdbAdapter(client)
+
+        result = adapter.add(CATEGORY_COLLECTION, [_movie("7")], "list:user-list")
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.added[0][0], "user-list")
+
+    def test_two_way_simkl_pmdb_collection_passes_runtime_validation(self) -> None:
+        from src.providers import PmdbAdapter
+        simkl = FakeAdapter(
+            "simkl", {}, reads=(CATEGORY_COLLECTION,), writes=(CATEGORY_COLLECTION,),
+        )
+        pmdb = PmdbAdapter(self.FakePmdbClient())
+        pair = _pair(
+            source="simkl", target="pmdb", mode="two_way",
+            categories=[CATEGORY_COLLECTION],
+        )
+
+        self.assertEqual(CrossSyncService({"simkl": simkl, "pmdb": pmdb}).validate_pair(pair), "")
+
+    def test_collection_dry_run_does_not_create_the_default_list(self) -> None:
+        from src.providers import PmdbAdapter
+        source = FakeAdapter(
+            "simkl", {CATEGORY_COLLECTION: [_movie("9")]},
+            reads=(CATEGORY_COLLECTION,), writes=(CATEGORY_COLLECTION,),
+        )
+        client = self.FakePmdbClient()
+        result = CrossSyncService(
+            {"simkl": source, "pmdb": PmdbAdapter(client)}, dry_run=True,
+        ).run_pair(_pair(source="simkl", target="pmdb", categories=[CATEGORY_COLLECTION]))
+
+        self.assertEqual(result.added, 1)
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.added, [])
 
 
 class MdbListSourceTests(unittest.TestCase):

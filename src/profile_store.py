@@ -39,6 +39,7 @@ SIMKL_ALLOWED_STATUSES = {"watching", "plantowatch", "completed", "hold", "dropp
 ANILIST_ALLOWED_STATUSES = {"CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "COMPLETED_ONA", "COMPLETED_OVA", "COMPLETED_MOVIE"}
 ALLOWED_VISIBILITIES = {"private", "public"}
 ALLOWED_ACTIVITY_SOURCES = {"off", "simkl", "trakt"}
+CONNECTION_HEALTH_PROVIDERS = {"pmdb", "tmdb", "simkl", "trakt", "anilist", "mdblist"}
 DEFAULT_KEY_FILE_NAME = "profiles.key"
 
 ACTIVITY_RESULT_NAMES = {
@@ -190,6 +191,33 @@ def _normalize_detailed_runs(raw_runs: list | None) -> list[dict]:
             "rows": rows,
             "error_message": str(raw.get("error_message", "") or "").strip(),
         })
+    return normalized
+
+
+def _normalize_connection_health(raw_health: dict | None) -> dict[str, dict]:
+    if not isinstance(raw_health, dict):
+        return {}
+    normalized = {}
+    for provider, raw in raw_health.items():
+        if provider not in CONNECTION_HEALTH_PROVIDERS or not isinstance(raw, dict):
+            continue
+        capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {}
+        row = {
+            "provider": provider,
+            "status": str(raw.get("status") or "error"),
+            "code": str(raw.get("code") or "unknown"),
+            "message": str(raw.get("message") or ""),
+            "checked_at": str(raw.get("checked_at") or ""),
+            "capabilities": {
+                "readable": bool(capabilities.get("readable")),
+                "writable": bool(capabilities.get("writable")),
+            },
+            "identity": str(raw.get("identity") or ""),
+            "recovery_action": str(raw.get("recovery_action") or "none"),
+        }
+        if isinstance(raw.get("retry_after"), int):
+            row["retry_after"] = max(0, raw["retry_after"])
+        normalized[provider] = row
     return normalized
 
 
@@ -847,6 +875,7 @@ class ProfileStore:
             "failed_resolution_cache": copy.deepcopy(raw_profile.get("failed_resolution_cache", {})) if isinstance(raw_profile.get("failed_resolution_cache"), dict) else {},
             "manual_resolution_cache": copy.deepcopy(raw_profile.get("manual_resolution_cache", {})) if isinstance(raw_profile.get("manual_resolution_cache"), dict) else {},
             "manual_list_additions": copy.deepcopy(raw_profile.get("manual_list_additions", {})) if isinstance(raw_profile.get("manual_list_additions"), dict) else {},
+            "connection_health": _normalize_connection_health(raw_profile.get("connection_health")),
         }
 
     def _save_locked(self) -> None:
@@ -899,6 +928,7 @@ class ProfileStore:
             "failed_resolution_cache": copy.deepcopy(profile.get("failed_resolution_cache", {})),
             "manual_resolution_cache": copy.deepcopy(profile.get("manual_resolution_cache", {})),
             "manual_list_additions": copy.deepcopy(profile.get("manual_list_additions", {})),
+            "connection_health": _normalize_connection_health(profile.get("connection_health")),
         }
 
     def _load_credentials(self, raw_profile: dict) -> dict:
@@ -1230,6 +1260,7 @@ class ProfileStore:
                     if isinstance(row, dict) and int((row.get("match_breakdown") or {}).get("root_series", 0) or 0) > 0
                 ]),
             },
+            "connection_health": _normalize_connection_health(profile.get("connection_health")),
         }
         if include_credentials:
             result["credentials"] = public_credentials(profile.get("credentials", {}))
@@ -1382,6 +1413,7 @@ class ProfileStore:
             "failed_resolution_cache": {},
             "manual_resolution_cache": {},
             "manual_list_additions": {},
+            "connection_health": {},
         }
 
         with self._lock:
@@ -2190,6 +2222,23 @@ class ProfileStore:
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
+
+    def record_connection_health(self, profile_id: str, checks: list[dict]) -> dict:
+        """Persist sanitized connection results for the profile dashboard."""
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            merged = _normalize_connection_health(profile.get("connection_health"))
+            for check in checks or []:
+                if not isinstance(check, dict):
+                    continue
+                provider = str(check.get("provider") or "").strip().lower()
+                normalized = _normalize_connection_health({provider: check})
+                if provider in normalized:
+                    merged[provider] = normalized[provider]
+            profile["connection_health"] = merged
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return copy.deepcopy(merged)
 
     def _authenticate_locked(self, profile_id: str, password: str) -> dict:
         profile = self._get_profile_locked(profile_id)

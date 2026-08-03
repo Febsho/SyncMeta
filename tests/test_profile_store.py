@@ -822,6 +822,29 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertTrue(results["a-b-1"]["timestamp"])
         self.assertFalse(results["a-b-1"]["dry_run"])
 
+    def test_connection_health_is_sanitized_and_persists(self) -> None:
+        created = self.store.create_profile("pw", self.credentials, self.options)
+        profile_id = created["profile_id"]
+
+        self.store.record_connection_health(profile_id, [{
+            "provider": "pmdb",
+            "status": "healthy",
+            "code": "ok",
+            "message": "PublicMetaDB is reachable.",
+            "checked_at": "2026-08-03T12:00:00+00:00",
+            "capabilities": {"readable": True, "writable": True},
+            "identity": "",
+            "recovery_action": "none",
+            "api_key": "must-not-persist",
+            "upstream_payload": {"secret": True},
+        }])
+
+        reloaded = ProfileStore(Path(self.tmpdir.name) / "profiles.json")
+        health = reloaded.get_profile_by_id(profile_id)["connection_health"]["pmdb"]
+        self.assertEqual(health["status"], "healthy")
+        self.assertNotIn("api_key", health)
+        self.assertNotIn("upstream_payload", health)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -750,11 +750,13 @@ class AniListAdapter(ProviderAdapter):
 class PmdbAdapter(ProviderAdapter):
     key = "pmdb"
     label = "PublicMetaDB"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = True
-    target_list_categories = (CATEGORY_WATCHLIST,)
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+
+    _COLLECTION_LIST_NAME = "SyncMeta · Collection"
 
     def __init__(self, client):
         self._client = client
@@ -773,6 +775,23 @@ class PmdbAdapter(ProviderAdapter):
             return str(existing["id"])
         created = self._client.get_or_create_list(
             "Watchlist", "SyncMeta cross-service watchlist", False, "watchlist",
+        )
+        if isinstance(created, dict) and created.get("id"):
+            return str(created["id"])
+        return None
+
+    def _collection_id(self, *, create: bool = False) -> str | None:
+        """Return the managed default collection list without creating on reads."""
+        existing = self._client.find_list_by_name(self._COLLECTION_LIST_NAME)
+        if isinstance(existing, dict) and existing.get("id"):
+            return str(existing["id"])
+        if not create:
+            return None
+        created = self._client.get_or_create_list(
+            self._COLLECTION_LIST_NAME,
+            "Completed and collection items managed by SyncMeta pairs",
+            False,
+            "custom",
         )
         if isinstance(created, dict) and created.get("id"):
             return str(created["id"])
@@ -800,6 +819,11 @@ class PmdbAdapter(ProviderAdapter):
             "label": "Watchlist",
             "category": CATEGORY_WATCHLIST,
             "kind": "status",
+        }, {
+            "key": "collection",
+            "label": "SyncMeta Collection",
+            "category": CATEGORY_COLLECTION,
+            "kind": "status",
         }]
         for entry in self._client.get_lists() or []:
             list_id = entry.get("id")
@@ -807,6 +831,8 @@ class PmdbAdapter(ProviderAdapter):
                 continue
             if str(entry.get("list_type") or "").strip().lower() == "watchlist":
                 continue  # already offered above
+            if str(entry.get("name") or "").strip() == self._COLLECTION_LIST_NAME:
+                continue  # offered above as the default collection
             out.append({
                 "key": f"list:{list_id}",
                 "label": str(entry.get("name") or f"List {list_id}"),
@@ -840,6 +866,31 @@ class PmdbAdapter(ProviderAdapter):
                 items.append(normalized)
         return items
 
+    def _pmdb_collection_items(self, source_lists: list[str] | None) -> list[dict]:
+        selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        list_ids: list[str] = []
+        if not selected or "collection" in selected:
+            default_id = self._collection_id(create=False)
+            if default_id:
+                list_ids.append(default_id)
+        for key in selected:
+            if key.startswith("list:"):
+                list_ids.append(key.split(":", 1)[1])
+
+        items: list[dict] = []
+        seen: set[str] = set()
+        for list_id in list_ids:
+            for raw in self._client.get_list_items(list_id) or []:
+                normalized = self._normalize_pmdb_entry(raw)
+                if not normalized:
+                    continue
+                key = item_key(normalized)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(normalized)
+        return items
+
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         if category == CATEGORY_WATCHLIST:
             return self._pmdb_watchlist_items(source_lists)
@@ -855,6 +906,8 @@ class PmdbAdapter(ProviderAdapter):
                         normalized[field] = entry[field]
                 out.append(normalized)
             return out
+        if category == CATEGORY_COLLECTION:
+            return self._pmdb_collection_items(source_lists)
         return self._unsupported(category, "read")
 
     def target_lists(self) -> list[dict]:
@@ -915,6 +968,22 @@ class PmdbAdapter(ProviderAdapter):
                 )
                 totals["added"] += 1
             return totals
+        if category == CATEGORY_COLLECTION:
+            list_id = self._collection_id(create=True)
+            if not list_id:
+                totals["not_found"] = len(items)
+                return totals
+            payload = []
+            for item in items:
+                tmdb_id = str(item.get("tmdb_id") or "").strip()
+                if not tmdb_id.isdigit():
+                    totals["not_found"] += 1
+                    continue
+                payload.append({"tmdb_id": int(tmdb_id), "media_type": item.get("media_type") or "movie"})
+            if payload:
+                self._client.add_items_to_list_batch(list_id, payload)
+                totals["added"] += len(payload)
+            return totals
         return self._unsupported(category, "write")
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
@@ -932,6 +1001,19 @@ class PmdbAdapter(ProviderAdapter):
             return totals
         if category == CATEGORY_WATCHLIST:
             list_id = self._watchlist_id()
+            if not list_id:
+                totals["not_found"] = len(items)
+                return totals
+            for item in items:
+                pmdb_item_id = item.get("pmdb_item_id")
+                if not pmdb_item_id:
+                    totals["not_found"] += 1
+                    continue
+                self._client.remove_item_from_list(list_id, str(pmdb_item_id))
+                totals["deleted"] += 1
+            return totals
+        if category == CATEGORY_COLLECTION:
+            list_id = self._collection_id(create=False)
             if not list_id:
                 totals["not_found"] = len(items)
                 return totals

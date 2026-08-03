@@ -63,6 +63,7 @@ from src.providers import (
     TraktAdapter,
 )
 from src import log_capture
+from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -591,6 +592,14 @@ def _profile_response(profile: dict, include_credentials: bool = False):
     if not include_credentials:
         payload.pop("credentials", None)
     payload["queue_status"] = _sync_runner.snapshot(payload.get("profile_id"))
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(payload.get("profile_id"))
+        config = _config_from_profile(private_profile)
+        payload["connection_readiness"] = _connection_readiness(
+            config, list((private_profile.get("connection_health") or {}).values())
+        )
+    except (KeyError, ValueError, TypeError):
+        payload["connection_readiness"] = {"ready": False, "blockers": ["Check your connections."], "warnings": []}
     return jsonify({"profile": payload})
 
 
@@ -1058,6 +1067,38 @@ def _pair_capabilities(config: AppConfig) -> dict:
             },
         ],
     }
+
+
+def _connection_readiness(config: AppConfig, checks: list[dict]) -> dict:
+    by_provider = {row.get("provider"): row for row in checks if isinstance(row, dict)}
+    blockers: list[str] = []
+    warnings: list[str] = []
+    pmdb = by_provider.get("pmdb") or {}
+    if pmdb.get("status") != "healthy":
+        blockers.append("Connect and verify PublicMetaDB.")
+
+    source_keys = ("simkl", "trakt", "anilist", "mdblist")
+    readable_sources = [
+        key for key in source_keys
+        if (by_provider.get(key) or {}).get("status") == "healthy"
+        and ((by_provider.get(key) or {}).get("capabilities") or {}).get("readable")
+    ]
+    if not readable_sources:
+        blockers.append("Connect and verify at least one sync source.")
+
+    adapters = _build_provider_adapters(config)
+    pair_service = CrossSyncService(adapters)
+    for pair in _sync_pairs_from_config(config):
+        if not pair.enabled:
+            continue
+        problem = pair_service.validate_pair(pair)
+        if problem:
+            blockers.append(f"{pair.name or pair.pair_id}: {problem}")
+
+    for key, row in by_provider.items():
+        if row.get("status") == "degraded":
+            warnings.append(f"{PROVIDER_LABELS.get(key, key)}: {row.get('message', 'Connection is degraded.')}")
+    return {"ready": not blockers, "blockers": blockers, "warnings": warnings}
 
 
 def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) -> int | None:
@@ -2149,6 +2190,75 @@ def api_profile_status():
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
 
     return _profile_response(profile, include_credentials=include_credentials)
+
+
+@app.route("/api/profile/connections/check", methods=["POST"])
+def api_profile_connections_check():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    body = request.get_json(silent=True) or {}
+    requested = body.get("providers")
+    if requested is not None and not isinstance(requested, list):
+        return _json_error("providers must be a list", 400)
+    providers = [str(value or "").strip().lower() for value in (requested or HEALTH_PROVIDERS)]
+    if not providers:
+        providers = list(HEALTH_PROVIDERS)
+    unknown = [provider for provider in providers if provider not in HEALTH_PROVIDERS]
+    if unknown:
+        return _json_error(f"Unknown provider: {unknown[0]}", 400)
+
+    has_draft = "credentials" in body
+    draft = body.get("credentials") if isinstance(body.get("credentials"), dict) else {}
+    credentials = (
+        merge_credentials(private_profile.get("credentials"), draft)
+        if has_draft else normalize_credentials(private_profile.get("credentials"))
+    )
+    force = bool(body.get("force", True)) or has_draft
+    cached = private_profile.get("connection_health") or {}
+    checks_by_provider: dict[str, dict] = {}
+    to_check: list[str] = []
+    now = datetime.now(timezone.utc)
+    for provider in providers:
+        row = cached.get(provider) if isinstance(cached.get(provider), dict) else None
+        checked_at = None
+        if row:
+            try:
+                checked_at = datetime.fromisoformat(str(row.get("checked_at") or ""))
+                if checked_at.tzinfo is None:
+                    checked_at = checked_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                checked_at = None
+        if not force and checked_at and (now - checked_at).total_seconds() < 900:
+            checks_by_provider[provider] = copy.deepcopy(row)
+        else:
+            to_check.append(provider)
+
+    if to_check:
+        fresh = check_connections(
+            credentials,
+            to_check,
+            trakt_token_callback=lambda access, refresh, expires="": _profile_store.update_trakt_tokens(
+                profile_id, access, refresh, expires
+            ),
+        )
+        checks_by_provider.update({row["provider"]: row for row in fresh})
+        if not has_draft:
+            _profile_store.record_connection_health(profile_id, fresh)
+
+    checks = [checks_by_provider[provider] for provider in providers]
+    all_health = dict(cached)
+    all_health.update(checks_by_provider)
+    config_profile = copy.deepcopy(private_profile)
+    config_profile["credentials"] = credentials
+    config = _config_from_profile(config_profile)
+    readiness = _connection_readiness(config, list(all_health.values()))
+    return jsonify({"checks": checks, "readiness": readiness})
 
 
 @app.route("/api/profile/sync/runs", methods=["POST"])

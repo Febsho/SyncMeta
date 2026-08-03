@@ -549,22 +549,32 @@ class CrossSyncService:
         self._set_status(f"{pair.display_name()}: reading {category} from both services")
         cache = self._read_cache
         source_lists = getattr(pair, "source_lists", None)
+        target_list = self._effective_target_list(pair, category)
 
-        def _read(adapter, lists):
+        def _read(adapter, lists, *, declared_target: bool = False):
+            loader = (
+                (lambda: adapter.fetch_target(category, target_list))
+                if declared_target else
+                (lambda: adapter.fetch(category, lists))
+            )
             if cache is None:
-                return adapter.fetch(category, lists) or []
+                return loader() or []
             before = cache.hits
             items = cache.get_or_fetch(
-                adapter.key, category, lists, lambda: adapter.fetch(category, lists),
+                adapter.key, category, lists, loader,
             )
             if cache.hits > before:
                 result.cached_reads += 1
             return items
 
         sides = {}
-        for label, adapter, lists in (("first", first, source_lists), ("second", second, None)):
+        second_lists = [target_list] if target_list else None
+        for label, adapter, lists, declared_target in (
+            ("first", first, source_lists, False),
+            ("second", second, second_lists, True),
+        ):
             try:
-                sides[label] = _read(adapter, lists)
+                sides[label] = _read(adapter, lists, declared_target=declared_target)
             except Exception as exc:
                 # Either side failing is fatal here: without both, every item on
                 # the side that did load looks one-sided and would be acted on.
@@ -624,7 +634,6 @@ class CrossSyncService:
             (second, remove_from_second, False, "remove"),
             (first, remove_from_first, True, "remove"),
         ]
-        target_list = getattr(pair, "target_list", "")
         for adapter, items, reverse, verb in plan:
             if not items:
                 continue
@@ -642,7 +651,8 @@ class CrossSyncService:
                         result.unmapped += int(totals.get("not_found") or 0)
                     if cache is not None:
                         cache.apply_write(
-                            adapter.key, category, None,
+                            adapter.key, category,
+                            None if reverse else ([target_list] if target_list else None),
                             added=items if verb == "add" else [],
                             removed=items if verb == "remove" else [],
                         )

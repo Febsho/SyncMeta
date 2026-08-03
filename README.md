@@ -71,6 +71,12 @@ titles if you add a free TMDB API key. Without one it still works and shows ids.
 samples, timings, and the last 25 detailed run records. A dry run previews
 everything without writing.
 
+**Connection health.** The Connections screen verifies every configured
+provider with a read-only request, reports read/write capability and the last
+check time, and offers the appropriate reconnect, edit, or retry action. The
+dashboard shows whether PublicMetaDB, a readable source, and configured sync
+pairs are ready before you start a run.
+
 **Admin page.** Set `ADMIN_PASSWORD` to enable `/admin`: profile overview, queue
 state, API request counters, anime cache repair and anime mapping refresh.
 
