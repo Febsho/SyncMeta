@@ -1,5 +1,7 @@
 import unittest
 
+import requests
+
 from src.config import TraktConfig
 from src.trakt_client import TraktAuthenticationError, TraktClient
 
@@ -58,7 +60,28 @@ class ForbiddenThenOkSession(RefreshingSession):
         return FakeResponse(200, "[]", [])
 
 
+class AccountLimitResponse(FakeResponse):
+    def raise_for_status(self) -> None:
+        raise requests.HTTPError(
+            "420 Client Error for url: https://api.trakt.tv/sync/watchlist",
+            response=self,
+        )
+
+
+class AccountLimitSession:
+    def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
+        return AccountLimitResponse(420, "account limit exceeded")
+
+
 class TraktClientTests(unittest.TestCase):
+    def test_420_is_reported_as_an_actionable_account_limit(self) -> None:
+        """A bare HTTP 420 looks like throttling, but Trakt means item limit."""
+        client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))
+        client._session = AccountLimitSession()
+
+        with self.assertRaisesRegex(Exception, "(?i)account limit.*VIP"):
+            client._get("/sync/watchlist")
+
     def test_401_raises_reconnect_error(self) -> None:
         client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))
         client._session = FakeSession()

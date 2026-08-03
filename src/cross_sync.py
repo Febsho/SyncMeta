@@ -82,8 +82,18 @@ class ReadCache:
             self._entries.pop(other, None)
         if current is None:
             return
-        removed_keys = {item_key(item) for item in (removed or [])}
-        kept = [item for item in current if item_key(item) not in removed_keys]
+        automatic_simkl = any(
+            str(value).startswith("auto:simkl:") for value in (source_lists or [])
+        )
+
+        def _key(item):
+            base = item_key(item)
+            if automatic_simkl:
+                return f"{str(item.get('_syncmeta_source_status') or '')}:{base}"
+            return base
+
+        removed_keys = {_key(item) for item in (removed or [])}
+        kept = [item for item in current if _key(item) not in removed_keys]
         kept.extend(added or [])
         self._entries[key] = kept
 
@@ -271,6 +281,19 @@ class CrossSyncService:
                 source.write_blocked_reason()
                 or f"{source.label} cannot be written to, so it cannot be one end of a two-way pair."
             )
+        target_list = str(getattr(pair, "target_list", "") or "").strip()
+        if target_list and getattr(target, "supports_target_lists", None) is False:
+            return f"{target.label} does not support writable custom lists."
+        if target_list and getattr(target, "target_list_categories", ()):
+            unsupported_destinations = [
+                category for category in pair.categories
+                if category not in set(getattr(target, "target_list_categories", ()))
+            ]
+            if unsupported_destinations:
+                return (
+                    f"{target.label} custom lists cannot receive "
+                    f"{', '.join(unsupported_destinations)}."
+                )
 
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
@@ -289,6 +312,38 @@ class CrossSyncService:
                 parts.append(f"{target.label} cannot receive {', '.join(unwritable)}")
             return "; ".join(parts) or "No categories in common."
         return ""
+
+    @staticmethod
+    def _effective_target_list(pair, category: str) -> str:
+        """Resolve provider-aware destinations without changing saved pairs.
+
+        SIMKL Plan to Watch is a true Trakt watchlist.  Its other status lists
+        are not a Trakt collection (and flattening them there causes the HTTP
+        420 account-limit failure), so an existing broad SIMKL→Trakt pair is
+        transparently routed to one managed personal list per SIMKL status.
+        """
+        requested = str(getattr(pair, "target_list", "") or "").strip()
+        if pair.source == "simkl" and pair.target == "trakt":
+            if category in ("watchlist", "history"):
+                return ""
+            if category == "collection" and not requested:
+                selected = []
+                for key in getattr(pair, "source_lists", []) or []:
+                    parts = str(key).split(":")
+                    if len(parts) == 3 and parts[0] == "status" and parts[1] in {
+                        "watching", "completed", "hold", "dropped",
+                    } and parts[1] not in selected:
+                        selected.append(parts[1])
+                return "auto:simkl:" + ",".join(selected or ["completed"])
+        return requested
+
+    @staticmethod
+    def _comparison_key(item: dict, target_list: str) -> str:
+        """Use status-aware identity only for automatic SIMKL status lists."""
+        base = item_key(item)
+        if str(target_list or "").startswith("auto:simkl:"):
+            return f"{str(item.get('_syncmeta_source_status') or '')}:{base}"
+        return base
 
     # ── execution ──────────────────────────────────────────────────────────
 
@@ -377,7 +432,17 @@ class CrossSyncService:
             return result
 
         try:
-            target_items = _read(target, None)
+            target_list = self._effective_target_list(pair, category)
+            if cache is None:
+                target_items = target.fetch_target(category, target_list) or []
+            else:
+                before = cache.hits
+                target_items = cache.get_or_fetch(
+                    target.key, category, [target_list] if target_list else None,
+                    lambda: target.fetch_target(category, target_list),
+                )
+                if cache.hits > before:
+                    result.cached_reads += 1
         except Exception as exc:
             # Without the target's current contents everything would look new and
             # be rewritten, so this is fatal for the category rather than ignored.
@@ -400,12 +465,12 @@ class CrossSyncService:
                 # Nothing portable to match on; count it rather than guessing.
                 result.unmapped += 1
                 continue
-            source_by_key.setdefault(item_key(item), item)
+            source_by_key.setdefault(self._comparison_key(item, target_list), item)
 
         target_by_key: dict[str, dict] = {}
         for raw_item in target_items:
             item = enrich_identity(raw_item)
-            target_by_key.setdefault(item_key(item), item)
+            target_by_key.setdefault(self._comparison_key(item, target_list), item)
 
         to_add = [item for key, item in source_by_key.items() if key not in target_by_key]
         result.skipped_existing = len(source_by_key) - len(to_add)
@@ -424,7 +489,7 @@ class CrossSyncService:
                 result.added = len(to_add)
             else:
                 try:
-                    totals = target.add(category, to_add, getattr(pair, "target_list", "")) or {}
+                    totals = target.add(category, to_add, target_list) or {}
                     result.added = int(totals.get("added") or 0)
                     result.unmapped += int(totals.get("not_found") or 0)
                     wrote_added = to_add
@@ -442,7 +507,7 @@ class CrossSyncService:
                 result.removed = len(to_remove)
             else:
                 try:
-                    totals = target.remove(category, to_remove, getattr(pair, "target_list", "")) or {}
+                    totals = target.remove(category, to_remove, target_list) or {}
                     result.removed = int(totals.get("deleted") or 0)
                     wrote_removed = to_remove
                 except Exception as exc:
@@ -456,7 +521,8 @@ class CrossSyncService:
         # must see what this one just did, or it would re-add the same items.
         if cache is not None and not self._dry_run and (wrote_added or wrote_removed):
             cache.apply_write(
-                target.key, category, None, added=wrote_added, removed=wrote_removed,
+                target.key, category, [target_list] if target_list else None,
+                added=wrote_added, removed=wrote_removed,
             )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)

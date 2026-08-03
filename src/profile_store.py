@@ -34,6 +34,7 @@ SCHEDULE_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_SCHEDULE_JITTER_SECONDS
 LIST_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_LIST_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
 HISTORY_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_HISTORY_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
 RESUME_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_RESUME_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
+PAIR_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_PAIR_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
 SIMKL_ALLOWED_STATUSES = {"watching", "plantowatch", "completed", "hold", "dropped"}
 ANILIST_ALLOWED_STATUSES = {"CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "COMPLETED_ONA", "COMPLETED_OVA", "COMPLETED_MOVIE"}
 ALLOWED_VISIBILITIES = {"private", "public"}
@@ -792,6 +793,21 @@ class ProfileStore:
             next_history_sync_at = self._next_history_sync_iso(
                 options["trakt_watched_history_interval_seconds"], profile_id
             )
+        raw_pair_schedule = raw_profile.get("pair_sync_schedule")
+        raw_pair_schedule = raw_pair_schedule if isinstance(raw_pair_schedule, dict) else {}
+        pair_sync_schedule: dict[str, dict] = {}
+        for pair in options.get("sync_pairs", []):
+            pair_id = str(pair.get("pair_id") or "")
+            if not pair_id or not pair.get("enabled", True) or not pair.get("auto_sync", False):
+                continue
+            previous = raw_pair_schedule.get(pair_id) if isinstance(raw_pair_schedule.get(pair_id), dict) else {}
+            next_at = previous.get("next_sync_at")
+            if not next_at or (parse_iso_datetime(next_at) or utc_now()) <= utc_now():
+                next_at = self._next_pair_sync_iso(pair["interval_seconds"], profile_id, pair_id)
+            pair_sync_schedule[pair_id] = {
+                "last_sync_at": previous.get("last_sync_at"),
+                "next_sync_at": next_at,
+            }
 
         return {
             "profile_id": profile_id,
@@ -819,6 +835,7 @@ class ProfileStore:
             "activity_state": _normalize_activity_state(raw_profile.get("activity_state")),
             "managed_lists": _normalize_managed_lists(raw_profile.get("managed_lists", [])),
             "last_pair_results": copy.deepcopy(raw_profile.get("last_pair_results", {})) if isinstance(raw_profile.get("last_pair_results"), dict) else {},
+            "pair_sync_schedule": pair_sync_schedule,
             "anime_manual_overrides": copy.deepcopy(raw_profile.get("anime_manual_overrides", {})) if isinstance(raw_profile.get("anime_manual_overrides"), dict) else {},
             "anime_review_decisions": copy.deepcopy(raw_profile.get("anime_review_decisions", {})) if isinstance(raw_profile.get("anime_review_decisions"), dict) else {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(raw_profile.get("last_sync_job_snapshot")),
@@ -870,6 +887,7 @@ class ProfileStore:
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "managed_lists": copy.deepcopy(profile.get("managed_lists", [])),
             "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
+            "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
             "anime_manual_overrides": copy.deepcopy(profile.get("anime_manual_overrides", {})),
             "anime_review_decisions": copy.deepcopy(profile.get("anime_review_decisions", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
@@ -919,6 +937,11 @@ class ProfileStore:
         jitter = cls._schedule_jitter_seconds(profile_id, "history", HISTORY_SYNC_JITTER_SECONDS) if profile_id else 0
         return (utc_now() + timedelta(seconds=interval_seconds + jitter)).isoformat()
 
+    @classmethod
+    def _next_pair_sync_iso(cls, interval_seconds: int, profile_id: str, pair_id: str) -> str:
+        jitter = cls._schedule_jitter_seconds(profile_id, f"pair:{pair_id}", PAIR_SYNC_JITTER_SECONDS)
+        return (utc_now() + timedelta(seconds=max(43200, int(interval_seconds)) + jitter)).isoformat()
+
     @staticmethod
     def _normalize_sync_modes(sync_modes: dict | None) -> dict[str, bool]:
         raw = sync_modes or {}
@@ -926,6 +949,8 @@ class ProfileStore:
             "lists": bool(raw.get("lists", True)),
             "history": bool(raw.get("history", False)),
             "resume": bool(raw.get("resume", False)),
+            "pairs": bool(raw.get("pairs", False)),
+            "pair_ids": [str(value) for value in (raw.get("pair_ids") or []) if str(value)],
         }
 
     def _apply_next_run_schedule(self, profile: dict, sync_modes: dict[str, bool], dry_run: bool) -> None:
@@ -954,6 +979,22 @@ class ProfileStore:
                 )
             else:
                 profile["next_resume_sync_at"] = None
+        if sync_modes.get("pairs"):
+            schedule = dict(profile.get("pair_sync_schedule") or {})
+            pairs = {str(pair.get("pair_id")): pair for pair in options.get("sync_pairs", [])}
+            now = utc_now_iso()
+            for pair_id in sync_modes.get("pair_ids") or []:
+                pair = pairs.get(pair_id)
+                if not pair or not pair.get("enabled", True) or not pair.get("auto_sync", False):
+                    schedule.pop(pair_id, None)
+                    continue
+                schedule[pair_id] = {
+                    "last_sync_at": now,
+                    "next_sync_at": self._next_pair_sync_iso(
+                        pair.get("interval_seconds", 43200), profile.get("profile_id", ""), pair_id,
+                    ),
+                }
+            profile["pair_sync_schedule"] = schedule
 
     @staticmethod
     def _append_history_entry(
@@ -1168,6 +1209,7 @@ class ProfileStore:
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "options": copy.deepcopy(profile.get("options", {})),
             "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
+            "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
             "sync_job_id": profile.get("sync_job_id"),
             "latest_run_id": str(profile.get("sync_runs_detailed", [{}])[0].get("run_id", "") if profile.get("sync_runs_detailed") else ""),
@@ -1319,6 +1361,16 @@ class ProfileStore:
             "activity_state": _normalize_activity_state(None),
             "managed_lists": [],
             "last_pair_results": {},
+            "pair_sync_schedule": {
+                pair["pair_id"]: {
+                    "last_sync_at": None,
+                    "next_sync_at": self._next_pair_sync_iso(
+                        pair["interval_seconds"], profile_id, pair["pair_id"],
+                    ),
+                }
+                for pair in normalized_options.get("sync_pairs", [])
+                if pair.get("enabled", True) and pair.get("auto_sync", False)
+            },
             "anime_manual_overrides": {},
             "anime_review_decisions": {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(None),
@@ -1558,12 +1610,18 @@ class ProfileStore:
                 if profile["sync_running"]:
                     continue
                 options = profile.get("options", {})
-                if not options.get("auto_sync", True) and not options.get("auto_history_sync", False) and not options.get("auto_resume_sync", False):
+                auto_pairs = [
+                    pair for pair in options.get("sync_pairs", [])
+                    if pair.get("enabled", True) and pair.get("auto_sync", False)
+                ]
+                if not options.get("auto_sync", True) and not options.get("auto_history_sync", False) and not options.get("auto_resume_sync", False) and not auto_pairs:
                     continue
                 due_modes = {
                     "lists": False,
                     "history": False,
                     "resume": False,
+                    "pairs": False,
+                    "pair_ids": [],
                 }
                 next_sync_at = parse_iso_datetime(profile.get("next_sync_at"))
                 if options.get("auto_sync", True) and (next_sync_at is None or next_sync_at <= now):
@@ -1578,6 +1636,14 @@ class ProfileStore:
                     next_resume_sync_at is None or next_resume_sync_at <= now
                 ):
                     due_modes["resume"] = True
+                schedule = profile.get("pair_sync_schedule") or {}
+                for pair in auto_pairs:
+                    pair_id = str(pair.get("pair_id") or "")
+                    state = schedule.get(pair_id) if isinstance(schedule.get(pair_id), dict) else {}
+                    next_pair_at = parse_iso_datetime(state.get("next_sync_at"))
+                    if next_pair_at is None or next_pair_at <= now:
+                        due_modes["pair_ids"].append(pair_id)
+                due_modes["pairs"] = bool(due_modes["pair_ids"])
                 if not any(due_modes.values()):
                     continue
                 now_iso = utc_now_iso()
@@ -1904,9 +1970,33 @@ class ProfileStore:
             options = dict(profile.get("options") or {})
             options["sync_pairs"] = normalized
             profile["options"] = options
+            previous_schedule = dict(profile.get("pair_sync_schedule") or {})
+            schedule: dict[str, dict] = {}
+            for pair in normalized:
+                pair_id = pair["pair_id"]
+                if not pair.get("enabled", True) or not pair.get("auto_sync", False):
+                    continue
+                prior = previous_schedule.get(pair_id)
+                schedule[pair_id] = prior if isinstance(prior, dict) and prior.get("next_sync_at") else {
+                    "last_sync_at": None,
+                    "next_sync_at": self._next_pair_sync_iso(
+                        pair["interval_seconds"], profile_id, pair_id,
+                    ),
+                }
+            profile["pair_sync_schedule"] = schedule
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
+
+    def mark_pairs_synced(self, profile_id: str, pair_ids: list[str]) -> None:
+        """Advance only the schedules of pairs that actually completed."""
+        with self._lock:
+            profile = self._profiles[self._normalize_profile_id(profile_id)]
+            self._apply_next_run_schedule(profile, {
+                "lists": False, "history": False, "resume": False,
+                "pairs": True, "pair_ids": list(pair_ids or []),
+            }, False)
+            self._save_locked()
 
     def update_pair_last_results(self, profile_id: str, results: list[dict], dry_run: bool = False) -> None:
         """Remember the outcome of the latest cross-service pair run per pair.

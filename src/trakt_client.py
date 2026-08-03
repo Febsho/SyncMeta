@@ -223,6 +223,11 @@ class TraktClient:
                     "revoked. Verify the Client ID/Secret in Connections and "
                     "reconnect Trakt."
                 )
+        if response.status_code == 420:
+            raise RuntimeError(
+                "Trakt account limit reached (HTTP 420). The native collection or "
+                "list is over the account tier limit; reduce it or use Trakt VIP."
+            )
         response.raise_for_status()
         return response
 
@@ -320,6 +325,33 @@ class TraktClient:
             if normalized:
                 metadata.append(normalized)
         return metadata
+
+    def get_or_create_personal_list(self, name: str, description: str = "") -> dict:
+        """Return a personal list by name, creating it when necessary.
+
+        Cross-service status sync deliberately uses personal lists instead of
+        Trakt's collection: the collection has account-tier size limits and is
+        not semantically equivalent to SIMKL's Watching/On Hold/Dropped states.
+        """
+        wanted = str(name or "").strip()
+        if not wanted:
+            raise ValueError("Trakt list name is required")
+        for meta in self.get_personal_lists_metadata():
+            if str(meta.get("name") or "").strip().casefold() == wanted.casefold():
+                return meta
+        raw = self._post("/users/me/lists", {
+            "name": wanted,
+            "description": str(description or ""),
+            "privacy": "private",
+            "display_numbers": False,
+            "allow_comments": False,
+            "sort_by": "rank",
+            "sort_how": "asc",
+        }) or {}
+        normalized = self._normalize_list_metadata(raw, source="personal")
+        if not normalized:
+            raise RuntimeError(f"Trakt created {wanted!r} but returned no usable list id")
+        return normalized
 
     def search_lists(self, query: str) -> list[dict]:
         query = str(query or "").strip()

@@ -186,6 +186,10 @@
     .pair-card-foot .spacer{margin-left:auto}
     .pair-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--z400);cursor:pointer}
     .pair-lastrun{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--label)}
+    .pair-schedule{display:grid;grid-template-columns:minmax(210px,1fr) minmax(170px,240px);gap:16px;align-items:end}
+    .pair-schedule .form-row{margin:0}
+    .pair-schedule-copy{font-size:12px;color:var(--z500);line-height:1.45;margin-top:7px}
+    .pair-schedule-next{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--accent);margin-top:6px}
     .pair-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
     .pair-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.45);background:rgba(20,83,45,.26);color:var(--z100);font-size:12px;font-family:inherit;cursor:pointer;max-width:100%;text-transform:none;letter-spacing:normal}
     .pair-chip:hover{border-color:var(--red);color:var(--white)}
@@ -372,6 +376,7 @@
     .pair-flow{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .pair-node{padding:2px 8px;border-radius:6px;background:var(--z900);border:1px solid var(--z800);color:var(--z100);font-size:12px;font-weight:600}
     .pair-badge{padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid var(--z800);color:var(--z400);text-transform:lowercase}
+    .pair-badge.auto{border-color:rgba(124,109,247,.42);color:var(--accent);background:rgba(124,109,247,.08)}
     .pair-badge.warn{border-color:rgba(251,146,60,.45);color:var(--orange)}
     .pair-badge.danger{border-color:rgba(248,113,113,.45);color:var(--red)}
     .pair-row-actions{display:flex;gap:6px;margin-left:auto;align-items:center}
@@ -515,6 +520,7 @@
       .pipeline-head{gap:8px;padding:12px 14px}
       .pipeline-title{white-space:normal}
       .pipeline-summary{min-width:0}
+      .pair-schedule{grid-template-columns:1fr}
       /* Seven nav items do not fit a phone. They used to be clipped by the flex
          row with a hidden scrollbar, so Settings — which holds Connections, and
          is where a new user has to go first — was off the right edge with
@@ -979,6 +985,10 @@
             </div>
             <div id="pairs-capabilities" class="pair-caps"></div>
             <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
+            <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px">
+              <div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div>
+              <div class="live-activity-console" id="pairs-live-body"><div class="empty">Waiting for provider activity…</div></div>
+            </div>
             <div id="pairs-results" style="margin-top:12px"></div>
           </div>
         </div>
@@ -2472,24 +2482,61 @@
     let liveActivityCursor = 0;
     let liveActivityPolling = null;
     let liveActivityRows = [];
+    let liveActivitySince = 0;
+    let activeDashboardPairRun = null;
 
     function updateLiveActivityPanel(profile) {
       const panel = el('live-activity-panel');
       if (!panel) return;
-      const running = !!(profile && profile.sync_running);
+      const running = !!((profile && profile.sync_running) || activeDashboardPairRun);
       panel.classList.toggle('hidden', !running);
       if (!running) {
         stopLiveActivityFeed();
         return;
       }
+      const runStartedAt = (activeDashboardPairRun && activeDashboardPairRun.startedAt)
+        || (profile && profile.sync_started_at);
+      const runStartedMs = runStartedAt ? new Date(runStartedAt).getTime() : 0;
+      if (Number.isFinite(runStartedMs) && runStartedMs > liveActivitySince) {
+        liveActivitySince = runStartedMs;
+        liveActivityRows = [];
+      }
       const statusNode = el('live-activity-status');
       if (statusNode) {
-        const started = profile.sync_started_at ? `started ${timeAgo(profile.sync_started_at)}` : '';
-        statusNode.innerHTML = `<span class="live-step">${esc(profile.sync_status || 'Running…')}</span>${started ? `<span class="history-time">${esc(started)}</span>` : ''}`;
+        const pairStarted = activeDashboardPairRun && activeDashboardPairRun.startedAt;
+        const startedAt = (profile && profile.sync_started_at) || pairStarted;
+        const started = startedAt ? `started ${timeAgo(startedAt)}` : '';
+        const pairLabel = activeDashboardPairRun && activeDashboardPairRun.label;
+        const status = pairLabel
+          ? `${activeDashboardPairRun.dryRun ? 'Previewing' : 'Syncing'} ${pairLabel}`
+          : ((profile && profile.sync_status) || 'Running…');
+        statusNode.innerHTML = `<span class="live-step">${esc(status)}</span>${started ? `<span class="history-time">${esc(started)}</span>` : ''}`;
       }
       const meta = el('live-activity-meta');
-      if (meta) meta.textContent = profile.sync_updated_at ? `Updated ${timeAgo(profile.sync_updated_at)}` : '';
+      if (meta) meta.textContent = profile && profile.sync_updated_at ? `Updated ${timeAgo(profile.sync_updated_at)}` : 'Live logs';
       startLiveActivityFeed();
+    }
+
+    function reconcileQueuedPairRun(profile) {
+      const active = activeDashboardPairRun;
+      if (!active || !active.queued || !profile) return;
+      if (profile.sync_running) active.sawRunning = true;
+      const startedMs = new Date(active.startedAt || 0).getTime();
+      const results = profile.last_pair_results || {};
+      const candidates = active.pairId ? [results[active.pairId]] : Object.values(results);
+      const hasFreshResult = candidates.some(result => {
+        const timestamp = result && result.timestamp ? new Date(result.timestamp).getTime() : 0;
+        return Number.isFinite(timestamp) && timestamp >= (startedMs - 1000);
+      });
+      const queue = profile.queue_status || {};
+      const stillQueued = Number(queue.queued || queue.pending || 0) > 0;
+      if (!hasFreshResult && !(active.sawRunning && !profile.sync_running && !stillQueued)) return;
+
+      activeDashboardPairRun = null;
+      const status = el('pairs-live-status');
+      if (status) status.innerHTML = `<span class="live-step">Sync complete</span><span class="history-time">${esc(new Date().toLocaleTimeString())}</span>`;
+      [el('btn-pairs-run'), el('btn-pairs-dry-run')].filter(Boolean).forEach(button => { button.disabled = false; });
+      document.querySelectorAll('[data-pair-run], [data-pair-dry-run]').forEach(button => { button.disabled = false; });
     }
 
     async function fetchLiveActivity() {
@@ -2500,9 +2547,13 @@
           return;
         }
         const data = await resp.json();
-        const entries = Array.isArray(data.entries) ? data.entries : [];
+        const rawEntries = Array.isArray(data.entries) ? data.entries : [];
+        if (rawEntries.length) {
+          liveActivityCursor = Number(rawEntries[rawEntries.length - 1].seq || liveActivityCursor);
+        }
+        const entries = rawEntries.filter(entry =>
+          !liveActivitySince || !entry.ts || (Number(entry.ts) * 1000) >= (liveActivitySince - 1000));
         if (!entries.length) return;
-        liveActivityCursor = Number(entries[entries.length - 1].seq || liveActivityCursor);
         liveActivityRows = liveActivityRows.concat(entries).slice(-80);
         renderLiveActivity();
       } catch (err) {
@@ -2511,18 +2562,21 @@
     }
 
     function renderLiveActivity() {
-      const body = el('live-activity-body');
-      if (!body) return;
+      const bodies = [el('live-activity-body'), el('pairs-live-body')].filter(Boolean);
+      if (!bodies.length) return;
       if (!liveActivityRows.length) {
-        body.innerHTML = '<div class="empty">Waiting for sync activity…</div>';
+        bodies.forEach(body => { body.innerHTML = '<div class="empty">Waiting for sync activity…</div>'; });
         return;
       }
-      body.innerHTML = liveActivityRows.map(entry => {
+      const html = liveActivityRows.map(entry => {
         const stamp = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
         const level = String(entry.level || 'INFO').toUpperCase();
         return `<div class="live-activity-row ${esc(level)}"><span class="live-time">${esc(stamp)}</span><span>${esc(entry.message || '')}</span></div>`;
       }).join('');
-      body.scrollTop = body.scrollHeight;
+      bodies.forEach(body => {
+        body.innerHTML = html;
+        body.scrollTop = body.scrollHeight;
+      });
     }
 
     function startLiveActivityFeed() {
@@ -2673,6 +2727,11 @@
       const removalBadge = removal === 'additive'
         ? '<span class="pair-badge">additive</span>'
         : `<span class="pair-badge ${removal === 'mirror' ? 'danger' : 'warn'}">${esc(removal)}</span>`;
+      const scheduleBadge = pair.auto_sync
+        ? `<span class="pair-badge auto">${esc(pairScheduleText(pair))}</span>`
+        : '<span class="pair-badge">manual</span>';
+      const isRunning = !!activeDashboardPairRun
+        && (!activeDashboardPairRun.pairId || activeDashboardPairRun.pairId === pair.pair_id);
 
       let stats = '<span class="c-dim">never run</span>';
       let meta = disabled ? 'disabled' : 'not run yet';
@@ -2708,6 +2767,7 @@
               <span class="pair-node">${esc(pairDashLabel(pair.target))}</span>
               ${twoWay ? '<span class="pair-badge">two-way</span>' : ''}
               ${removalBadge}
+              ${scheduleBadge}
             </div>
           </span>
           <span class="pipe-status-stats">
@@ -2716,8 +2776,10 @@
           </span>
           <span class="pair-row-actions">
             <span class="pipe-status-meta" style="margin-left:0">${meta}</span>
-            <button class="btn btn-sm" type="button" ${disabled ? 'disabled' : ''}
-                    data-dash-pair-run="${escAttr(pair.pair_id || '')}">Run</button>
+            <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
+                    data-dash-pair-dry="${escAttr(pair.pair_id || '')}">${isRunning ? 'Working…' : 'Preview'}</button>
+            <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
+                    data-dash-pair-run="${escAttr(pair.pair_id || '')}">${isRunning ? 'Syncing…' : 'Run'}</button>
           </span>
         </div>
         ${problem}
@@ -2734,10 +2796,12 @@
       pairsDashDelegated = true;
       node.addEventListener('click', (event) => {
         const button = event.target.closest && event.target.closest('button');
-        if (!button || !button.dataset || button.dataset.dashPairRun === undefined) return;
-        const pairId = button.dataset.dashPairRun;
+        if (!button || !button.dataset) return;
+        const dryRun = button.dataset.dashPairDry !== undefined;
+        if (!dryRun && button.dataset.dashPairRun === undefined) return;
+        const pairId = dryRun ? button.dataset.dashPairDry : button.dataset.dashPairRun;
         if (!pairId) return;
-        runPairsFromDashboard(pairId, false);
+        runPairsFromDashboard(pairId, dryRun);
       });
     }
 
@@ -2746,7 +2810,15 @@
       const body = el('pairs-dash-body');
       if (!panel || !body) return;
       bindPairsDashEvents(body);
-      const pairs = ((profile && profile.options) || {}).sync_pairs || [];
+      const rawPairs = ((profile && profile.options) || {}).sync_pairs || [];
+      const schedule = (profile && profile.pair_sync_schedule) || {};
+      const pairs = rawPairs.map(pair => {
+        const scheduled = schedule[pair.pair_id];
+        if (!scheduled) return pair;
+        return typeof scheduled === 'string'
+          ? { ...pair, next_sync_at: scheduled }
+          : { ...pair, ...scheduled };
+      });
       const results = (profile && profile.last_pair_results) || {};
       if (!pairs.length) {
         panel.classList.add('hidden');
@@ -2775,35 +2847,80 @@
     }
 
     async function runPairsFromDashboard(pairId, dryRun) {
-      const buttons = [el('btn-dash-pairs-run'), el('btn-dash-pairs-dry')].filter(Boolean);
+      const buttons = [el('btn-dash-pairs-run'), el('btn-dash-pairs-dry'),
+        ...document.querySelectorAll('[data-dash-pair-run], [data-dash-pair-dry]')].filter(Boolean);
       buttons.forEach(b => { b.disabled = true; });
       const runBtn = el('btn-dash-pairs-run');
-      if (runBtn && !pairId) runBtn.textContent = dryRun ? 'Running...' : 'Running...';
+      if (runBtn && !pairId) runBtn.textContent = dryRun ? 'Previewing…' : 'Syncing…';
+      const dashboardPairs = (((lastDashboardProfile || {}).options || {}).sync_pairs || []);
+      const selectedPair = dashboardPairs.find(pair => pair.pair_id === pairId);
+      activeDashboardPairRun = {
+        pairId: pairId || '',
+        dryRun: !!dryRun,
+        startedAt: new Date().toISOString(),
+        label: selectedPair
+          ? (selectedPair.name || `${pairDashLabel(selectedPair.source)} ${selectedPair.mode === 'two_way' ? '↔' : '→'} ${pairDashLabel(selectedPair.target)}`)
+          : 'all cross-service pairs',
+      };
+      liveActivityRows = [];
+      liveActivityCursor = 0;
+      renderPairsDashPanel(lastDashboardProfile);
+      updateLiveActivityPanel(lastDashboardProfile || {});
+      let keepActive = false;
       try {
-        const payload = { dry_run: !!dryRun };
+        const payload = { dry_run: !!dryRun, background: true };
         if (pairId) payload.pair_id = pairId;
         const result = await apiPost('/api/profile/pairs/run', payload);
         if (!result.ok) {
           showToast(formatApiError(result.data, 'Sync pair run failed.'), true, false);
           return;
         }
+        const queued = ['queued', 'accepted', 'running'].includes(String(result.data.status || '').toLowerCase())
+          && !Array.isArray(result.data.results);
+        if (queued) {
+          activeDashboardPairRun.queued = true;
+          activeDashboardPairRun.sawRunning = String(result.data.status || '').toLowerCase() === 'running';
+          keepActive = true;
+          showToast(`${dryRun ? 'Preview' : 'Sync'} queued — live progress is shown below.`, false, true);
+          if (result.data.profile) {
+            renderDashboard(result.data.profile);
+          } else {
+            _forceStatusRefresh();
+          }
+          return;
+        }
         const runs = result.data.results || [];
         const added = runs.reduce((sum, r) => sum + (r.added || 0), 0);
         const removed = runs.reduce((sum, r) => sum + (r.removed || 0), 0);
+        const failures = runs.reduce((sum, run) => sum + (Number(run.error_count || 0)
+          || ((run.errors || []).length
+            + (run.categories || []).reduce((n, category) => n + (category.errors || []).length, 0))), 0);
         const cached = Number(result.data.cached_reads || 0);
         const savedNote = cached ? ` (${cached} read${cached === 1 ? '' : 's'} served from cache)` : '';
-        showToast(
-          dryRun
-            ? `Dry run — ${added} would be added, ${removed} removed${savedNote}.`
-            : `Pairs synced — ${added} added, ${removed} removed${savedNote}.`,
-          false, true,
-        );
+        if (failures) {
+          showToast({
+            message: `${dryRun ? 'Preview' : 'Sync'} finished with ${failures} error${failures === 1 ? '' : 's'}.`,
+            hint: 'Open Logs for the complete provider response.',
+          }, true, false);
+        } else {
+          showToast(
+            dryRun
+              ? `Preview complete — ${added} would be added, ${removed} removed${savedNote}.`
+              : `Pairs synced — ${added} added, ${removed} removed${savedNote}.`,
+            false, true,
+          );
+        }
         // A dry run writes nothing, so the stored results the dashboard renders
         // are unchanged; only a real run needs the profile re-read.
         if (!dryRun) _forceStatusRefresh();
       } catch {
         showToast('Network error while running sync pairs.', true);
       } finally {
+        if (!keepActive) {
+          activeDashboardPairRun = null;
+          updateLiveActivityPanel(lastDashboardProfile || {});
+          renderPairsDashPanel(lastDashboardProfile);
+        }
         buttons.forEach(b => { b.disabled = false; });
         if (runBtn) runBtn.textContent = 'Run All';
       }
@@ -4622,6 +4739,7 @@
         localStorage.setItem(PROFILE_KEY, profile.profile_id);
       }
       lastDashboardProfile = profile;
+      reconcileQueuedPairRun(profile);
       if (!resultsHaveList(profile.last_results || [], pendingDeleteListName)) {
         pendingDeleteListName = '';
       }
@@ -6289,14 +6407,14 @@
       if (!node) return;
       const pairs = pairsState.pairs || [];
       const enabled = pairs.filter(p => p.enabled !== false).length;
+      const automatic = pairs.filter(p => p.enabled !== false && p.auto_sync).length;
       const problems = pairs.filter(p => p.problem).length;
-      const destructive = pairs.filter(p => p.removal_mode && p.removal_mode !== 'additive').length;
       const connected = (pairsState.providers || []).filter(p => p.configured).length;
       node.innerHTML = `
         <div class="card"><div class="card-label">Pairs</div><div class="card-value">${pairs.length}</div><div class="card-sub">${enabled} enabled</div></div>
+        <div class="card"><div class="card-label">Automatic</div><div class="card-value" style="color:${automatic ? 'var(--accent)' : 'var(--z600)'}">${automatic}</div><div class="card-sub">${automatic ? 'pair schedule(s) active' : 'all pairs run manually'}</div></div>
         <div class="card"><div class="card-label">Services</div><div class="card-value">${connected}</div><div class="card-sub">of ${(pairsState.providers || []).length} connected</div></div>
         <div class="card"><div class="card-label">Needs Attention</div><div class="card-value" style="color:${problems ? 'var(--orange)' : 'var(--z600)'}">${problems}</div><div class="card-sub">${problems ? 'pair(s) cannot run' : 'all pairs runnable'}</div></div>
-        <div class="card"><div class="card-label">Can Remove</div><div class="card-value" style="color:${destructive ? 'var(--orange)' : 'var(--z600)'}">${destructive}</div><div class="card-sub">${destructive ? 'pair(s) may delete' : 'all additive'}</div></div>
       `;
       const count = el('pairs-count');
       if (count) count.textContent = pairs.length ? `${pairs.length} configured` : '';
@@ -6571,13 +6689,44 @@
       return `${result.dry_run ? 'dry run' : 'ran'}${when ? ` ${when}` : ''} · ${bits.join(' ')}`;
     }
 
+    function pairSupportedCategories(pair) {
+      const source = pairsState.providers.find(provider => provider.key === pair.source);
+      const target = pairsState.providers.find(provider => provider.key === pair.target);
+      if (!source || !target) return [];
+      const sourceReads = new Set(source.reads || []);
+      const sourceWrites = new Set(source.writes || []);
+      const targetReads = new Set(target.reads || []);
+      const targetWrites = new Set(target.writes || []);
+      return pairsState.categories.filter(category => {
+        if (!sourceReads.has(category.key) || !targetWrites.has(category.key)) return false;
+        return pair.mode !== 'two_way'
+          || (targetReads.has(category.key) && sourceWrites.has(category.key));
+      });
+    }
+
+    function pairScheduleText(pair) {
+      if (pair.enabled === false) return 'Disabled';
+      if (!pair.auto_sync) return 'Manual only';
+      if (pair.next_sync_at) return `Next ${timeUntil(pair.next_sync_at)}`;
+      return `Every ${intervalLabel(Math.max(43200, Number(pair.interval_seconds || 43200)))}`;
+    }
+
+    function pairDestinationNotes(pair) {
+      const chosen = new Set(pair.categories || []);
+      return (pairsState.destination_rules || [])
+        .filter(rule => rule.source === pair.source && rule.target === pair.target && chosen.has(rule.category))
+        .map(rule => `<div class="pair-note"><span class="pair-badge">${esc(PAIR_CATEGORY_LABELS[rule.category] || rule.category)}</span> ${esc(rule.description || '')}</div>`)
+        .join('');
+    }
+
     function pairCardHtml(pair, index) {
-      const categoryBoxes = pairsState.categories.map(category => `
+      const supportedCategories = pairSupportedCategories(pair);
+      const categoryBoxes = supportedCategories.map(category => `
         <label class="catalog-note" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">
           <input type="checkbox" data-pair-index="${index}" data-pair-category="${escAttr(category.key)}"
                  ${(pair.categories || []).includes(category.key) ? 'checked' : ''}>
           ${esc(category.label)}
-        </label>`).join('');
+        </label>`).join('') || '<span class="pair-note err">These services do not share a compatible category in this direction.</span>';
       const twoWay = pair.mode === 'two_way';
       // Two-way silently downgrades mirror server-side, so don't offer it here —
       // a control whose value the backend overrides reads as a bug.
@@ -6615,6 +6764,7 @@
 
       const targetPicker = pairTargetListPickerHtml(pair, index);
       const listPicker = pairListPickerHtml(pair, index);
+      const destinationNotes = pairDestinationNotes(pair);
 
       return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'}" data-pair-card="${index}">
         <div class="pair-card-top">
@@ -6648,6 +6798,7 @@
         <div class="pair-sec">
           <div class="pair-sec-title">What to sync</div>
           <div role="group" aria-label="Categories to sync">${categoryBoxes}</div>
+          ${destinationNotes}
           ${listPicker}${targetPicker}
         </div>
 
@@ -6660,6 +6811,27 @@
             </label>
           </div>
           ${notesHtml}
+        </div>
+
+        <div class="pair-sec">
+          <div class="pair-sec-title">Automatic sync</div>
+          <div class="pair-schedule">
+            <div>
+              <label class="pair-toggle">
+                <input type="checkbox" data-pair-index="${index}" data-pair-field="auto_sync" ${pair.auto_sync ? 'checked' : ''} ${pair.enabled === false ? 'disabled' : ''}>
+                Run this pair automatically
+              </label>
+              <div class="pair-schedule-copy">Each pair has its own schedule. Manual Run and Dry Run remain available when automatic sync is off.</div>
+              ${pair.auto_sync && pair.next_sync_at ? `<div class="pair-schedule-next">Next run ${esc(timeUntil(pair.next_sync_at))}</div>` : ''}
+            </div>
+            <div class="form-row">
+              <label for="pair-interval-${index}">Every (hours)</label>
+              <input type="number" id="pair-interval-${index}" data-pair-index="${index}" data-pair-interval-hours
+                     min="12" step="1" value="${Math.max(12, Math.round(Number(pair.interval_seconds || 43200) / 3600))}"
+                     ${pair.auto_sync && pair.enabled !== false ? '' : 'disabled'}>
+              <div class="hint">Minimum 12 hours.</div>
+            </div>
+          </div>
         </div>
 
         <div class="pair-card-foot">
@@ -6732,6 +6904,14 @@
         const pair = pairAt(input.dataset.pairIndex);
         if (!pair) return;
 
+        if (input.dataset.pairIntervalHours !== undefined) {
+          const hours = Math.max(12, parseInt(input.value || '12', 10) || 12);
+          pair.interval_seconds = hours * 3600;
+          input.value = String(hours);
+          renderSyncCards();
+          return;
+        }
+
         if (input.dataset.pairField) {
           const field = input.dataset.pairField;
           const previous = pair[field];
@@ -6747,7 +6927,13 @@
             // Likewise a destination list belonging to the previous target.
             pair.target_list = '';
           }
-          if (field === 'removal_mode' || field === 'source' || field === 'target') renderPairCard(index);
+          if (field === 'source' || field === 'target') {
+            const supported = pairSupportedCategories(pair).map(category => category.key);
+            pair.categories = (pair.categories || []).filter(category => supported.includes(category));
+            if (!pair.categories.length && supported.length) pair.categories = [supported[0]];
+          }
+          if (field === 'removal_mode' || field === 'source' || field === 'target'
+              || field === 'auto_sync' || field === 'enabled') renderPairCard(index);
           renderSyncCards();
           return;
         }
@@ -6847,6 +7033,9 @@
             if (!writable(pair.source)) pair.source = '';
             if (!writable(pair.target)) pair.target = '';
           }
+          const supported = pairSupportedCategories(pair).map(category => category.key);
+          pair.categories = (pair.categories || []).filter(category => supported.includes(category));
+          if (!pair.categories.length && supported.length) pair.categories = [supported[0]];
           renderPairCard(index);
           renderSyncCards();
           return;
@@ -6899,13 +7088,18 @@
         return;
       }
       pairsState = {
-        pairs: Array.isArray(result.data.pairs) ? result.data.pairs : [],
+        pairs: Array.isArray(result.data.pairs) ? result.data.pairs.map(pair => ({
+          ...pair,
+          auto_sync: !!pair.auto_sync,
+          interval_seconds: Math.max(43200, Number(pair.interval_seconds || 43200)),
+        })) : [],
         providers: Array.isArray(result.data.providers) ? result.data.providers : [],
         categories: Array.isArray(result.data.categories) ? result.data.categories : [],
         removal_modes: Array.isArray(result.data.removal_modes) ? result.data.removal_modes : [],
         pair_modes: Array.isArray(result.data.pair_modes) ? result.data.pair_modes : [],
         two_way_removal_modes: Array.isArray(result.data.two_way_removal_modes)
           ? result.data.two_way_removal_modes : ['additive', 'managed'],
+        destination_rules: Array.isArray(result.data.destination_rules) ? result.data.destination_rules : [],
       };
       try {
         pairsSavedSnapshot = JSON.stringify(pairsPayload());
@@ -6937,6 +7131,8 @@
         removal_mode: 'additive',
         mode: 'one_way',
         enabled: true,
+        auto_sync: false,
+        interval_seconds: 43200,
       });
       renderPairs();
     }
@@ -6953,6 +7149,8 @@
         removal_mode: pair.removal_mode || 'additive',
         mode: pair.mode || 'one_way',
         enabled: pair.enabled !== false,
+        auto_sync: !!pair.auto_sync,
+        interval_seconds: Math.max(43200, Number(pair.interval_seconds || 43200)),
       }));
     }
 
@@ -7012,10 +7210,14 @@
     }
 
     async function runPairs(pairId, dryRun) {
-      const buttons = [el('btn-pairs-run'), el('btn-pairs-dry-run')].filter(Boolean);
+      const buttons = [el('btn-pairs-run'), el('btn-pairs-dry-run'),
+        ...document.querySelectorAll('[data-pair-run], [data-pair-dry-run]')].filter(Boolean);
       buttons.forEach(b => { b.disabled = true; });
       const node = el('pairs-results');
       if (node) node.innerHTML = '<div class="empty">Running...</div>';
+      let liveStarted = false;
+      let liveOutcome = '';
+      let keepActive = false;
       try {
         // Running what is on screen implies saving it; a dry run is the safe
         // way to preview a pair, so it must not be the one thing that silently
@@ -7024,12 +7226,45 @@
           if (node) node.innerHTML = '';
           return;
         }
-        const body = { dry_run: !!dryRun };
+        document.querySelectorAll('[data-pair-run], [data-pair-dry-run]').forEach(button => { button.disabled = true; });
+        const selected = pairsState.pairs.find(pair => pair.pair_id === pairId);
+        const runLabel = selected
+          ? (selected.name || `${providerLabel(selected.source)} ${selected.mode === 'two_way' ? '↔' : '→'} ${providerLabel(selected.target)}`)
+          : 'all sync pairs';
+        activeDashboardPairRun = {
+          pairId: pairId || '', dryRun: !!dryRun,
+          startedAt: new Date().toISOString(), label: runLabel,
+        };
+        liveActivityRows = [];
+        liveActivityCursor = 0;
+        const livePanel = el('pairs-live-panel');
+        if (livePanel) livePanel.classList.remove('hidden');
+        const liveStatus = el('pairs-live-status');
+        if (liveStatus) liveStatus.innerHTML = `<span class="spinner"></span><span class="live-step">${esc(dryRun ? 'Previewing' : 'Syncing')} ${esc(runLabel)}</span>`;
+        updateLiveActivityPanel(lastDashboardProfile || {});
+        startLiveActivityFeed();
+        liveStarted = true;
+        const body = { dry_run: !!dryRun, background: true };
         if (pairId) body.pair_id = pairId;
         const result = await apiPost('/api/profile/pairs/run', body);
         if (!result.ok) {
+          liveOutcome = 'Run failed';
           if (node) node.innerHTML = '';
           showToast(formatApiError(result.data, 'Sync pair run failed.'), true, false);
+          return;
+        }
+        const queued = ['queued', 'accepted', 'running'].includes(String(result.data.status || '').toLowerCase())
+          && !Array.isArray(result.data.results);
+        if (queued) {
+          activeDashboardPairRun.queued = true;
+          activeDashboardPairRun.sawRunning = String(result.data.status || '').toLowerCase() === 'running';
+          keepActive = true;
+          liveOutcome = 'Queued — waiting for a sync worker';
+          if (liveStatus) liveStatus.innerHTML = `<span class="spinner"></span><span class="live-step">${esc(liveOutcome)}</span>`;
+          if (node) node.innerHTML = '<div class="empty">Queued. Live provider activity will appear above when the worker starts.</div>';
+          showToast(`${dryRun ? 'Preview' : 'Sync'} queued — live progress will update here.`, false, true);
+          if (result.data.profile) renderDashboard(result.data.profile);
+          else _forceStatusRefresh();
           return;
         }
         const runs = result.data.results || [];
@@ -7045,11 +7280,13 @@
           + (r.errors || []).length
           + (r.categories || []).reduce((n, cat) => n + (cat.errors || []).length, 0), 0);
         if (failures) {
+          liveOutcome = `Finished with ${failures} error${failures === 1 ? '' : 's'}`;
           showToast({
             message: `${dryRun ? 'Dry run' : 'Sync'} finished with ${failures} error${failures === 1 ? '' : 's'}.`,
             hint: 'See the run details below for what failed.',
           }, true, false);
         } else {
+          liveOutcome = dryRun ? 'Preview complete' : 'Sync complete';
           showToast(
             dryRun ? `Dry run complete — ${totalAdded} item(s) would be added${savedNote}.`
                    : `Sync complete — ${totalAdded} item(s) added${savedNote}.`,
@@ -7061,10 +7298,20 @@
         // The dashboard renders the same last-run data, so keep it in step.
         if (!dryRun) _forceStatusRefresh();
       } catch {
+        liveOutcome = 'Run failed — network unavailable';
         if (node) node.innerHTML = '';
         showToast('Network error while running sync pairs.', true);
       } finally {
-        buttons.forEach(b => { b.disabled = false; });
+        if (liveStarted && !keepActive) {
+          activeDashboardPairRun = null;
+          updateLiveActivityPanel(lastDashboardProfile || {});
+          const liveStatus = el('pairs-live-status');
+          if (liveStatus) liveStatus.innerHTML = `<span class="live-step">${esc(liveOutcome || 'Run finished')}</span><span class="history-time">${esc(new Date().toLocaleTimeString())}</span>`;
+        }
+        if (!keepActive) {
+          buttons.forEach(b => { b.disabled = false; });
+          document.querySelectorAll('[data-pair-run], [data-pair-dry-run]').forEach(button => { button.disabled = false; });
+        }
       }
     }
 
@@ -7118,6 +7365,3 @@
   </script>
 </body>
 </html>
-
-
-

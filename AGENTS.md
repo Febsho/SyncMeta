@@ -35,6 +35,8 @@ python -m pytest tests/test_sync_service.py::TestSyncService::test_pmdb_native_w
 
 `SyncStats` dataclass tracks per-run counters plus `synced_keys: list[str]` (populated by `_sync_list` and used to persist `pmdb_watchlist_managed_keys`).
 
+**Cross-service pairs:** `src/cross_sync.py` + `src/providers.py` run capability-aware one-way/two-way pairs. Pair definitions live in `options.sync_pairs`; per-pair ownership lives in `activity_state.pair_managed_keys`, and automatic due state lives in `pair_sync_schedule`. Pair autosync is opt-in, clamps to 12h, and runs through the shared `SyncRunner` even when the main PublicMetaDB schedule is off. `/api/profile/pairs/run` is synchronous by default for API compatibility; the UI sends `background: true` to queue it and poll live status/logs.
+
 **ID resolution:** `src/matcher.py` — `ItemMatcher` resolves cross-provider IDs (TMDB ↔ SIMKL ↔ AniList ↔ MAL ↔ IMDB). Uses Fribb anime mapping (`src/fribb_client.py`), an anime prequel-chain cache (`src/anime_mapping_store.py`), and per-episode PMDB fallback. Thread-safe in-memory cache.
 
 **Profile persistence:** `src/profile_store.py` — JSON-backed store (`/app/data/profiles.json`). Credentials are Fernet-encrypted. `activity_state` dict persists per-profile runtime state: last-sync cursors/timestamps, `pmdb_watchlist_managed_keys` (keys SyncMeta previously wrote to PMDB watchlist — used to avoid removing manually-added entries). `list_state` persists per-row fingerprints. `sync_runs_detailed` keeps the last 25 detailed diagnostic records.
@@ -58,5 +60,7 @@ python -m pytest tests/test_sync_service.py::TestSyncService::test_pmdb_native_w
 **Parallel SIMKL fetching:** `_sync_simkl` submits all `(media_type, status_key)` combinations to a `ThreadPoolExecutor(max_workers=min(SYNCMETA_SIMKL_FETCH_WORKERS, len(fetch_jobs)))`, then sorts results back to canonical order by original job index before processing.
 
 **Scheduling defaults:** List/catalog sync defaults to 12h and clamps to a 6h minimum. Watch history and resume progress default to manual; when automatic sync is enabled they clamp to a 24h minimum. Automatic list/history/resume schedules add deterministic per-profile jitter so multiple profiles do not all start together on small VPS hosts.
+
+**SIMKL → Trakt destinations:** Plan to Watch always uses Trakt's native watchlist. Watching, Completed, On Hold, and Dropped use separate private `SyncMeta · SIMKL <Status>` personal lists created/reused on demand. Dry runs never create those lists. Do not collapse these statuses into Trakt Collection; that changes their meaning and can trigger Trakt HTTP 420 account limits.
 
 **Anime root resolution:** For anime, `ItemMatcher` walks the prequel chain to find the root title so all seasons/cours resolve to the same PMDB entry. The chain is cached in `anime_mapping_store.py`.

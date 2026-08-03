@@ -74,6 +74,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 log_capture.install(level=logging.INFO)
 logger = logging.getLogger("web")
+logger.setLevel(logging.INFO)
 
 PROFILE_STORE_FILE = Path(
     os.getenv("PROFILE_STORE_FILE", str(Path(__file__).resolve().parent / "data" / "profiles.json"))
@@ -711,8 +712,14 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             _profile_store.record_sync_cancelled(profile_id, dry_run=dry_run, sync_modes=modes)
             return
         _profile_store.update_sync_status(profile_id, "Starting sync")
-        service = SyncService(
-            _config_from_profile(profile, dry_run=dry_run, sync_modes=modes),
+        result_dicts: list[dict] = []
+        detailed_result_dicts: list[dict] = []
+        service = None
+        run_regular = any(bool(modes.get(key)) for key in ("lists", "history", "resume"))
+        config = _config_from_profile(profile, dry_run=dry_run, sync_modes=modes)
+        if run_regular:
+            service = SyncService(
+            config,
             status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
             progress_callback=lambda results: _profile_store.update_sync_progress(profile_id, results),
             managed_lists=profile.get("managed_lists", []),
@@ -729,21 +736,44 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             manual_list_additions=profile.get("manual_list_additions", {}),
             list_state=profile.get("list_state", {}),
             trakt_token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_trakt_tokens(profile_id, at, rt, exp),
-        )
-        results = service.run()
-        run_id = str(profile.get("sync_job_id", "") or "")
-        result_dicts = [_stats_to_summary_dict(stats, run_id=run_id) for stats in results]
-        detailed_result_dicts = [_stats_to_detail_dict(stats) for stats in results]
+            )
+            results = service.run()
+            run_id = str(profile.get("sync_job_id", "") or "")
+            result_dicts = [_stats_to_summary_dict(stats, run_id=run_id) for stats in results]
+            detailed_result_dicts = [_stats_to_detail_dict(stats) for stats in results]
+
+        if modes.get("pairs"):
+            selected_ids = set(str(value) for value in (modes.get("pair_ids") or []))
+            pairs = [
+                pair for pair in _sync_pairs_from_config(config)
+                if pair.enabled and (not selected_ids or pair.pair_id in selected_ids)
+            ]
+            pair_service = CrossSyncService(
+                _build_provider_adapters(
+                    config,
+                    cancel_requested_callback=lambda: _profile_store.is_sync_cancel_requested(profile_id),
+                ),
+                dry_run=dry_run,
+                managed_keys=(profile.get("activity_state") or {}).get("pair_managed_keys") or {},
+                cancel_requested_callback=lambda: _profile_store.is_sync_cancel_requested(profile_id),
+                status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
+            )
+            pair_results = pair_service.run_pairs(pairs)
+            if not dry_run:
+                _profile_store.update_pair_managed_keys(profile_id, pair_service.managed_keys)
+                _profile_store.update_pair_last_results(
+                    profile_id, [result.to_dict() for result in pair_results], dry_run=False,
+                )
         _profile_store.record_sync_success(
             profile_id,
             result_dicts,
             dry_run=dry_run,
-            managed_lists=service.managed_lists,
+            managed_lists=service.managed_lists if service is not None else None,
             sync_modes=modes,
-            resolution_cache=service.resolution_cache,
-            failed_resolution_cache=service.failed_resolution_cache,
+            resolution_cache=service.resolution_cache if service is not None else None,
+            failed_resolution_cache=service.failed_resolution_cache if service is not None else None,
             detailed_results=detailed_result_dicts,
-            list_state=service.list_state,
+            list_state=service.list_state if service is not None else None,
         )
     except SyncCancelled:
         logger.info("Sync stopped for profile %s", profile_id[:8])
@@ -990,6 +1020,7 @@ def _pair_capabilities(config: AppConfig) -> dict:
                 # special-case the unconfigured branch.
                 "has_lists": False,
                 "has_target_lists": False,
+                "target_list_categories": [],
                 "has_list_search": False,
                 "unavailable_reason": _provider_unavailable_reason(config, key),
             })
@@ -1012,6 +1043,20 @@ def _pair_capabilities(config: AppConfig) -> dict:
         # Which removal modes two-way accepts, so the editor can narrow the list
         # rather than offering one the backend will silently downgrade.
         "two_way_removal_modes": list(TWO_WAY_REMOVAL_MODES),
+        "pair_interval_min_seconds": 43200,
+        "pair_interval_default_seconds": 43200,
+        "destination_rules": [
+            {
+                "source": "simkl", "target": "trakt", "category": "watchlist",
+                "destination": "native_watchlist",
+                "description": "SIMKL Plan to Watch is synced to the Trakt watchlist.",
+            },
+            {
+                "source": "simkl", "target": "trakt", "category": "collection",
+                "destination": "custom_lists_by_status",
+                "description": "Watching, Completed, On Hold and Dropped use separate SyncMeta-managed Trakt lists.",
+            },
+        ],
     }
 
 
@@ -2704,12 +2749,16 @@ def api_profile_pairs():
     # Last outcome per pair, so the editor can show what a pair actually did
     # instead of only what it is configured to do.
     last_results = private_profile.get("last_pair_results") or {}
+    pair_schedule = private_profile.get("pair_sync_schedule") or {}
     for pair in _sync_pairs_from_config(config):
         entry = pair.to_dict()
         # Surface why a pair cannot run so the editor can explain it in place
         # rather than only failing at run time.
         entry["problem"] = service.validate_pair(pair)
         entry["last_result"] = last_results.get(pair.pair_id) or None
+        schedule = pair_schedule.get(pair.pair_id) if isinstance(pair_schedule.get(pair.pair_id), dict) else {}
+        entry["last_sync_at"] = schedule.get("last_sync_at")
+        entry["next_sync_at"] = schedule.get("next_sync_at")
         pairs.append(entry)
 
     return jsonify({"pairs": pairs, **_pair_capabilities(config)})
@@ -2768,6 +2817,10 @@ def api_profile_pairs_save():
     # Validate strictly here (unlike profile load, which drops bad entries) so
     # the user gets told what is wrong instead of silently losing a pair.
     normalized: list[dict] = []
+    adapter_types = {
+        "trakt": TraktAdapter, "simkl": SimklAdapter, "anilist": AniListAdapter,
+        "mdblist": MdbListAdapter, "pmdb": PmdbAdapter,
+    }
     for index, raw in enumerate(raw_pairs):
         try:
             pair = SyncPair.from_dict(raw)
@@ -2776,6 +2829,29 @@ def api_profile_pairs_save():
         pair.pair_id = pair.pair_id or SyncPair._clean_pair_id(
             f"{pair.source}-{pair.target}-{index + 1}"
         ) or f"pair-{index + 1}"
+        source_type = adapter_types.get(pair.source)
+        target_type = adapter_types.get(pair.target)
+        if source_type is None or target_type is None:
+            return _json_error(f"Pair {index + 1}: unknown provider", 400)
+        unsupported = [
+            category for category in pair.categories
+            if category not in source_type.reads or category not in target_type.writes
+        ]
+        if unsupported:
+            return _json_error(
+                f"Pair {index + 1}: {pair.source} → {pair.target} does not support "
+                f"{', '.join(unsupported)}", 400,
+            )
+        if pair.target_list and not target_type.supports_target_lists:
+            return _json_error(
+                f"Pair {index + 1}: {target_type.label} does not support writable custom lists", 400,
+            )
+        if pair.target_list and any(
+            category not in target_type.target_list_categories for category in pair.categories
+        ):
+            return _json_error(
+                f"Pair {index + 1}: the selected custom list cannot receive every selected category", 400,
+            )
         normalized.append(pair.to_dict())
 
     seen = set()
@@ -2795,7 +2871,7 @@ def api_profile_pairs_save():
 
 @app.route("/api/profile/pairs/run", methods=["POST"])
 def api_profile_pairs_run():
-    """Run one pair, or every enabled pair when no pair_id is given."""
+    """Queue one pair, or every enabled pair, on the shared background runner."""
     profile_id = _current_profile_id()
     if not profile_id:
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
@@ -2818,47 +2894,57 @@ def api_profile_pairs_run():
     if not pairs:
         return _json_error("No sync pairs configured", 400)
 
-    activity_state = private_profile.get("activity_state") or {}
-    service = CrossSyncService(
-        _build_provider_adapters(config),
-        dry_run=dry_run,
-        managed_keys=activity_state.get("pair_managed_keys") or {},
-    )
-
-    log_token = _log_profile_id.set(profile_id)
-    try:
-        results = service.run_pairs(pairs)
-    except SyncCancelled:
-        return _json_error("Sync stopped", 409)
-    except Exception as exc:
-        logger.exception("Cross-service sync failed")
-        return _json_error(f"Sync failed: {exc}", 500)
-    finally:
-        _log_profile_id.reset(log_token)
-
-    if not dry_run:
-        # Persist which keys each pair now owns so the managed removal mode has
-        # something to reason about on the next run.
+    background = bool(body.get("background", False))
+    if not background:
+        activity_state = private_profile.get("activity_state") or {}
+        service = CrossSyncService(
+            _build_provider_adapters(config), dry_run=dry_run,
+            managed_keys=activity_state.get("pair_managed_keys") or {},
+            status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
+        )
+        log_token = _log_profile_id.set(profile_id)
         try:
+            results = service.run_pairs(pairs)
+        except SyncCancelled:
+            return _json_error("Sync stopped", 409)
+        except Exception as exc:
+            logger.exception("Cross-service sync failed")
+            return _json_error(f"Sync failed: {exc}", 500)
+        finally:
+            _log_profile_id.reset(log_token)
+        if not dry_run:
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
-        except KeyError:
-            pass
-        # Remember the outcome so the dashboard can show pair status alongside
-        # the main pipeline results.
-        try:
-            _profile_store.update_pair_last_results(profile_id, [r.to_dict() for r in results], dry_run=dry_run)
-        except KeyError:
-            pass
+            _profile_store.update_pair_last_results(profile_id, [r.to_dict() for r in results])
+            _profile_store.mark_pairs_synced(profile_id, [pair.pair_id for pair in pairs])
+        return jsonify({
+            "status": "completed", "dry_run": dry_run,
+            "results": [result.to_dict() for result in results],
+            "provider_reads": service.last_run_provider_reads,
+            "cached_reads": service.last_run_cache_hits,
+        })
 
+    try:
+        modes = {
+            "lists": False,
+            "history": False,
+            "resume": False,
+            "pairs": True,
+            "pair_ids": [pair.pair_id for pair in pairs],
+        }
+        claimed = _profile_store.claim_profile_for_sync_by_id(profile_id, modes)
+    except RuntimeError as exc:
+        return _json_error(str(exc), 409)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    _sync_runner.enqueue(claimed, dry_run, modes)
     return jsonify({
-        "status": "completed",
+        "status": "queued",
         "dry_run": dry_run,
-        "results": [r.to_dict() for r in results],
-        # How much the batch read cache saved, so the UI can show the effect of
-        # fanning one service out to several targets rather than just claiming it.
-        "provider_reads": service.last_run_provider_reads,
-        "cached_reads": service.last_run_cache_hits,
-    })
+        "job_id": claimed.get("sync_job_id"),
+        "pair_ids": modes["pair_ids"],
+        "profile": _profile_store.get_profile_by_id(profile_id, include_credentials=False),
+    }), 202
 
 
 @app.route("/api/profile/unresolved", methods=["POST"])

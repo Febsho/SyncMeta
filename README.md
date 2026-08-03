@@ -52,7 +52,12 @@ manual by default, resume can run automatically.
 **Sync pairs.** Beyond the built-in service-to-PublicMetaDB pipelines, you can
 copy a list from any service to any other. A pair is one-way or two-way, and
 chooses what happens when an item disappears from the source: never remove,
-remove only what this pair added, or mirror the source exactly.
+remove only what this pair added, or mirror the source exactly. Every pair can
+also run on its own automatic schedule, with a minimum interval of 12 hours.
+
+For SIMKL → Trakt, Plan to Watch maps to Trakt's native watchlist. Watching,
+Completed, On Hold, and Dropped are kept separate in private Trakt lists that
+SyncMeta creates or reuses; they are not flattened into Trakt Collection.
 
 **Anime matching.** Anime is matched across AniList, MAL, SIMKL, TMDB and IMDB
 using the Fribb anime-lists data, with sequel seasons resolved back to the root
@@ -90,6 +95,7 @@ on a small server.
 | Sync | Default | Minimum |
 |---|---:|---:|
 | Lists | automatic, every 12h | 6h |
+| Each sync pair | manual | 12h when automatic |
 | Watch history | manual | 24h |
 | Resume progress | manual | 24h |
 

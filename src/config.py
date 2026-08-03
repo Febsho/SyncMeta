@@ -151,6 +151,10 @@ class SyncPair:
     #: union of the two rather than running a second pair in reverse.
     mode: str = "one_way"
     enabled: bool = True
+    # Pair automation is independent from the main PMDB catalog schedule.  It
+    # is opt-in for existing profiles and can never run more often than 12h.
+    auto_sync: bool = False
+    interval_seconds: int = 43200
 
     def is_two_way(self) -> bool:
         return self.mode == "two_way"
@@ -167,6 +171,8 @@ class SyncPair:
             "removal_mode": self.removal_mode,
             "mode": self.mode,
             "enabled": bool(self.enabled),
+            "auto_sync": bool(self.auto_sync),
+            "interval_seconds": int(self.interval_seconds),
         }
 
     #: A pair id is an internal handle, not user-facing text: it is echoed into
@@ -241,6 +247,13 @@ class SyncPair:
             if str(value).strip()
         ]
 
+        interval_raw = raw.get("interval_seconds", 43200)
+        try:
+            interval_seconds = int(interval_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pair sync interval must be a whole number of seconds") from exc
+        interval_seconds = max(43200, interval_seconds)
+
         return cls(
             pair_id=cls._clean_pair_id(raw.get("pair_id")),
             name=str(raw.get("name", "") or "").strip(),
@@ -252,6 +265,8 @@ class SyncPair:
             removal_mode=removal_mode,
             mode=mode,
             enabled=bool(raw.get("enabled", True)),
+            auto_sync=bool(raw.get("auto_sync", False)),
+            interval_seconds=interval_seconds,
         )
 
     def display_name(self) -> str:

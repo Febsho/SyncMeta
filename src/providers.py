@@ -225,12 +225,17 @@ class ProviderAdapter:
     #: than only its fixed watchlist/collection. SIMKL and AniList have no
     #: writable custom lists, so a custom-list destination must not be offered
     #: for them at all.
-    supports_target_lists: bool = False
+    # None means an older/third-party adapter did not declare the capability;
+    # built-in adapters always declare True or False explicitly.
+    supports_target_lists: bool | None = None
 
     #: Whether ``search_lists`` actually queries the provider. Only Trakt and
     #: MDBList expose a public list search; offering the box elsewhere invites a
     #: search that can only ever come back empty.
     supports_list_search: bool = False
+    # Categories for which a named destination is meaningful.  This is exposed
+    # explicitly so clients do not offer a custom-list picker for watch history.
+    target_list_categories: tuple[str, ...] = ()
 
     def can_write(self) -> bool:
         """Whether the configured credentials permit writing at all."""
@@ -254,6 +259,11 @@ class ProviderAdapter:
         provider's default for that category — e.g. Trakt's own watchlist.
         """
         raise NotImplementedError
+
+    def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
+        """Read the exact destination that ``add``/``remove`` will mutate."""
+        lists = [target_list] if str(target_list or "").strip() else None
+        return self.fetch(category, lists)
 
     def list_sources(self) -> list[dict]:
         """Named lists this provider can read, for per-pair selection.
@@ -311,6 +321,7 @@ class ProviderAdapter:
             # live network calls. They are fetched on demand instead.
             "has_lists": bool(self.reads) and self.supports_list_selection,
             "has_target_lists": self.supports_target_lists and self.can_write(),
+            "target_list_categories": list(self.target_list_categories),
             "has_list_search": bool(self.supports_list_search),
         }
 
@@ -335,6 +346,14 @@ class TraktAdapter(ProviderAdapter):
     supports_list_selection = True
     supports_target_lists = True
     supports_list_search = True
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+
+    _SIMKL_STATUS_LABELS = {
+        "watching": "Watching",
+        "completed": "Completed",
+        "hold": "On Hold",
+        "dropped": "Dropped",
+    }
 
     def __init__(self, client):
         self._client = client
@@ -376,8 +395,10 @@ class TraktAdapter(ProviderAdapter):
         items: list[dict] = []
         seen: set[str] = set()
 
-        def _extend(fetched):
+        def _extend(fetched, destination_key: str = ""):
             for item in fetched or []:
+                if destination_key:
+                    item = {**item, "_syncmeta_target_list": destination_key}
                 key = item_key(item)
                 if key in seen:
                     continue
@@ -393,10 +414,13 @@ class TraktAdapter(ProviderAdapter):
             if "/" not in reference:
                 continue
             user, slug = reference.split("/", 1)
-            _extend(self._client.get_list_items(user, slug))
+            _extend(self._client.get_list_items(user, slug), key)
         return items
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        selected_lists = [str(k) for k in (source_lists or []) if str(k).startswith("list:")]
+        if selected_lists and category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
+            return self._watchlist_items(selected_lists)
         if category == CATEGORY_WATCHLIST:
             return self._watchlist_items(source_lists)
         if category == CATEGORY_HISTORY:
@@ -404,6 +428,54 @@ class TraktAdapter(ProviderAdapter):
         if category == CATEGORY_COLLECTION:
             return list(self._client.get_collection() or [])
         return self._unsupported(category, "read")
+
+    def _automatic_simkl_destinations(self, target_list: str) -> list[tuple[str, str]]:
+        prefix = "auto:simkl:"
+        if not str(target_list or "").startswith(prefix):
+            return []
+        statuses = [part for part in str(target_list)[len(prefix):].split(",") if part]
+        existing = self._client.get_personal_lists_metadata() or []
+        by_name = {str(meta.get("name") or "").strip().casefold(): meta for meta in existing}
+        out: list[tuple[str, str]] = []
+        for status in statuses:
+            label = self._SIMKL_STATUS_LABELS.get(status, status.replace("_", " ").title())
+            name = f"SyncMeta · SIMKL {label}"
+            meta = by_name.get(name.casefold())
+            if meta and meta.get("user") and meta.get("slug"):
+                out.append((status, f"list:{meta['user']}/{meta['slug']}"))
+        return out
+
+    def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
+        automatic = self._automatic_simkl_destinations(target_list)
+        if str(target_list or "").startswith("auto:simkl:"):
+            # Missing lists correctly read as empty; creation happens only when
+            # there is something to write, so dry runs remain side-effect free.
+            items: list[dict] = []
+            seen: set[tuple[str, str]] = set()
+            for status, destination_key in automatic:
+                destination = self._parse_list_key(destination_key)
+                if not destination:
+                    continue
+                for raw in self._client.get_list_items(destination[0], destination[1]) or []:
+                    identity = (status, item_key(raw))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    items.append({
+                        **raw,
+                        "_syncmeta_source_status": status,
+                        "_syncmeta_target_list": destination_key,
+                    })
+            return items
+        return super().fetch_target(category, target_list)
+
+    def _ensure_automatic_simkl_list(self, status: str) -> tuple[str, str]:
+        label = self._SIMKL_STATUS_LABELS.get(status, status.replace("_", " ").title())
+        name = f"SyncMeta · SIMKL {label}"
+        meta = self._client.get_or_create_personal_list(
+            name, f"Maintained by SyncMeta from the SIMKL {label} status.",
+        )
+        return str(meta["user"]), str(meta["slug"])
 
     def target_lists(self) -> list[dict]:
         """The user's own Trakt lists. Liked lists belong to someone else and
@@ -441,6 +513,18 @@ class TraktAdapter(ProviderAdapter):
         return (user, slug) if user and slug else None
 
     def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+        if str(target_list or "").startswith("auto:simkl:"):
+            totals = {"added": 0, "not_found": 0, "batches": 0}
+            grouped: dict[str, list[dict]] = {}
+            for item in items:
+                status = str(item.get("_syncmeta_source_status") or "completed")
+                grouped.setdefault(status, []).append(item)
+            for status, status_items in grouped.items():
+                user, slug = self._ensure_automatic_simkl_list(status)
+                result = self._client.add_to_custom_list(user, slug, status_items) or {}
+                for key in totals:
+                    totals[key] += int(result.get(key) or 0)
+            return totals
         destination = self._parse_list_key(target_list)
         if destination:
             return self._client.add_to_custom_list(destination[0], destination[1], items)
@@ -453,6 +537,21 @@ class TraktAdapter(ProviderAdapter):
         return self._unsupported(category, "write")
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
+        if str(target_list or "").startswith("auto:simkl:"):
+            totals = {"deleted": 0, "not_found": 0, "batches": 0}
+            grouped: dict[str, list[dict]] = {}
+            for item in items:
+                destination_key = str(item.get("_syncmeta_target_list") or "")
+                grouped.setdefault(destination_key, []).append(item)
+            for destination_key, status_items in grouped.items():
+                destination = self._parse_list_key(destination_key)
+                if not destination:
+                    totals["not_found"] += len(status_items)
+                    continue
+                result = self._client.remove_from_custom_list(destination[0], destination[1], status_items) or {}
+                for key in totals:
+                    totals[key] += int(result.get(key) or 0)
+            return totals
         destination = self._parse_list_key(target_list)
         if destination:
             return self._client.remove_from_custom_list(destination[0], destination[1], items)
@@ -471,6 +570,7 @@ class SimklAdapter(ProviderAdapter):
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
+    supports_target_lists = False
 
     def __init__(self, client, media_types: list[str] | None = None):
         self._client = client
@@ -503,7 +603,8 @@ class SimklAdapter(ProviderAdapter):
         out: list[dict] = []
         for media_type in self._media_types:
             grouped = self._client.get_status(status, [media_type]) or {}
-            out.extend(grouped.get(media_type, []) or [])
+            for item in grouped.get(media_type, []) or []:
+                out.append({**item, "_syncmeta_source_status": status})
         return out
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
@@ -513,12 +614,19 @@ class SimklAdapter(ProviderAdapter):
             seen: set[str] = set()
             for status, media_type in selected:
                 for item in self._client.get_status(status, [media_type]).get(media_type, []) or []:
+                    item = {**item, "_syncmeta_source_status": status}
                     key = item_key(item)
                     if key in seen:
                         continue
                     seen.add(key)
                     items.append(item)
             return items
+
+        if source_lists:
+            # A non-empty selection belonging only to another category means
+            # this category was intentionally not selected; never fall back to
+            # the full default status in that case.
+            return []
 
         if category == CATEGORY_WATCHLIST:
             return self._fetch_status("plantowatch")
@@ -566,6 +674,7 @@ class AniListAdapter(ProviderAdapter):
     # write wrong data, so history is left unsupported at both ends.
     writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
     supports_list_selection = True
+    supports_target_lists = False
 
     _STATUS_FOR_CATEGORY = {
         CATEGORY_WATCHLIST: "PLANNING",
@@ -645,6 +754,7 @@ class PmdbAdapter(ProviderAdapter):
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY)
     supports_list_selection = True
     supports_target_lists = True
+    target_list_categories = (CATEGORY_WATCHLIST,)
 
     def __init__(self, client):
         self._client = client
@@ -855,6 +965,7 @@ class MdbListAdapter(ProviderAdapter):
     writes = ()
     supports_list_selection = True
     supports_list_search = True
+    supports_target_lists = False
 
     def __init__(self, client, selected_lists: list[dict] | None = None):
         self._client = client
