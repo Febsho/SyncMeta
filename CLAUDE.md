@@ -259,6 +259,28 @@ matcher declined (unverified zero-vote community data, or a blocklisted id) pure
 as a hint for the user. Never return it as an automatic resolution — that
 re-applies the mapping the safety guards refused.
 
+**The profile UUID is a handle, not a credential.** It is printed in the UI, kept
+in `localStorage`, and `_public_profile_by_request_id` accepts it unauthenticated
+for read-only dashboard state — so nothing that grants *authority* may rest on
+knowing it. `/api/profile/password/reset` therefore requires `current_password`
+whether or not a session is present (`ProfileStore.change_profile_password`
+authenticates before rehashing; there is no unauthenticated
+`reset_..._by_id` path, and adding one back is an account takeover: the endpoint
+also mints a session cookie). It shares `_login_limiter` with sign-in, since a
+password-verifying endpoint without a limiter is a guessing oracle. A successful
+change calls `ServerSessionStore.destroy_profile_sessions`, which bumps an
+in-memory per-profile epoch stamped into every signed token — sessions are
+stateless, so this is the only way to evict cookies issued earlier, and like
+`_revoked` it is best-effort across a process restart. There is no
+forgot-password path by design; recovery is the operator's `profiles.json`.
+
+**Every door that checks a password shares `_login_limiter`.** `/api/profile/save`
+with a UUID + password and no session authenticates and mints a session cookie —
+it is a second sign-in path, not just a write — so it throttles on the same
+client key as `/api/profile/login` and `/api/profile/password/reset`. Note config
+validation runs *before* authentication there, so a limiter-exempt branch must
+stay limited to requests that never reach `update_profile`.
+
 **Log endpoints are session-scoped.** `/api/logs` and `/api/logs/clear` take the
 profile from the session and ignore any caller-supplied value;
 `log_capture.snapshot()` only filters when given a non-empty profile id, so an

@@ -1055,13 +1055,13 @@
                 </div>
                 <div class="form-row">
                   <label for="profile-new-password">New Profile Password</label>
-                  <input type="password" id="profile-new-password" placeholder="Only fill this to reset your profile password" autocomplete="off">
-                  <div class="hint">Use your profile UUID plus a new password to reset access.</div>
+                  <input type="password" id="profile-new-password" placeholder="Only fill this to change your profile password" autocomplete="new-password">
+                  <div class="hint">Changing it needs your current password above, and signs this profile out everywhere else.</div>
                 </div>
                 <div class="actions-bar" style="margin-top:4px">
                   <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
                   <button class="btn" onclick="loadProfile()">Load Profile</button>
-                  <button class="btn btn-danger" onclick="resetProfilePassword()">Reset Password</button>
+                  <button class="btn" onclick="resetProfilePassword()">Change Password</button>
                   <button class="btn btn-ghost btn-sm" onclick="logoutProfile()">Log Out</button>
                   <span class="save-flash" id="save-flash">Saved</span>
                 </div>
@@ -5877,10 +5877,15 @@
 
     async function resetProfilePassword() {
       const profileId = (el('profile-id').value || sessionProfileId || '').trim();
+      const currentPassword = el('profile-password').value;
       const newPassword = el('profile-new-password').value;
 
       if (!profileId) {
         showToast('Enter your profile UUID first.', true, false);
+        return;
+      }
+      if (!currentPassword) {
+        showToast('Enter your current profile password first.', true, false);
         return;
       }
       if (!newPassword) {
@@ -5891,6 +5896,7 @@
       try {
         const result = await apiPost('/api/profile/password/reset', {
           profile_id: profileId,
+          current_password: currentPassword,
           new_password: newPassword,
         });
         if (!result.ok) {
@@ -5908,9 +5914,9 @@
         }
         saveDraft(false);
         clearDraftDirty();
-        showToast('Profile password updated.', false, true);
+        showToast('Profile password changed. Other browsers were signed out.', false, true);
       } catch {
-        showToast('Network error while resetting profile password.', true, false);
+        showToast('Network error while changing profile password.', true, false);
       }
     }
 

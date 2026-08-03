@@ -1462,15 +1462,20 @@ class ProfileStore:
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
 
-    def reset_profile_password_by_id(self, profile_id: str, new_password: str) -> dict:
+    def change_profile_password(self, profile_id: str, current_password: str, new_password: str) -> dict:
+        """Replace a profile's password after proving ownership of the old one.
+
+        The profile UUID is a handle, not a secret — it is shown in the UI, kept
+        in localStorage, and accepted unauthenticated by the read-only status
+        endpoint. Changing a password on the UUID alone therefore let anyone who
+        had ever seen a UUID take the profile over and lock its owner out, so
+        the current password is always required, session or not.
+        """
         if not new_password:
             raise ValueError("New profile password is required")
 
         with self._lock:
-            normalized_id = self._normalize_profile_id(profile_id)
-            profile = self._profiles.get(normalized_id)
-            if profile is None:
-                raise KeyError(profile_id)
+            profile = self._authenticate_locked(profile_id, current_password)
             profile["password_hash"] = generate_password_hash(new_password, method="pbkdf2:sha256", salt_length=16)
             profile["updated_at"] = utc_now_iso()
             self._save_locked()

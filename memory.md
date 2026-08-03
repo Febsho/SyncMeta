@@ -33,6 +33,9 @@ This file is a compact working memory for future code changes. Keep it current w
 ## Web Flow
 
 - Browser auth uses server-side sessions.
+- Changing a profile password requires the current password (`current_password`),
+  signed in or not; the profile UUID alone is never enough. A successful change
+  invalidates sessions issued before it.
 - Optional site-wide gate is controlled by `SITE_ACCESS_PASSWORD`.
 - Important routes in `web.py`:
   - `/api/profile/save`

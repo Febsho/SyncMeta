@@ -10,6 +10,28 @@ import web  # noqa: E402
 from src import log_capture  # noqa: E402
 
 
+def _blank_credentials() -> dict:
+    """An empty-but-complete credential blob for `create_profile`."""
+    return {
+        "simkl": {
+            "client_id": "",
+            "client_secret": "",
+            "access_token": "",
+            "selected_statuses": {"shows": [], "movies": [], "anime": []},
+        },
+        "anilist": {"username": "", "selected_statuses": []},
+        "trakt": {
+            "client_id": "",
+            "client_secret": "",
+            "access_token": "",
+            "refresh_token": "",
+            "selected_lists": [],
+        },
+        "mdblist": {"api_key": "", "selected_lists": []},
+        "pmdb": {"api_key": ""},
+    }
+
+
 class WebTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -201,6 +223,7 @@ class WebTests(unittest.TestCase):
 
         reset_response = self.client.post("/api/profile/password/reset", json={
             "profile_id": profile["profile_id"],
+            "current_password": "secret",
             "new_password": "new-secret",
         })
         self.assertEqual(reset_response.status_code, 200)
@@ -1282,6 +1305,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(login_response.status_code, 200)
 
         reset_response = self.client.post("/api/profile/password/reset", json={
+            "current_password": "secret",
             "new_password": "new-secret",
         })
         reset_data = reset_response.get_json()
@@ -1301,7 +1325,7 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(relogin_new.status_code, 200)
 
-    def test_reset_profile_password_accepts_profile_uuid_without_signed_in_session(self) -> None:
+    def test_reset_profile_password_requires_the_current_password(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {
                 "client_id": "",
@@ -1333,26 +1357,48 @@ class WebTests(unittest.TestCase):
             "media_types": ["shows", "movies", "anime"],
         })
 
-        reset_response = self.client.post("/api/profile/password/reset", json={
+        # The profile UUID is a handle, not a secret: it is displayed in the UI
+        # and accepted unauthenticated by /api/profile/status. Knowing it alone
+        # must not let a stranger change the password, take a session, and lock
+        # the owner out.
+        takeover = self.client.post("/api/profile/password/reset", json={
             "profile_id": profile["profile_id"],
-            "new_password": "new-secret",
+            "new_password": "attacker-secret",
         })
-        reset_data = reset_response.get_json()
+        self.assertEqual(takeover.status_code, 400)
+        self.assertEqual(takeover.get_json()["error"], "Current profile password is required")
 
-        self.assertEqual(reset_response.status_code, 200)
-        self.assertEqual(reset_data["profile"]["profile_id"], profile["profile_id"])
+        wrong_password = self.client.post("/api/profile/password/reset", json={
+            "profile_id": profile["profile_id"],
+            "current_password": "not-the-password",
+            "new_password": "attacker-secret",
+        })
+        self.assertEqual(wrong_password.status_code, 401)
+        self.assertNotIn("profile", wrong_password.get_json())
 
-        relogin_old = self.client.post("/api/profile/login", json={
+        # The owner's password still works and the attacker's does not.
+        self.assertEqual(self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"],
+            "password": "attacker-secret",
+        }).status_code, 401)
+        self.assertEqual(self.client.post("/api/profile/login", json={
             "profile_id": profile["profile_id"],
             "password": "secret",
-        })
-        self.assertEqual(relogin_old.status_code, 401)
+        }).status_code, 200)
 
-        relogin_new = self.client.post("/api/profile/login", json={
+        # With the current password it succeeds, from a signed-out client too.
+        signed_out = web.app.test_client()
+        changed = signed_out.post("/api/profile/password/reset", json={
+            "profile_id": profile["profile_id"],
+            "current_password": "secret",
+            "new_password": "new-secret",
+        })
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.get_json()["profile"]["profile_id"], profile["profile_id"])
+        self.assertEqual(self.client.post("/api/profile/login", json={
             "profile_id": profile["profile_id"],
             "password": "new-secret",
-        })
-        self.assertEqual(relogin_new.status_code, 200)
+        }).status_code, 200)
 
     def test_reset_profile_password_requires_uuid_when_not_signed_in(self) -> None:
         reset_response = self.client.post("/api/profile/password/reset", json={
@@ -1362,6 +1408,63 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(reset_response.status_code, 400)
         self.assertEqual(reset_data["error"], "Profile UUID is required")
+
+    def test_profile_save_rate_limits_password_guesses(self) -> None:
+        # Saving with a UUID + password and no session signs in and hands back a
+        # session cookie, so it must be throttled like /api/profile/login.
+        profile = web._profile_store.create_profile("secret", _blank_credentials(), {
+            "auto_sync": True,
+            "interval_seconds": 43200,
+            "media_types": ["shows", "movies", "anime"],
+        })
+        web._login_limiter = web.LoginAttemptLimiter(max_attempts=3, window_seconds=60)
+
+        attacker = web.app.test_client()
+        credentials = _blank_credentials()
+        credentials["pmdb"]["api_key"] = "pm-key"
+        credentials["anilist"] = {"username": "someone", "selected_statuses": ["CURRENT"]}
+        payload = {
+            "profile_id": profile["profile_id"],
+            "credentials": credentials,
+            "options": {"auto_sync": True, "interval_seconds": 43200, "media_types": ["shows"]},
+        }
+        statuses = [
+            attacker.post("/api/profile/save", json={**payload, "password": f"guess-{i}"}).status_code
+            for i in range(5)
+        ]
+
+        self.assertEqual(statuses[:3], [401, 401, 401])
+        self.assertEqual(statuses[3:], [429, 429])
+
+        # The real password is refused too while the lock holds — the throttle is
+        # on the client, not on the guess.
+        locked_out = attacker.post("/api/profile/save", json={**payload, "password": "secret"})
+        self.assertEqual(locked_out.status_code, 429)
+
+    def test_password_change_signs_out_sessions_opened_before_it(self) -> None:
+        profile = web._profile_store.create_profile("secret", _blank_credentials(), {
+            "auto_sync": True,
+            "interval_seconds": 43200,
+            "media_types": ["shows", "movies", "anime"],
+        })
+
+        # An attacker who got in before the password change keeps a cookie.
+        stolen = web.app.test_client()
+        self.assertEqual(stolen.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"],
+            "password": "secret",
+        }).status_code, 200)
+        self.assertEqual(stolen.post("/api/profile/status", json={}).status_code, 200)
+
+        owner = web.app.test_client()
+        self.assertEqual(owner.post("/api/profile/password/reset", json={
+            "profile_id": profile["profile_id"],
+            "current_password": "secret",
+            "new_password": "new-secret",
+        }).status_code, 200)
+
+        self.assertEqual(stolen.post("/api/profile/status", json={}).status_code, 401)
+        self.assertEqual(owner.post("/api/profile/status", json={}).status_code, 200)
 
     def test_stop_sync_endpoint_marks_profile_as_stopping(self) -> None:
         profile = web._profile_store.create_profile("secret", {
