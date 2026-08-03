@@ -141,10 +141,18 @@ This file is a compact working memory for future code changes. Keep it current w
   - Activity Sync
   - Latest Sync Results
   - Sync History
+- Sync Pairs run controls live in that panel's header only; duplicating them in
+  the page topbar under the same ids left the lower copies unbound and dead.
+- Running pairs saves unsaved edits first, and a run that reports per-category
+  errors gets an error toast, not a green "complete".
 - Latest Sync Results is paginated at 25 rows per page.
 - Sync History displays only the newest 25 runs.
 - Mobile tables should allow horizontal scroll.
 - Service connection dots show connected state based on credentials, not selected lists.
+- Settings -> Profile hides the Quick Setup steps once a profile is open, and the
+  profile UUID has a Copy button next to it.
+- All pollers skip their work while the browser tab is hidden and force a fresh
+  render on return.
 
 ## Tests
 

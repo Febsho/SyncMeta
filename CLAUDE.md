@@ -67,9 +67,16 @@ inside it are explicitly reset to sentence case — they read as shouting
 otherwise. Selected filter buttons invert to a light fill rather than taking the
 brand accent, so a filter row reads as one segmented control. **No webfonts** —
 the app is self-hosted and must render offline, so `--mono` is a system stack.
+A service's state is always a **dot plus its name**, never prose: the pair
+capability row (`.pair-cap`) is chips in that vocabulary, having been a run of
+`"Trakt: not connected"` lines joined by `<br>`. Form controls outside a
+`.form-row` need the dark treatment applied explicitly (`.pair-flow-end select`,
+`.library-picker-controls select`) or they fall back to the browser's native
+light control on a black page.
 
 Key patterns:
 - `fetchStatus(force)` polls `/status` every 2s during sync; has `_statusGeneration` counter to discard stale renders
+- **Every poller skips its work while `document.hidden`.** A background tab still runs its timers, so an unattended dashboard kept requesting `/status` every 2s for a whole sync, plus the log and live-activity tails at 2s each. The intervals stay installed and the callback returns early instead, so no polling state is torn down and rebuilt; one `visibilitychange` listener forces an immediate refresh of whatever is running on return, so a hidden tab never comes back showing stale numbers
 - `_forceStatusRefresh()` bumps `_statusGeneration`, clears in-flight request, immediately re-fetches — called after every action button success
 - All action buttons (`triggerSync`, `triggerActivitySync`, `saveProfile`, `loadProfile`) give immediate visual feedback (disable + label change) before any `await`, and restore on failure
 - `fetchUnresolved()` is only called on `sync_running` transition (true→false), not on every poll
@@ -177,6 +184,23 @@ An explicitly supplied empty list still clears them.
 come back empty reads as a broken feature. It rides to the UI as
 `has_list_search` in `describe()` — the unconfigured-provider stub in
 `_pair_capabilities` must keep answering the same shape.
+
+**Running pairs saves them first.** A run executes server-side against the
+*saved* pairs, so a card the user just added is invisible to it — "Run All" on a
+screen showing one pair used to answer "No sync pairs configured".
+`runPairs()` therefore calls `savePairs(false)` when `pairsHaveUnsavedEdits()`
+and aborts the run if that save fails. Dirtiness is a comparison against
+`pairsSavedSnapshot` (the serialized payload as the server last reported it, set
+in `fetchPairs`) rather than a flag, because a pair is mutated from a dozen
+places that would each have to remember to set one. The run controls live in the
+Sync Pairs **panel header** only: they were duplicated in the page topbar under
+the same ids, so `getElementById` bound the topbar copy and the lower buttons
+were dead — and "Run All" beside the service pipelines read as running those too.
+
+**A 200 from `/pairs/run` is not a successful run.** Provider read/write
+failures come back as per-run and per-category `errors` strings on an otherwise
+fine payload, so the toast counts them and reports an error rather than a green
+"complete" contradicting the red text rendered directly beneath it.
 
 **The pair editor renders scoped, not wholesale.** A provider can offer a
 hundred lists, so rebuilding every card on every keystroke is what made the
