@@ -54,6 +54,11 @@ This file is a compact working memory for future code changes. Keep it current w
 ## Scheduler
 
 - Scheduler is inside `web.py` and polls every 5 seconds.
+- It waits SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS (20s) before its first claim,
+  because the first HTTP request is what starts it, and claims at most
+  SYNCMETA_SCHEDULER_CLAIM_BATCH profiles per poll.
+- Gunicorn workers must stay at 1 (scheduler/SyncRunner are per-process); raise
+  threads instead. docker-compose.yml now has `env_file: .env`.
 - Disable with `DISABLE_PROFILE_SCHEDULER=1`.
 - Automatic background sync applies to list sync.
 - Trakt resume progress can auto-run when enabled; current default interval is 10 minutes in `profile_store.py`.
