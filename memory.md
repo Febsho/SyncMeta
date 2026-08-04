@@ -63,6 +63,11 @@ This file is a compact working memory for future code changes. Keep it current w
 - Automatic background sync applies to list sync.
 - Trakt resume progress can auto-run when enabled; current default interval is 10 minutes in `profile_store.py`.
 - Watch history is manual-only.
+- `activity_resume_source: "off"` is honoured explicitly. The trakt fallback in
+  `_normalize_resume_source` is a migration for the legacy
+  `trakt_sync_resume_progress` boolean and must only apply to an UNSET value —
+  normalize writes that boolean back out, so catching "off" too made the
+  override re-arm on every save and resume could never be turned off.
 - One sync per profile is claimed at a time through `ProfileStore`.
 
 ## Sync Modes

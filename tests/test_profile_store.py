@@ -579,6 +579,55 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded["next_resume_sync_at"])
         self.assertEqual(self.store.claim_due_profiles(), [])
 
+    def _trakt_connected_credentials(self) -> dict:
+        return {
+            **self.credentials,
+            "trakt": {
+                "client_id": "trakt-client",
+                "client_secret": "",
+                "access_token": "trakt-token",
+                "refresh_token": "",
+                "username": "",
+                "sync_watchlist": True,
+                "sync_liked_lists": False,
+                "selected_lists": [],
+            },
+        }
+
+    def test_turning_resume_off_beats_the_legacy_trakt_flag(self) -> None:
+        # The fallback exists to migrate the old trakt_sync_resume_progress
+        # boolean onto the newer activity_resume_source. But it used to catch
+        # *every* non-"trakt" value, including an explicit "off" — and because
+        # the normalised options carry trakt_sync_resume_progress back out
+        # again, the override re-armed itself on every save. Turning resume off
+        # was therefore impossible: it silently kept syncing.
+        created = self.store.create_profile("secret", self._trakt_connected_credentials(), {
+            **self.options,
+            "trakt_sync_resume_progress": True,
+            "activity_resume_source": "off",
+        })
+
+        loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+        self.assertEqual(loaded["options"]["activity_resume_source"], "off")
+
+        # And it stays off across a re-save rather than re-arming.
+        self.store.update_profile_by_id(created["profile_id"], {}, {
+            **self.options,
+            "activity_resume_source": "off",
+        })
+        reloaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+        self.assertEqual(reloaded["options"]["activity_resume_source"], "off")
+
+    def test_legacy_trakt_resume_flag_still_migrates_when_source_is_unset(self) -> None:
+        # The migration itself must survive: an older profile that only has the
+        # boolean still ends up pointed at Trakt.
+        options = {**self.options, "trakt_sync_resume_progress": True}
+        options.pop("activity_resume_source", None)
+        created = self.store.create_profile("secret", self._trakt_connected_credentials(), options)
+
+        loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+        self.assertEqual(loaded["options"]["activity_resume_source"], "trakt")
+
     def test_normalize_profile_options_drops_legacy_simkl_resume_source(self) -> None:
         created = self.store.create_profile("secret", self.credentials, {
             **self.options,

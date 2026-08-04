@@ -633,12 +633,24 @@ def _normalize_activity_source(value: object, simkl_enabled: bool, trakt_enabled
 
 
 def _normalize_resume_source(value: object, trakt_enabled: bool) -> str:
+    """Resolve the resume source, honouring an explicit "off".
+
+    Trakt is the only supported resume source — "simkl" is legacy and is
+    deliberately dropped to "off" (there is a test pinning that). But *only* an
+    unset value may fall back to Trakt: this previously treated every
+    non-"trakt" value the same, so a Trakt-connected user who chose "Off" in the
+    resume dropdown had it silently switched back on and kept syncing resume
+    progress they had turned off. Same rule as the list selections — a linked
+    service must not re-enable itself over the user's choice.
+    """
     candidate = str(value or "").strip().lower()
     if candidate == "trakt":
         return "trakt"
-    if trakt_enabled:
-        return "trakt"
-    return "off"
+    if candidate == "off":
+        return "off"
+    # Unset (new profile, or a legacy value like "simkl"): default to Trakt when
+    # it is connected, otherwise nothing to resume from.
+    return "trakt" if trakt_enabled else "off"
 
 
 def _normalize_sync_pairs(raw: object) -> list[dict]:
