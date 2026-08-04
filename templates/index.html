@@ -1293,8 +1293,37 @@
                 </div>
                 <div class="conn-card form-section" id="connection-card-mdblist">
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
-                  <div class="conn-card-desc">Selected MDBList catalog lists. MDBList watch status sync is handled by MDBList's own Trakt/Plex integrations.</div>
-                  <div class="form-row" style="margin-bottom:0"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
+                  <div class="conn-card-desc">Your MDBList lists, watchlist, collection and watch history. An API key is enough to read; connect with OAuth to also write back to MDBList.</div>
+                  <div class="form-row"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
+                  <div class="form-row"><label for="mdblist-client-id">Client ID</label><input type="text" id="mdblist-client-id" placeholder="From mdblist.com/developer" autocomplete="off"><div class="hint">Create an app at <a href="https://mdblist.com/developer/" target="_blank" rel="noopener">mdblist.com/developer</a> to sync <em>into</em> MDBList.</div></div>
+                  <div class="form-row"><label for="mdblist-client-secret">Client Secret</label><input type="password" id="mdblist-client-secret" placeholder="From mdblist.com/developer" autocomplete="off"></div>
+                  <div class="form-row">
+                    <label for="mdblist-redirect-url">Redirect URL</label>
+                    <div class="copy-row">
+                      <input type="text" id="mdblist-redirect-url" readonly value="">
+                      <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('mdblist-redirect-url')">Copy</button>
+                    </div>
+                    <div class="hint">Set this exact URL as your MDBList app&rsquo;s Redirect URL, or authorization will be refused.</div>
+                  </div>
+                  <div class="actions-bar" style="margin-top:0">
+                    <button class="btn btn-sm" id="btn-mdblist-auth" onclick="startMdbListAuth()">Connect MDBList</button>
+                    <span class="actions-meta" id="mdblist-auth-status">Enter your client ID and secret, then connect.</span>
+                  </div>
+                  <div class="auth-box hidden" id="mdblist-auth-box">
+                    <div class="actions-meta">Authorize on MDBList, then paste the code from the address bar.</div>
+                    <div class="actions-bar" style="margin-top:8px">
+                      <button class="btn btn-sm" type="button" onclick="openMdbListVerification()">Open MDBList</button>
+                      <button class="btn btn-sm" type="button" onclick="copyMdbListAuthUrl()">Copy Link</button>
+                    </div>
+                    <div class="form-row" style="margin-top:8px;margin-bottom:0">
+                      <label for="mdblist-auth-code">Code from MDBList</label>
+                      <input type="text" id="mdblist-auth-code" class="mono" placeholder="Paste the code here" autocomplete="off">
+                    </div>
+                    <div class="actions-bar" style="margin-top:8px">
+                      <button class="btn btn-sm btn-primary" type="button" id="btn-mdblist-auth-finish" onclick="finishMdbListAuth()">Finish Connecting</button>
+                      <button class="btn btn-sm btn-ghost" type="button" onclick="cancelMdbListAuth()">Cancel</button>
+                    </div>
+                  </div>
                   <div class="connection-health" id="connection-health-mdblist"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('mdblist')">Test</button></div>
                 </div>
               </div>
@@ -1524,8 +1553,10 @@
       const value = currentSiteRoot();
       const simklInput = el('simkl-redirect-url');
       const traktInput = el('trakt-redirect-url');
+      const mdblistInput = el('mdblist-redirect-url');
       if (simklInput) simklInput.value = value;
       if (traktInput) traktInput.value = value;
+      if (mdblistInput) mdblistInput.value = value;
     }
 
     // ── AniList connect flow ───────────────────────────────────────────────
@@ -1533,6 +1564,108 @@
     // the user authorizes there, AniList shows a code, and that code is exchanged
     // server-side for a long-lived access token.
     let anilistAuthUrl = '';
+
+    // ── MDBList OAuth (authorization code + PKCE) ──────────────────────────
+    // MDBList requires PKCE, so the verifier is generated and held server-side
+    // for the length of the flow; the browser only ever sees the authorize URL.
+    let mdblistAuthUrl = '';
+
+    function setMdbListAuthStatus(message, isError) {
+      const node = el('mdblist-auth-status');
+      if (!node) return;
+      node.textContent = flattenStatusMessage(message);
+      node.style.color = isError ? 'var(--red)' : '';
+    }
+
+    async function startMdbListAuth() {
+      const btn = el('btn-mdblist-auth');
+      const clientId = el('mdblist-client-id').value.trim();
+      if (!clientId && !hasSavedSecret('mdblist', 'client_secret_saved')) {
+        setMdbListAuthStatus('Enter your MDBList client ID first.', true);
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+      try {
+        const result = await apiPost('/api/mdblist/auth/start', {
+          client_id: clientId,
+          client_secret: el('mdblist-client-secret').value.trim(),
+          // Must match the app's registered redirect exactly, so it is taken
+          // from the same field the user was told to copy.
+          redirect_uri: el('mdblist-redirect-url').value.trim() || currentSiteRoot(),
+        });
+        if (!result.ok) {
+          setMdbListAuthStatus(formatApiError(result.data, 'Could not start MDBList auth.'), true);
+          return;
+        }
+        mdblistAuthUrl = result.data.authorize_url || '';
+        el('mdblist-auth-box').classList.remove('hidden');
+        setMdbListAuthStatus('Authorize on MDBList, then paste the code below.', false);
+        openMdbListVerification();
+      } catch {
+        setMdbListAuthStatus('Network error while starting MDBList auth.', true);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Connect MDBList'; }
+      }
+    }
+
+    function openMdbListVerification() {
+      if (mdblistAuthUrl) window.open(mdblistAuthUrl, '_blank', 'noopener');
+    }
+
+    async function copyMdbListAuthUrl() {
+      if (!mdblistAuthUrl) return;
+      try {
+        await navigator.clipboard.writeText(mdblistAuthUrl);
+        showToast('Copied MDBList authorization link', false, true);
+      } catch {
+        showToast('Could not copy the link', true);
+      }
+    }
+
+    function cancelMdbListAuth() {
+      mdblistAuthUrl = '';
+      el('mdblist-auth-code').value = '';
+      el('mdblist-auth-box').classList.add('hidden');
+      setMdbListAuthStatus('Enter your client ID and secret, then connect.', false);
+    }
+
+    async function finishMdbListAuth() {
+      const btn = el('btn-mdblist-auth-finish');
+      const code = el('mdblist-auth-code').value.trim();
+      if (!code) {
+        setMdbListAuthStatus('Paste the code MDBList showed you.', true);
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
+      try {
+        const result = await apiPost('/api/mdblist/auth/check', {
+          client_id: el('mdblist-client-id').value.trim(),
+          client_secret: el('mdblist-client-secret').value.trim(),
+          code: code,
+        });
+        if (!result.ok) {
+          setMdbListAuthStatus(formatApiError(result.data, 'MDBList authentication failed.'), true);
+          return;
+        }
+        // Stored server-side the moment the exchange succeeded, because the
+        // code is single-use; reflect that so it reads like any saved secret.
+        secretState.mdblist = Object.assign({}, secretState.mdblist, {
+          access_token_saved: true, client_secret_saved: true,
+        });
+        el('mdblist-auth-box').classList.add('hidden');
+        el('mdblist-auth-code').value = '';
+        mdblistAuthUrl = '';
+        setMdbListAuthStatus('MDBList connected. You can now sync into MDBList.', false);
+        updateDots();
+        showToast('MDBList connected.', false, true);
+        // Writability changed, so the pair editor's capability report is stale.
+        fetchPairs();
+      } catch {
+        setMdbListAuthStatus('Network error while finishing MDBList auth.', true);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Finish Connecting'; }
+      }
+    }
 
     function setAniListAuthStatus(message, isError) {
       const node = el('anilist-auth-status');
@@ -1673,7 +1806,7 @@
         simkl: { client_secret_saved: false, access_token_saved: false },
         anilist: { client_secret_saved: false, access_token_saved: false },
         trakt: { client_secret_saved: false, access_token_saved: false, refresh_token_saved: false },
-        mdblist: { api_key_saved: false },
+        mdblist: { api_key_saved: false, client_secret_saved: false, access_token_saved: false },
         pmdb: { api_key_saved: false },
       };
     }
@@ -1913,6 +2046,8 @@
         },
         mdblist: {
           api_key: el('mdblist-api-key').value.trim(),
+          client_id: el('mdblist-client-id').value.trim(),
+          client_secret: el('mdblist-client-secret').value.trim(),
           selected_lists: normalizeMdbListSelectedLists(mdblistSelectedLists),
         },
         pmdb: { api_key: el('pmdb-api-key').value.trim() },
@@ -2019,6 +2154,8 @@
         },
         mdblist: {
           api_key_saved: !!mdblist.api_key_saved,
+          client_secret_saved: !!mdblist.client_secret_saved,
+          access_token_saved: !!mdblist.access_token_saved,
         },
         pmdb: {
           api_key_saved: !!pmdb.api_key_saved,
@@ -2058,6 +2195,8 @@
       traktLikedLists = [];
       traktDiscoverLists = [];
       setSecretInputState('mdblist-api-key', 'mdblist', 'api_key_saved', 'From mdblist.com settings');
+      el('mdblist-client-id').value = mdblist.client_id || '';
+      setSecretInputState('mdblist-client-secret', 'mdblist', 'client_secret_saved', 'From mdblist.com/developer');
       mdblistSelectedLists = normalizeMdbListSelectedLists(mdblist.selected_lists || []);
       mdblistLists = [];
       mdblistDiscoverLists = [];
@@ -2143,7 +2282,8 @@
       setDot('dot-simkl', !!(creds.simkl.client_id && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved')));
       setDot('dot-anilist', !!creds.anilist.username);
       setDot('dot-trakt', !!(creds.trakt.client_id && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved')));
-      setDot('dot-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
+      setDot('dot-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved')
+        || !!(secretState.mdblist && secretState.mdblist.access_token_saved));
       setDot('dot-pmdb', hasSecretInputOrSaved('pmdb-api-key', 'pmdb', 'api_key_saved'));
       setDot('dot-tmdb', hasSecretInputOrSaved('tmdb-api-key', 'tmdb', 'api_key_saved'));
       // Mirror connection state onto the Sync view's pipeline cards.

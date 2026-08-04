@@ -129,6 +129,14 @@ This file is a compact working memory for future code changes. Keep it current w
 
 - Supports account lists and public-list search.
 - Public search may need the HTML/toplists fallback if the API path returns nothing.
+- No longer source-only: it reads AND writes watchlist, collection and watch
+  history through its `/sync/*` API (marked BETA by MDBList), and adds/removes
+  items on static lists via `/lists/{id}/items/{add|remove}`.
+- Auth is an `apikey` query param OR an OAuth bearer token; the client prefers
+  the bearer. OAuth is authorization-code + PKCE, needs the client secret too,
+  and every OAuth path requires a trailing slash.
+- History is account-level only; a curated list has no watch dates.
+- `/sync/ratings`, `/sync/paused`, `/sync/dropped` exist but are not wired.
 
 ## PublicMetaDB Notes
 

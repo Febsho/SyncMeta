@@ -73,10 +73,20 @@ class TraktConfig:
 
 @dataclass
 class MdbListConfig:
+    # An API key alone still works and is the simpler read-only path. OAuth is
+    # what unlocks writing, so both auth modes are carried and the client
+    # prefers the bearer token when one is present.
     api_key: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    access_token_expires_at: str = ""
     enabled: bool = False
     selected_lists: list[dict] = field(default_factory=list)
     base_url: str = "https://api.mdblist.com"
+    # OAuth authorization lives on the site, not the API host.
+    site_url: str = "https://mdblist.com"
 
 
 @dataclass

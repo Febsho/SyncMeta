@@ -361,6 +361,11 @@ def normalize_credentials(credentials: dict | None) -> dict:
         },
         "mdblist": {
             "api_key": str(mdblist.get("api_key", "")).strip(),
+            "client_id": str(mdblist.get("client_id", "")).strip(),
+            "client_secret": str(mdblist.get("client_secret", "")).strip(),
+            "access_token": str(mdblist.get("access_token", "")).strip(),
+            "refresh_token": str(mdblist.get("refresh_token", "")).strip(),
+            "access_token_expires_at": str(mdblist.get("access_token_expires_at", "")).strip(),
             "selected_lists": _normalize_mdblist_selected_lists(mdblist.get("selected_lists", [])),
         },
         "pmdb": {
@@ -404,6 +409,11 @@ def public_credentials(credentials: dict | None) -> dict:
         },
         "mdblist": {
             "api_key_saved": bool(raw["mdblist"]["api_key"]),
+            "client_id": raw["mdblist"]["client_id"],
+            "client_secret_saved": bool(raw["mdblist"]["client_secret"]),
+            "access_token_saved": bool(raw["mdblist"]["access_token"]),
+            "refresh_token_saved": bool(raw["mdblist"]["refresh_token"]),
+            "access_token_expires_at": raw["mdblist"]["access_token_expires_at"],
             "selected_lists": copy.deepcopy(raw["mdblist"]["selected_lists"]),
         },
         "pmdb": {
@@ -590,6 +600,11 @@ def merge_credentials(existing: dict | None, updates: dict | None) -> dict:
         },
         "mdblist": {
             "api_key": keep_secret("mdblist", "api_key"),
+            "client_id": incoming["mdblist"]["client_id"],
+            "client_secret": keep_secret("mdblist", "client_secret"),
+            "access_token": keep_secret("mdblist", "access_token"),
+            "refresh_token": keep_secret("mdblist", "refresh_token"),
+            "access_token_expires_at": incoming["mdblist"]["access_token_expires_at"] or current["mdblist"]["access_token_expires_at"],
             "selected_lists": incoming["mdblist"]["selected_lists"],
         },
         "pmdb": {
@@ -2258,6 +2273,39 @@ class ProfileStore:
                 profile["credentials"]["trakt"]["refresh_token"] = refresh_token
             if access_token_expires_at:
                 profile["credentials"]["trakt"]["access_token_expires_at"] = access_token_expires_at
+            self._save_locked()
+
+    def update_mdblist_auth(
+        self,
+        profile_id: str,
+        client_id: str = "",
+        client_secret: str = "",
+        access_token: str = "",
+        refresh_token: str = "",
+        access_token_expires_at: str = "",
+    ) -> None:
+        """Persist MDBList OAuth results without touching any other profile state.
+
+        Written the moment the exchange succeeds: the authorization code is
+        single-use and short-lived, so waiting for the user to press Save would
+        lose it — the same reason update_anilist_auth exists.
+        """
+        with self._lock:
+            try:
+                profile = self._get_profile_locked(profile_id)
+            except KeyError:
+                return
+            mdblist = profile["credentials"]["mdblist"]
+            if client_id:
+                mdblist["client_id"] = client_id
+            if client_secret:
+                mdblist["client_secret"] = client_secret
+            if access_token:
+                mdblist["access_token"] = access_token
+            if refresh_token:
+                mdblist["refresh_token"] = refresh_token
+            if access_token_expires_at:
+                mdblist["access_token_expires_at"] = access_token_expires_at
             self._save_locked()
 
     def update_anilist_auth(

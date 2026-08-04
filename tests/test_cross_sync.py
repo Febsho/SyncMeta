@@ -791,13 +791,16 @@ class TargetListTests(unittest.TestCase):
             AniListAdapter, MdbListAdapter, PmdbAdapter, SimklAdapter, TraktAdapter,
         )
         # Writing into a named list is a real capability, not a UI nicety: SIMKL
-        # and AniList have no writable custom lists and MDBList has no writes at
-        # all, so offering a destination list for them would be a lie.
+        # and AniList have no writable custom lists, so offering a destination
+        # list for them would be a lie. MDBList's static lists are writable.
         self.assertTrue(TraktAdapter.supports_target_lists)
         self.assertTrue(PmdbAdapter.supports_target_lists)
+        self.assertTrue(MdbListAdapter.supports_target_lists)
         self.assertFalse(SimklAdapter.supports_target_lists)
         self.assertFalse(AniListAdapter.supports_target_lists)
-        self.assertFalse(MdbListAdapter.supports_target_lists)
+        # Watch history has no named destination anywhere.
+        self.assertNotIn(CATEGORY_HISTORY, MdbListAdapter.target_list_categories)
+        self.assertNotIn(CATEGORY_HISTORY, TraktAdapter.target_list_categories)
 
     def test_only_providers_with_a_public_search_advertise_one(self) -> None:
         from src.providers import (
@@ -921,14 +924,23 @@ class PmdbCollectionTargetTests(unittest.TestCase):
         self.assertEqual(client.added, [])
 
 
-class MdbListSourceTests(unittest.TestCase):
-    """MDBList feeds other services but can never receive."""
+class MdbListProviderTests(unittest.TestCase):
+    """MDBList reads and writes: its own sync API plus the user's static lists."""
 
     class FakeMdbClient:
-        def __init__(self, items_by_list=None, failing=()):
+        def __init__(self, items_by_list=None, failing=(), sync_items=None, write_auth=True):
             self._items = items_by_list or {}
             self._failing = set(failing)
+            self._sync = sync_items or {}
+            self._write_auth = write_auth
             self.calls: list[int] = []
+            self.sync_reads: list[str] = []
+            self.added: list[tuple[str, list]] = []
+            self.removed: list[tuple[str, list]] = []
+            self.list_changes: list[tuple] = []
+
+        def has_write_auth(self):
+            return self._write_auth
 
         def get_list_items(self, list_id: int):
             self.calls.append(list_id)
@@ -936,22 +948,67 @@ class MdbListSourceTests(unittest.TestCase):
                 raise RuntimeError("mdblist 500")
             return list(self._items.get(list_id, []))
 
+        def get_sync_items(self, category):
+            self.sync_reads.append(category)
+            return list(self._sync.get(category, []))
+
+        def add_sync_items(self, category, items):
+            self.added.append((category, list(items)))
+            return {"added": len(items)}
+
+        def remove_sync_items(self, category, items):
+            self.removed.append((category, list(items)))
+            return {"removed": len(items)}
+
+        def change_list_items(self, list_id, items, action):
+            self.list_changes.append((list_id, list(items), action))
+            return {"changed": len(items)}
+
     def _adapter(self, **kwargs):
         from src.providers import MdbListAdapter
         return MdbListAdapter(**kwargs)
 
-    def test_never_writable_and_says_why(self) -> None:
+    def test_writable_when_a_credential_exists(self) -> None:
         adapter = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+        self.assertTrue(adapter.can_write())
+        self.assertEqual(
+            sorted(adapter.writable_categories()),
+            sorted([CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY]),
+        )
+
+    def test_not_writable_without_any_credential(self) -> None:
+        adapter = self._adapter(
+            client=self.FakeMdbClient(write_auth=False), selected_lists=[],
+        )
         self.assertFalse(adapter.can_write())
         self.assertEqual(adapter.writable_categories(), ())
-        self.assertIn("only be read from", adapter.write_blocked_reason())
-
-    def test_writing_is_refused_outright(self) -> None:
-        adapter = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+        self.assertIn("API key", adapter.write_blocked_reason())
         with self.assertRaises(ValueError):
             adapter.add(CATEGORY_WATCHLIST, [_movie("1")])
-        with self.assertRaises(ValueError):
-            adapter.remove(CATEGORY_WATCHLIST, [_movie("1")])
+
+    def test_account_categories_come_from_the_sync_api(self) -> None:
+        client = self.FakeMdbClient(sync_items={CATEGORY_HISTORY: [_movie("7")]})
+        adapter = self._adapter(client=client, selected_lists=[])
+        items = adapter.fetch(CATEGORY_HISTORY)
+        self.assertEqual([i["tmdb_id"] for i in items], ["7"])
+        self.assertEqual(client.sync_reads, [CATEGORY_HISTORY])
+
+    def test_history_never_folds_in_a_curated_list(self) -> None:
+        # A curated list carries no watch dates, so mixing one into history
+        # would invent history that never happened.
+        client = self.FakeMdbClient({10: [_movie("1")]}, sync_items={CATEGORY_HISTORY: []})
+        adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+        self.assertEqual(adapter.fetch(CATEGORY_HISTORY), [])
+        self.assertEqual(client.calls, [])
+
+    def test_a_list_selection_does_not_also_read_the_whole_account(self) -> None:
+        client = self.FakeMdbClient(
+            {10: [_movie("1")]}, sync_items={CATEGORY_WATCHLIST: [_movie("99")]},
+        )
+        adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+        items = adapter.fetch(CATEGORY_WATCHLIST, ["list:10"])
+        self.assertEqual([i["tmdb_id"] for i in items], ["1"])
+        self.assertEqual(client.sync_reads, [], "a named selection must not widen to the account")
 
     def test_selected_lists_are_combined_and_deduplicated(self) -> None:
         client = self.FakeMdbClient({
@@ -961,14 +1018,14 @@ class MdbListSourceTests(unittest.TestCase):
         adapter = self._adapter(
             client=client, selected_lists=[{"id": 10, "name": "A"}, {"id": 11, "name": "B"}],
         )
-        items = adapter.fetch(CATEGORY_WATCHLIST)
+        items = adapter.fetch(CATEGORY_WATCHLIST, ["list:10", "list:11"])
         self.assertEqual(sorted(i["tmdb_id"] for i in items), ["1", "2", "3"])
 
     def test_items_are_fetched_once_and_reused_across_categories(self) -> None:
         client = self.FakeMdbClient({10: [_movie("1")]})
         adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
-        adapter.fetch(CATEGORY_WATCHLIST)
-        adapter.fetch(CATEGORY_COLLECTION)
+        adapter.fetch(CATEGORY_WATCHLIST, ["list:10"])
+        adapter.fetch(CATEGORY_COLLECTION, ["list:10"])
         self.assertEqual(client.calls, [10], "the same items answer both categories")
 
     def test_one_failing_list_does_not_lose_the_others(self) -> None:
@@ -976,7 +1033,7 @@ class MdbListSourceTests(unittest.TestCase):
         adapter = self._adapter(
             client=client, selected_lists=[{"id": 10, "name": "A"}, {"id": 11, "name": "B"}],
         )
-        items = adapter.fetch(CATEGORY_WATCHLIST)
+        items = adapter.fetch(CATEGORY_WATCHLIST, ["list:10", "list:11"])
         self.assertEqual([i["tmdb_id"] for i in items], ["2"])
 
     def test_mdblist_can_feed_another_service(self) -> None:
@@ -985,20 +1042,59 @@ class MdbListSourceTests(unittest.TestCase):
         target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
         service = CrossSyncService({"mdblist": source, "simkl": target})
 
-        stats = service.run_pair(_pair(source="mdblist", target="simkl"))
+        stats = service.run_pair(_pair(
+            source="mdblist", target="simkl", source_lists=["list:10"],
+        ))
 
         self.assertEqual(stats.added, 1)
         self.assertEqual([i["tmdb_id"] for i in target.added[0][1]], ["2"])
 
-    def test_mdblist_as_a_target_is_rejected_before_anything_runs(self) -> None:
-        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
-        target = self._adapter(client=self.FakeMdbClient(), selected_lists=[])
+    def test_mdblist_receives_a_watchlist_from_another_service(self) -> None:
+        client = self.FakeMdbClient(sync_items={CATEGORY_WATCHLIST: [_movie("1")]})
+        target = self._adapter(client=client, selected_lists=[])
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
         service = CrossSyncService({"trakt": source, "mdblist": target})
 
         stats = service.run_pair(_pair(target="mdblist"))
 
-        self.assertIn("only be read from", stats.errors[0])
+        self.assertEqual(stats.errors, [])
+        self.assertEqual(stats.added, 1, "only the item MDBList was missing")
+        self.assertEqual(client.added[0][0], CATEGORY_WATCHLIST)
+        self.assertEqual([i["tmdb_id"] for i in client.added[0][1]], ["2"])
+
+    def test_a_second_run_writes_nothing(self) -> None:
+        # The idempotence guard: identity must normalise so an already-synced
+        # item is not re-added on every run.
+        client = self.FakeMdbClient(sync_items={CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        target = self._adapter(client=client, selected_lists=[])
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        service = CrossSyncService({"trakt": source, "mdblist": target})
+
+        stats = service.run_pair(_pair(target="mdblist"))
+
         self.assertEqual(stats.added, 0)
+        self.assertEqual(client.added, [])
+
+    def test_writing_into_a_named_list_uses_the_list_endpoint(self) -> None:
+        client = self.FakeMdbClient({10: []})
+        target = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("5")]})
+        service = CrossSyncService({"trakt": source, "mdblist": target})
+
+        stats = service.run_pair(_pair(target="mdblist", target_list="list:10"))
+
+        self.assertEqual(stats.errors, [])
+        self.assertEqual(client.list_changes[0][0], "10")
+        self.assertEqual(client.list_changes[0][2], "add")
+        self.assertEqual(client.added, [], "a named list must not go through the sync API")
+
+    def test_history_has_no_named_destination(self) -> None:
+        adapter = self._adapter(
+            client=self.FakeMdbClient(), selected_lists=[{"id": 10, "name": "A"}],
+        )
+        self.assertNotIn(CATEGORY_HISTORY, adapter.target_list_categories)
+        with self.assertRaises(ValueError):
+            adapter.add(CATEGORY_HISTORY, [_movie("1")], target_list="list:10")
 
 
 if __name__ == "__main__":

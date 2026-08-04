@@ -42,12 +42,19 @@ again, and whether they are public or private in PublicMetaDB.
 | SIMKL | Watch statuses for shows, movies and anime; watch history | yes |
 | Trakt | Watchlist, collection, history, your lists, liked lists, resume | yes |
 | AniList | Lists by status | only with an access token |
-| MDBList | Your lists and public lists | no, source only |
+| MDBList | Your lists and public lists, watchlist, collection, watch history | yes, with an API key or OAuth |
 | PublicMetaDB | Watchlist and lists | yes |
 
 **Watch history and resume progress.** Optional and off by default. Watch
 history can come from SIMKL or Trakt; resume progress is Trakt only. History is
 manual by default, resume can run automatically.
+
+**MDBList OAuth.** An API key is enough to read. To sync *into* MDBList — its
+watchlist, collection, watch history, or one of your static lists — create an app
+at [mdblist.com/developer](https://mdblist.com/developer/), paste the client id
+and secret in Connections, set the shown Redirect URL on your MDBList app, then
+press Connect. MDBList marks its sync API as beta, so preview with a dry run
+before trusting a real run.
 
 **Sync pairs.** Beyond the built-in service-to-PublicMetaDB pipelines, you can
 copy a list from any service to any other. A pair is one-way or two-way, and

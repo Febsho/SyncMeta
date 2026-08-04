@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import logging
 import re
+import secrets
+from urllib.parse import urlencode
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -49,6 +53,9 @@ class MdbListClient:
         session = requests.Session()
         session.headers.update({"Accept": "application/json"})
 
+        # allowed_methods stays GET-only on purpose. A write that timed out may
+        # already have been applied, so retrying it duplicates list items or
+        # watch records; write failures surface to the caller instead.
         retry = Retry(
             total=3,
             backoff_factor=1.0,
@@ -65,16 +72,58 @@ class MdbListClient:
             pass
         return session
 
+    # ── auth ───────────────────────────────────────────────────────────────
+    # Two modes. An OAuth bearer token is preferred when present because it is
+    # the one that carries the write scope; the apikey query parameter remains
+    # for profiles that only ever pasted a key, which must keep working.
+
+    def _auth_headers(self) -> dict:
+        token = str(getattr(self._config, "access_token", "") or "").strip()
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def _auth_params(self) -> dict:
+        if self._auth_headers():
+            return {}
+        return {"apikey": self._config.api_key}
+
+    def has_write_auth(self) -> bool:
+        return bool(
+            str(getattr(self._config, "access_token", "") or "").strip()
+            or str(self._config.api_key or "").strip()
+        )
+
     def _get(self, path: str, params: dict | None = None) -> requests.Response:
         request_params = dict(params or {})
-        request_params["apikey"] = self._config.api_key
+        request_params.update(self._auth_params())
         url = f"{self._config.base_url}{path}"
         logger.debug("GET %s params=%s", url, request_params)
         self._check_cancelled()
-        response = self._session.get(url, params=request_params, timeout=REQUEST_TIMEOUT)
+        response = self._session.get(
+            url, params=request_params, headers=self._auth_headers(), timeout=REQUEST_TIMEOUT,
+        )
         self._check_cancelled()
         response.raise_for_status()
         return response
+
+    def _post(self, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
+        request_params = dict(params or {})
+        request_params.update(self._auth_params())
+        url = f"{self._config.base_url}{path}"
+        logger.debug("POST %s", url)
+        self._check_cancelled()
+        response = self._session.post(
+            url,
+            params=request_params,
+            json=payload if payload is not None else {},
+            headers=self._auth_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
+        self._check_cancelled()
+        response.raise_for_status()
+        try:
+            return response.json() or {}
+        except ValueError:
+            return {}
 
     def get_user_lists(self) -> list[dict]:
         """Fetch the authenticated user's MDBList lists."""
@@ -320,3 +369,226 @@ class MdbListClient:
             "status": None,
             "added_at": None,
         }
+
+    # ── OAuth (PKCE) ───────────────────────────────────────────────────────
+    # MDBList requires PKCE for every client, and every OAuth path needs its
+    # trailing slash — without it the request fails. Authorization happens on
+    # the site host, token exchange on the API host.
+
+    @staticmethod
+    def generate_pkce_pair() -> tuple[str, str]:
+        """Return (code_verifier, code_challenge) for the S256 method."""
+        verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode("ascii").rstrip("=")
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        return verifier, challenge
+
+    def build_authorize_url(self, redirect_uri: str, code_challenge: str, state: str = "") -> str:
+        params = {
+            "client_id": self._config.client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "read write",
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        if state:
+            params["state"] = state
+        return f"{self._config.site_url}/oauth/authorize/?{urlencode(params)}"
+
+    def _token_request(self, data: dict) -> dict:
+        url = f"{self._config.base_url}/oauth/token/"
+        response = self._session.post(url, data=data, timeout=REQUEST_TIMEOUT)
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                body = response.json() or {}
+                detail = str(body.get("error_description") or body.get("error") or "").strip()
+            except ValueError:
+                detail = (response.text or "").strip()[:200]
+            raise RuntimeError(
+                f"MDBList token request failed ({response.status_code})"
+                + (f": {detail}" if detail else "")
+            )
+        return response.json() or {}
+
+    def exchange_code_for_token(self, code: str, code_verifier: str, redirect_uri: str) -> dict:
+        return self._token_request({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret,
+            "code_verifier": code_verifier,
+        })
+
+    def refresh_access_token(self) -> dict:
+        if not str(self._config.refresh_token or "").strip():
+            raise RuntimeError("No MDBList refresh token stored")
+        payload = self._token_request({
+            "grant_type": "refresh_token",
+            "refresh_token": self._config.refresh_token,
+            "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret,
+        })
+        # Adopt the new token immediately so the in-flight call can be retried.
+        if payload.get("access_token"):
+            self._config.access_token = str(payload["access_token"])
+        if payload.get("refresh_token"):
+            self._config.refresh_token = str(payload["refresh_token"])
+        return payload
+
+    # ── sync surface ───────────────────────────────────────────────────────
+    # MDBList marks /sync/* BETA. Bodies are Trakt-shaped: {"movies": [...],
+    # "shows": [...]} with an ids object, which is why the app's item dicts map
+    # over with only id translation.
+
+    _SYNC_PATHS = {
+        "watchlist": "/sync/watchlist",
+        "collection": "/sync/collection",
+        "history": "/sync/watched",
+    }
+
+    @classmethod
+    def _sync_path(cls, category: str) -> str:
+        path = cls._SYNC_PATHS.get(str(category or "").strip().lower())
+        if not path:
+            raise ValueError(f"MDBList has no sync endpoint for {category!r}")
+        return path
+
+    @staticmethod
+    def _to_sync_payload(items: list[dict]) -> dict:
+        """Group the app's items into MDBList's movies/shows request body.
+
+        Items with neither an IMDB nor a TMDB id are dropped rather than sent:
+        MDBList cannot resolve them, and a body full of id-less entries is how
+        a write silently lands on the wrong title.
+        """
+        movies: list[dict] = []
+        shows: list[dict] = []
+        for item in items or []:
+            ids: dict = {}
+            imdb_id = str(item.get("imdb_id") or "").strip()
+            tmdb_id = str(item.get("tmdb_id") or "").strip()
+            if imdb_id:
+                ids["imdb"] = imdb_id
+            if tmdb_id.isdigit():
+                ids["tmdb"] = int(tmdb_id)
+            if not ids:
+                continue
+            entry: dict = {"ids": ids}
+            if item.get("title"):
+                entry["title"] = item["title"]
+            if item.get("year"):
+                entry["year"] = item["year"]
+            watched_at = item.get("watched_at") or item.get("last_watched_at")
+            if watched_at:
+                entry["watched_at"] = watched_at
+            (movies if item.get("media_type") == "movie" else shows).append(entry)
+        return {"movies": movies, "shows": shows}
+
+    @classmethod
+    def _from_sync_payload(cls, payload: dict, category: str) -> list[dict]:
+        """Flatten a /sync/* response into the app's item shape.
+
+        The watched response nests the media under a "movie"/"show" key beside
+        its timestamp; watchlist and collection return the entry directly.
+        """
+        out: list[dict] = []
+        if not isinstance(payload, dict):
+            return out
+        for key, media_type in (("movies", "movie"), ("shows", "tv")):
+            for row in payload.get(key) or []:
+                if not isinstance(row, dict):
+                    continue
+                media = row.get("movie") or row.get("show") or row
+                if not isinstance(media, dict):
+                    continue
+                ids = media.get("ids") or {}
+                imdb_id = ids.get("imdb") or media.get("imdb_id")
+                tmdb_id = ids.get("tmdb") or media.get("tmdb_id")
+                if not imdb_id and not tmdb_id:
+                    continue
+                out.append({
+                    "title": media.get("title") or "Unknown",
+                    "year": media.get("year") or media.get("release_year"),
+                    "media_type": media_type,
+                    "simkl_type": "movie" if media_type == "movie" else "show",
+                    "imdb_id": str(imdb_id) if imdb_id else None,
+                    "tmdb_id": str(tmdb_id) if tmdb_id else None,
+                    "mal_id": None,
+                    "anilist_id": None,
+                    "anidb_id": None,
+                    "tvdb_id": str(ids.get("tvdb")) if ids.get("tvdb") else None,
+                    "ids": ids,
+                    "status": None,
+                    "added_at": row.get("listed_at") or row.get("collected_at"),
+                    "watched_at": row.get("last_watched_at") or row.get("watched_at"),
+                })
+        return out
+
+    def get_sync_items(self, category: str) -> list[dict]:
+        """Read one sync category, following offset pagination."""
+        path = self._sync_path(category)
+        offset = 0
+        limit = 1000
+        items: list[dict] = []
+        while True:
+            payload = self._get(path, {"limit": limit, "offset": offset}).json() or {}
+            batch = self._from_sync_payload(payload, category)
+            items.extend(batch)
+            pagination = payload.get("pagination") if isinstance(payload, dict) else None
+            if not isinstance(pagination, dict) or not pagination.get("has_more") or not batch:
+                break
+            offset += limit
+        logger.info("MDBList: fetched %d %s item(s)", len(items), category)
+        return items
+
+    def add_sync_items(self, category: str, items: list[dict]) -> dict:
+        payload = self._to_sync_payload(items)
+        if not payload["movies"] and not payload["shows"]:
+            return {"added": 0}
+        result = self._post(self._sync_path(category), payload)
+        logger.info(
+            "MDBList: added %d movie(s) and %d show(s) to %s",
+            len(payload["movies"]), len(payload["shows"]), category,
+        )
+        return result
+
+    def remove_sync_items(self, category: str, items: list[dict]) -> dict:
+        payload = self._to_sync_payload(items)
+        if not payload["movies"] and not payload["shows"]:
+            return {"removed": 0}
+        result = self._post(f"{self._sync_path(category)}/remove", payload)
+        logger.info(
+            "MDBList: removed %d movie(s) and %d show(s) from %s",
+            len(payload["movies"]), len(payload["shows"]), category,
+        )
+        return result
+
+    # ── static lists ───────────────────────────────────────────────────────
+
+    def create_list(self, name: str, private: bool = True) -> dict:
+        return self._post("/lists/user/add", {"name": name, "private": bool(private)})
+
+    def change_list_items(self, list_id, items: list[dict], action: str) -> dict:
+        """Add or remove items on a static list. `action` is 'add' or 'remove'."""
+        action = str(action or "").strip().lower()
+        if action not in ("add", "remove"):
+            raise ValueError(f"Unsupported MDBList list action {action!r}")
+        # This endpoint takes bare id objects, not the ids-wrapped sync shape.
+        movies, shows = [], []
+        for item in items or []:
+            entry: dict = {}
+            imdb_id = str(item.get("imdb_id") or "").strip()
+            tmdb_id = str(item.get("tmdb_id") or "").strip()
+            if imdb_id:
+                entry["imdb"] = imdb_id
+            if tmdb_id.isdigit():
+                entry["tmdb"] = int(tmdb_id)
+            if not entry:
+                continue
+            (movies if item.get("media_type") == "movie" else shows).append(entry)
+        if not movies and not shows:
+            return {"changed": 0}
+        return self._post(f"/lists/{list_id}/items/{action}", {"movies": movies, "shows": shows})

@@ -48,7 +48,7 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Config:** `src/config.py` — dataclass hierarchy: `AppConfig` contains `SimklConfig`, `TraktConfig`, `AniListConfig`, `MdbListConfig`, `PublicMetaDBConfig`, `SyncConfig`. `SyncConfig.pmdb_watchlist_managed_keys: list[str]` is the persisted set of watchlist keys written by SyncMeta.
 
-**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider. Trakt/SIMKL/AniList carry both read *and* write APIs; MDBList is read-only. `tmdb_client.py` is separate from the sync pipeline: it only serves the Library view's poster/title lookups using the profile's optional TMDB API key (`credentials.tmdb.api_key`), with a module-level 24h cache shared across profiles because poster metadata is public.
+**Clients:** One file per provider (`simkl_client.py`, `trakt_client.py`, `anilist_client.py`, `mdblist_client.py`, `publicmetadb_client.py`, `fribb_client.py`). Each handles auth, rate limiting, and API calls for its provider. Trakt/SIMKL/AniList/MDBList all carry both read *and* write APIs. `tmdb_client.py` is separate from the sync pipeline: it only serves the Library view's poster/title lookups using the profile's optional TMDB API key (`credentials.tmdb.api_key`), with a module-level 24h cache shared across profiles because poster metadata is public.
 
 **Library browser:** `/api/profile/library/overview|items|history|history/title` in `web.py` — session-scoped, reads the profile's own PMDB lists and watch history and enriches entries with TMDB title/year/poster when a TMDB key is saved. History is grouped one row per title (a binged show must not render one poster per play); the per-episode breakdown — episode names and still thumbnails via `TmdbClient.get_season_episodes`, one request per season — lives behind `history/title`. Without a key the endpoints still succeed (`tmdb_configured: false`) and the UI shows a connect-TMDB notice; a rejected key comes back as `tmdb_error` on a 200, never a failure.
 
@@ -257,14 +257,52 @@ back to the key — independent of the filter, the category boxes, and whether t
 provider's lists have loaded. Rendering only the ticked checkboxes made a saved
 selection look lost.
 
-**MDBList is source-only.** `MdbListAdapter` declares `writes = ()` — the client
-has no write path and MDBList's own watch-status sync is handled by its Trakt/Plex
-integrations. It reads the union of `mdblist.selected_lists`, and since an MDBList
-list has no watched/unwatched semantics the same items answer both the watchlist
-and collection categories. Do not add write methods without checking the API
-actually supports them.
+**MDBList reads and writes — two different surfaces behind one provider.** It was
+source-only until its API grew a Trakt-shaped sync surface; the old note said
+"no write path" and is wrong now. `MdbListAdapter` handles:
 
-**Writing needs no re-authentication, except AniList.** Trakt's device-flow token
+* the **account-level sync API** — `/sync/watchlist`, `/sync/collection`,
+  `/sync/watched` — readable and writable, bodies shaped
+  `{"movies": [...], "shows": [...]}` with an `ids` object. MDBList marks these
+  **BETA**.
+* the user's **static lists**, read via `/lists/{id}/items` and written via
+  `/lists/{id}/items/{add|remove}`, which takes *bare* id objects, not the
+  ids-wrapped sync shape. A curated list has no watched/unwatched semantics, so
+  the same items answer both watchlist and collection.
+
+Rules that are easy to get wrong:
+- **A named-list selection must not widen to the whole account**, and an
+  account-level read must not fold in a curated list — `_wants_native()` decides,
+  and syncing far more than asked is the failure it prevents.
+- **History is account-level only.** A curated list carries no watch dates, so
+  folding one into `CATEGORY_HISTORY` would invent history that never happened;
+  `target_list_categories` excludes it for the same reason.
+- **Items with neither an IMDB nor a TMDB id are dropped, not sent.** MDBList
+  cannot resolve them and a body of id-less entries is how a write lands on the
+  wrong title.
+- **POST stays out of the retry policy** (`allowed_methods=["GET"]`). A write
+  that timed out may already have landed, so retrying duplicates records.
+
+`/sync/ratings`, `/sync/paused` and `/sync/dropped` also exist and are
+deliberately **not** wired — the app has no ratings or dropped concept, and
+resume is a main-pipeline feature rather than a pair category. Adding either
+means threading a new category through `config.py`, `providers.py`,
+`cross_sync.py` and the pair editor; do not add half-wired client methods.
+
+**MDBList auth is two modes.** An `apikey` query parameter (read, and what
+existing profiles have) or an OAuth `Authorization: Bearer` token; the client
+prefers the bearer and never sends both. OAuth is **authorization code + PKCE**
+— MDBList requires PKCE for every client *and* still requires the client secret.
+Authorization is on the site host (`mdblist.com/oauth/authorize/`), token
+exchange on the API host, and **every OAuth path needs its trailing slash** or
+the request fails. Tokens last 30 days and refresh. The PKCE verifier is held
+server-side in `PendingPkceStore` keyed by profile and is single-use: it is the
+proof the code belongs to the flow that started it, so it must never round-trip
+through the browser. `/api/mdblist/auth/check` persists via
+`update_mdblist_auth` the moment the exchange succeeds — the AniList lesson, the
+code is single-use and short-lived.
+
+**Writing needs no re-authentication, except AniList and MDBList.** Trakt's device-flow token
 and SIMKL's PIN token already permit `/sync` writes. AniList mutations require an
 access token that existing username-only profiles do not have, so
 `can_write()` / `write_blocked_reason()` report it and the UI offers AniList as a

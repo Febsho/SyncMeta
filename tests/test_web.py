@@ -217,15 +217,17 @@ class WebTests(unittest.TestCase):
         profile["credentials"]["pmdb"]["api_key"] = "pm-key"
         profile["credentials"]["simkl"]["client_id"] = "simkl-client"
         profile["credentials"]["simkl"]["access_token"] = "simkl-token"
-        profile["credentials"]["mdblist"]["api_key"] = "mdb-key"
+        # AniList with a username but no access token reads fine and cannot be
+        # written to, which is what makes it an invalid pair target.
+        profile["credentials"]["anilist"]["username"] = "someone"
         profile["options"]["sync_pairs"] = [{
-            "pair_id": "bad-target", "name": "Bad target", "source": "simkl", "target": "mdblist",
+            "pair_id": "bad-target", "name": "Bad target", "source": "simkl", "target": "anilist",
             "categories": ["watchlist"], "enabled": True,
         }]
         health = [
             {"provider": "pmdb", "status": "healthy", "capabilities": {"readable": True, "writable": True}},
             {"provider": "simkl", "status": "healthy", "capabilities": {"readable": True, "writable": True}},
-            {"provider": "mdblist", "status": "healthy", "capabilities": {"readable": True, "writable": False}},
+            {"provider": "anilist", "status": "healthy", "capabilities": {"readable": True, "writable": False}},
         ]
         blocked = web._connection_readiness(web._config_from_profile(profile), health)
         self.assertFalse(blocked["ready"])
@@ -891,7 +893,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(merged["anilist"]["access_token"], "anilist-token")
 
-    def test_mdblist_is_offered_as_a_source_only(self) -> None:
+    def test_mdblist_is_offered_as_a_full_read_write_provider(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
             "anilist": {"username": "", "access_token": "", "selected_statuses": []},
@@ -905,8 +907,14 @@ class WebTests(unittest.TestCase):
 
         self.assertTrue(providers["mdblist"]["configured"])
         self.assertTrue(providers["mdblist"]["reads"], "MDBList must be usable as a source")
-        self.assertEqual(providers["mdblist"]["writes"], [], "MDBList has no write path")
-        self.assertIn("only be read from", providers["mdblist"]["write_blocked_reason"])
+        # MDBList's sync API is readable and writable, so it is a valid target.
+        self.assertEqual(
+            sorted(providers["mdblist"]["writes"]), ["collection", "history", "watchlist"],
+        )
+        self.assertEqual(providers["mdblist"]["write_blocked_reason"], "")
+        self.assertTrue(providers["mdblist"]["has_target_lists"])
+        # ...but only its curated lists are named destinations, never history.
+        self.assertNotIn("history", providers["mdblist"]["target_list_categories"])
 
     def test_capabilities_do_not_enumerate_lists(self) -> None:
         # Enumerating named lists calls every provider's API. Doing it here made

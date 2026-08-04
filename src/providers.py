@@ -1029,25 +1029,39 @@ class PmdbAdapter(ProviderAdapter):
 
 
 class MdbListAdapter(ProviderAdapter):
-    """Source-only adapter over the user's selected MDBList lists.
+    """Read/write adapter over MDBList's own sync surface and the user's lists.
 
-    MDBList exposes list *reading* only — this app has no write path, and
-    MDBList's own watch-status sync is handled by its Trakt/Plex integrations.
-    So it can feed other services but can never be a target, which
-    ``writes = ()`` reports rather than failing at run time.
+    Two different things live behind this one provider:
 
-    An MDBList list is a curated collection with no watched/unwatched semantics,
-    so the same combined items answer both the watchlist and collection
-    categories, letting a user push a curation into either.
+    * MDBList's account-level sync API — ``/sync/watchlist``, ``/sync/collection``
+      and ``/sync/watched`` — which is Trakt-shaped and both readable and
+      writable. MDBList marks these endpoints BETA.
+    * The user's curated static lists, read through ``/lists/{id}/items`` and
+      written through ``/lists/{id}/items/{add|remove}``. A curated list has no
+      watched/unwatched semantics, so the same items answer both the watchlist
+      and collection categories, letting a user push a curation into either.
+
+    Writing needs either an OAuth access token or an API key; a profile with
+    neither can still be constructed but reports why it cannot be a target.
     """
 
     key = "mdblist"
     label = "MDBList"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
-    writes = ()
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
     supports_list_selection = True
     supports_list_search = True
-    supports_target_lists = False
+    supports_target_lists = True
+    # A named MDBList list is a curation; watch history has no such destination,
+    # the same split Trakt makes.
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+
+    #: Sync sources that are not one of the user's static lists.
+    _NATIVE_SOURCES = (
+        ("watchlist", "Watchlist", CATEGORY_WATCHLIST),
+        ("collection", "Collection", CATEGORY_COLLECTION),
+        ("history", "Watch History", CATEGORY_HISTORY),
+    )
 
     def __init__(self, client, selected_lists: list[dict] | None = None):
         self._client = client
@@ -1056,21 +1070,37 @@ class MdbListAdapter(ProviderAdapter):
         self._cache_key: str = ""
 
     def can_write(self) -> bool:
-        return False
+        return bool(self._client.has_write_auth())
 
     def write_blocked_reason(self) -> str:
         return (
-            "MDBList can only be read from. It exposes no write API here, so it "
-            "can feed other services but cannot be a sync target."
+            "MDBList needs an API key or an OAuth connection before it can be "
+            "written to. Add one in Connections to use it as a sync target."
         )
 
     def list_sources(self) -> list[dict]:
-        return [
+        sources = [
+            {"key": key, "label": label, "category": category, "kind": "status"}
+            for key, label, category in self._NATIVE_SOURCES
+        ]
+        sources.extend(
             {
                 "key": f"list:{entry.get('id')}",
                 "label": str(entry.get("name") or f"List {entry.get('id')}"),
                 "category": CATEGORY_WATCHLIST,
                 "kind": "list",
+            }
+            for entry in self._selected_lists
+            if entry.get("id")
+        )
+        return sources
+
+    def target_lists(self) -> list[dict]:
+        """The user's own static lists — the only ones this app can write to."""
+        return [
+            {
+                "key": f"list:{entry.get('id')}",
+                "label": str(entry.get("name") or f"List {entry.get('id')}"),
             }
             for entry in self._selected_lists
             if entry.get("id")
@@ -1123,16 +1153,81 @@ class MdbListAdapter(ProviderAdapter):
         self._cache_key = cache_key
         return items
 
+    @staticmethod
+    def _list_id(target_list: str):
+        reference = str(target_list or "").strip()
+        if not reference.startswith("list:"):
+            return None
+        return reference.split(":", 1)[1] or None
+
+    def _wants_native(self, category: str, source_lists: list[str] | None) -> bool:
+        """Whether this read should come from the account-level sync API.
+
+        A selection naming only static lists must never fall back to the whole
+        account, and vice versa — that would silently sync far more than asked.
+        With nothing selected the account-level category is the sensible default.
+        """
+        selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        if not selected:
+            return True
+        return any(not key.startswith("list:") for key in selected)
+
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
-        if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
-            return list(self._selected_items(source_lists))
-        return self._unsupported(category, "read")
+        if category not in self.reads:
+            return self._unsupported(category, "read")
+
+        selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        picked_lists = [key for key in selected if key.startswith("list:")]
+
+        items: list[dict] = []
+        seen: set[str] = set()
+
+        if self._wants_native(category, source_lists):
+            for row in self._client.get_sync_items(category) or []:
+                key = item_key(row)
+                if key not in seen:
+                    seen.add(key)
+                    items.append(row)
+
+        # History is account-level only: a curated list carries no watch dates,
+        # so folding one in would invent history that never happened.
+        if category != CATEGORY_HISTORY and (picked_lists or not selected):
+            for row in self._selected_items(picked_lists or None):
+                key = item_key(row)
+                if key not in seen:
+                    seen.add(key)
+                    items.append(row)
+        return items
+
+    def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
+        list_id = self._list_id(target_list)
+        if list_id:
+            return list(self._selected_items([f"list:{list_id}"]))
+        return self.fetch(category, None)
 
     def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
-        raise ValueError(self.write_blocked_reason())
+        if not self.can_write():
+            raise ValueError(self.write_blocked_reason())
+        if category not in self.writes:
+            return self._unsupported(category, "write")
+        list_id = self._list_id(target_list)
+        if list_id:
+            if category == CATEGORY_HISTORY:
+                return self._unsupported(category, "write to a named list on")
+            return self._client.change_list_items(list_id, items, "add")
+        return self._client.add_sync_items(category, items)
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
-        raise ValueError(self.write_blocked_reason())
+        if not self.can_write():
+            raise ValueError(self.write_blocked_reason())
+        if category not in self.writes:
+            return self._unsupported(category, "write")
+        list_id = self._list_id(target_list)
+        if list_id:
+            if category == CATEGORY_HISTORY:
+                return self._unsupported(category, "write to a named list on")
+            return self._client.change_list_items(list_id, items, "remove")
+        return self._client.remove_sync_items(category, items)
 
 
 #: Stable provider ordering for UI listings.

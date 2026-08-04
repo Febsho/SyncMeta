@@ -13,7 +13,7 @@ import secrets
 import threading
 import time
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -282,6 +282,41 @@ class ProfileLogHandler(logging.Handler):
             _profile_log_store.append(profile_id, record)
 
 
+class PendingPkceStore:
+    """Short-lived PKCE verifiers, held server-side per profile.
+
+    The verifier is the proof that the code being exchanged belongs to the
+    request that started the flow, so it must never travel through the browser.
+    In memory and best-effort across a restart, like the session revocation set:
+    losing one only means the user presses Connect again.
+    """
+
+    def __init__(self, ttl_seconds: int = 900):
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+        self._pending: dict[str, tuple[str, str, float]] = {}
+
+    def put(self, profile_id: str, verifier: str, redirect_uri: str) -> None:
+        with self._lock:
+            self._prune_locked()
+            self._pending[profile_id] = (verifier, redirect_uri, time.time() + self._ttl_seconds)
+
+    def take(self, profile_id: str) -> tuple[str, str] | None:
+        """Single use: an authorization code may only be exchanged once."""
+        with self._lock:
+            self._prune_locked()
+            entry = self._pending.pop(profile_id, None)
+        if not entry:
+            return None
+        verifier, redirect_uri, _expires = entry
+        return verifier, redirect_uri
+
+    def _prune_locked(self) -> None:
+        now = time.time()
+        for key in [k for k, (_v, _r, exp) in self._pending.items() if exp <= now]:
+            self._pending.pop(key, None)
+
+
 class LoginAttemptLimiter:
     """Sliding-window limiter for profile login attempts."""
 
@@ -318,6 +353,7 @@ class LoginAttemptLimiter:
 
 
 _session_store = ServerSessionStore()
+_mdblist_pkce_store = PendingPkceStore()
 _login_limiter = LoginAttemptLimiter()
 _access_store = ServerSessionStore(salt="syncmeta-site-access")
 _access_limiter = LoginAttemptLimiter(max_attempts=ACCESS_MAX_ATTEMPTS, window_seconds=ACCESS_WINDOW_SECONDS)
@@ -439,7 +475,17 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
         ),
         mdblist=MdbListConfig(
             api_key=credentials["mdblist"]["api_key"],
-            enabled=bool(credentials["mdblist"]["api_key"] and credentials["mdblist"]["selected_lists"]),
+            client_id=credentials["mdblist"].get("client_id", ""),
+            client_secret=credentials["mdblist"].get("client_secret", ""),
+            access_token=credentials["mdblist"].get("access_token", ""),
+            refresh_token=credentials["mdblist"].get("refresh_token", ""),
+            access_token_expires_at=credentials["mdblist"].get("access_token_expires_at", ""),
+            # An OAuth token is a working credential on its own, so a profile
+            # that connected via OAuth and never pasted an API key is enabled.
+            enabled=bool(
+                (credentials["mdblist"]["api_key"] or credentials["mdblist"].get("access_token"))
+                and credentials["mdblist"]["selected_lists"]
+            ),
             selected_lists=credentials["mdblist"]["selected_lists"],
         ),
         pmdb=PublicMetaDBConfig(api_key=credentials["pmdb"]["api_key"]),
@@ -946,10 +992,11 @@ def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) 
         adapters["anilist"] = AniListAdapter(
             AniListClient(config.anilist, cancel_requested_callback=cancel_requested_callback),
         )
-    if config.mdblist.api_key:
-        # Gate on the API key alone. mdblist.enabled additionally requires
+    if config.mdblist.api_key or config.mdblist.access_token:
+        # Gate on either credential alone. mdblist.enabled additionally requires
         # selected lists, which would make MDBList vanish from the pair editor
-        # with no explanation before any list had been picked.
+        # with no explanation before any list had been picked — and an OAuth
+        # connection is a working credential even with no API key pasted.
         adapters["mdblist"] = MdbListAdapter(
             MdbListClient(config.mdblist),
             selected_lists=list(config.mdblist.selected_lists or []),
@@ -998,16 +1045,19 @@ def _provider_unavailable_reason(config: AppConfig, key: str) -> str:
     elif key == "anilist":
         return "Add your AniList username in Connections first."
     elif key == "mdblist":
-        return "Add your MDBList API key in Connections first."
+        return "Add your MDBList API key, or connect MDBList, in Connections first."
     elif key == "pmdb":
         return "Add your PublicMetaDB API key in Connections first."
     return "Not configured."
 
 
 def _source_blocked_reason(config: AppConfig, key: str) -> str:
-    """Why a configured provider still cannot act as a source."""
-    if key == "mdblist" and not (config.mdblist.selected_lists or []):
-        return "Choose at least one MDBList list under Lists to use it as a source."
+    """Why a configured provider still cannot act as a source.
+
+    MDBList no longer needs a selected list: its account watchlist, collection
+    and watch history are readable on their own, and only the static-list
+    sources depend on a selection.
+    """
     return ""
 
 
@@ -1882,6 +1932,115 @@ def api_anilist_auth_check():
             saved = False
 
     return jsonify({"status": "approved", "access_token": access_token, "saved": saved})
+
+
+@app.route("/api/mdblist/auth/start", methods=["POST"])
+def api_mdblist_auth_start():
+    """Begin the MDBList PKCE flow and return the authorize URL."""
+    body = request.get_json(silent=True) or {}
+    private_profile = _current_private_profile()
+    client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
+    redirect_uri = str(body.get("redirect_uri", "")).strip()
+    if private_profile:
+        stored = private_profile["credentials"]["mdblist"]
+        client_id = client_id or stored.get("client_id", "")
+        client_secret = client_secret or stored.get("client_secret", "")
+
+    if not client_id:
+        return _json_error("MDBList client ID is required", 400)
+    if not redirect_uri:
+        return _json_error("A redirect URL is required", 400)
+
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _json_error("Sign in before connecting MDBList", 401)
+
+    verifier, challenge = MdbListClient.generate_pkce_pair()
+    # The verifier never goes to the browser: it is the proof that the code
+    # being exchanged belongs to the request that started this flow.
+    _mdblist_pkce_store.put(profile_id, verifier, redirect_uri)
+
+    client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
+    return jsonify({
+        "authorize_url": client.build_authorize_url(redirect_uri, challenge),
+        "redirect_uri": redirect_uri,
+    })
+
+
+@app.route("/api/mdblist/auth/check", methods=["POST"])
+def api_mdblist_auth_check():
+    """Exchange the pasted MDBList code for an access token."""
+    body = request.get_json(silent=True) or {}
+    private_profile = _current_private_profile()
+    code = str(body.get("code", "")).strip()
+    client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
+    if private_profile:
+        stored = private_profile["credentials"]["mdblist"]
+        client_id = client_id or stored.get("client_id", "")
+        client_secret = client_secret or stored.get("client_secret", "")
+
+    if not code:
+        return _json_error("Paste the code MDBList showed you", 400)
+    if not client_id:
+        return _json_error("MDBList client ID is required", 400)
+    if not client_secret:
+        return _json_error("MDBList client secret is required", 400)
+
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _json_error("Sign in before connecting MDBList", 401)
+
+    pending = _mdblist_pkce_store.take(profile_id)
+    if not pending:
+        return _json_error(
+            "That authorization has expired", 400,
+            provider="MDBList",
+            hint="Press Connect again to start a fresh authorization.",
+        )
+    verifier, redirect_uri = pending
+
+    try:
+        client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
+        payload = client.exchange_code_for_token(code, verifier, redirect_uri)
+    except Exception as exc:
+        logger.exception("MDBList token exchange failed")
+        return _json_error(
+            f"MDBList authentication failed: {exc}", 400,
+            provider="MDBList",
+            hint="The code is single-use and short-lived — start the connect flow again if in doubt.",
+        )
+
+    access_token = str(payload.get("access_token", "")).strip()
+    if not access_token:
+        return _json_error("MDBList did not return an access token", 400, provider="MDBList")
+
+    expires_at = ""
+    try:
+        expires_in = int(payload.get("expires_in") or 0)
+        if expires_in > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    except (TypeError, ValueError):
+        expires_at = ""
+
+    # Persisted immediately: the code is single-use, so losing it to an
+    # unsaved form would mean starting the whole flow over.
+    saved = False
+    try:
+        _profile_store.update_mdblist_auth(
+            profile_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=access_token,
+            refresh_token=str(payload.get("refresh_token", "")).strip(),
+            access_token_expires_at=expires_at,
+        )
+        saved = True
+    except KeyError:
+        saved = False
+
+    return jsonify({"status": "approved", "saved": saved, "scope": payload.get("scope", "")})
 
 
 @app.route("/api/trakt/device/start", methods=["POST"])
