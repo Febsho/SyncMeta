@@ -92,7 +92,7 @@ Key patterns:
 - **Bars show composition, not resolve rate.** The service cards and the result rows both segment `fetched` into added / carried-over / unresolved. The result rows previously plotted `resolved / fetched`, which is ~100% for nearly every list, so every row drew a full bar whether the run changed anything or not
 - **A Latest Sync Results row expands to show its list's posters.** `/api/profile/library/list-preview` takes a list *name* — the dashboard rows carry no PMDB id — and resolves it via `managed_lists`, falling back to `find_list_by_name`, so that mapping stays server-side. Only the shown slice (`LIST_PREVIEW_LIMIT`) is sent to TMDB; enriching a 400-item list to render 18 posters is the expensive way. `expandedResultRows` is keyed on `list_name`, never an index or `row_key`, because the dashboard re-renders on every poll and rows move between pages and filters. Toggling flips classes directly rather than re-rendering, or the `grid-template-rows: 0fr→1fr` transition would not run from its current state; results are cached per list so a re-render keeps an open row open without refetching. The click handler ignores events inside `.result-row-actions` so Details/Delete do not also toggle the row
 - The Activity Sync cards (`buildActivityCard`) reuse `.svc-card` so watch history and resume read as more service→PMDB pipelines. They are `.svc-card-static` (no click affordance). The headline number used to repeat the first stat box verbatim, which is what made that panel twice the size it needed to be
-- The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) is its own panel, hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
+- The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) renders each pair as a `.svc-card .svc-card-static` in a `.svc-grid`, the same card language as the service pipelines — it was a flat `.pipe-status-row`, so two panels showing the same kind of thing looked like different eras of the app. It stays its **own** panel (see below); only the card vocabulary is shared. Hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
 ## Key Invariants
@@ -222,6 +222,23 @@ were dead — and "Run All" beside the service pipelines read as running those t
 failures come back as per-run and per-category `errors` strings on an otherwise
 fine payload, so the toast counts them and reports an error rather than a green
 "complete" contradicting the red text rendered directly beneath it.
+
+**Pair cards are collapsed until opened.** A pair is ~600px of controls, so two
+of them buried the service pipelines above. `.pair-card-body` toggles on a
+`.open` class, the same idiom as `.pipeline-card` — not the `grid-template-rows`
+transition the result rows use, which is for animating a few posters, not a card
+holding hundreds of list checkboxes. Three things this has to get right:
+the head carries **no controls** (it is one `<button>`, so the whole strip
+toggles and the keyboard works for free) — the pair-name input lived there
+first and covered the head, swallowing every click meant for the toggle, so it
+moved into the body; the toggle **flips the class rather than re-rendering**,
+or a rebuild would throw away focus and the caret in another card's list
+filter; and open state is keyed on `pair.pair_id` (with a client-side
+`_clientKey` until the server assigns one) in `expandedPairKeys`, never on the
+index, which shifts on remove, and never on the pair object, which
+`fetchPairs()` replaces wholesale. `savePairs()` carries open state across that
+replacement **by position**, since a first save is exactly when a pair's key
+changes.
 
 **The pair editor renders scoped, not wholesale.** A provider can offer a
 hundred lists, so rebuilding every card on every keystroke is what made the

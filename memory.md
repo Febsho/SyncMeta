@@ -150,6 +150,10 @@ This file is a compact working memory for future code changes. Keep it current w
   the page topbar under the same ids left the lower copies unbound and dead.
 - Running pairs saves unsaved edits first, and a run that reports per-category
   errors gets an error toast, not a green "complete".
+- Pair cards in the Sync view are collapsed until clicked; the head is a button
+  with no controls in it, and open state is keyed on pair_id (not index, not the
+  pair object, which fetchPairs replaces).
+- The dashboard renders pairs as .svc-card cards matching the service pipelines.
 - Latest Sync Results is paginated at 25 rows per page.
 - Sync History displays only the newest 25 runs.
 - Mobile tables should allow horizontal scroll.

@@ -157,10 +157,25 @@
     .pair-cap-read .pair-cap-dot{background:var(--orange);box-shadow:0 0 0 3px rgba(251,191,36,.12)}
     .pair-card{border:1px solid var(--line);border-radius:12px;background:var(--z950);margin-bottom:14px;overflow:hidden}
     .pair-card.is-disabled{opacity:.62}
-    .pair-card-top{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
-    .pair-card-name{flex:1;min-width:160px;padding:7px 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--z100);font-size:14px;font-weight:500;font-family:inherit;letter-spacing:-.01em}
-    .pair-card-name:hover{border-color:var(--z800)}
-    .pair-card-name:focus{border-color:var(--z600);background:var(--z900);outline:none}
+    /* Collapsed by default: a pair is ~600px of controls and two of them buried
+       the service pipelines above. Same idiom as .pipeline-card so the Sync view
+       has one collapse behaviour, not two. Plain display toggling rather than
+       the grid 0fr->1fr transition the result rows use — that one animates a
+       handful of posters, this card can hold hundreds of list checkboxes. */
+    .pair-card-body{display:none}
+    .pair-card.open .pair-card-body{display:block}
+    .pair-chevron{color:var(--z600);font-size:12px;line-height:1;flex:none;transition:transform .15s,color .15s}
+    .pair-card.open .pair-chevron{transform:rotate(180deg)}
+    .pair-card-top:hover .pair-chevron{color:var(--z300)}
+    .pair-card-top{display:flex;align-items:center;gap:12px;width:100%;padding:14px 16px;flex-wrap:wrap;cursor:pointer;background:transparent;border:none;font-family:inherit;text-align:left;color:inherit}
+    .pair-card.open .pair-card-top{border-bottom:1px solid var(--line)}
+    .pair-card-top:hover{background:rgba(255,255,255,.02)}
+    .pair-card-headings{flex:1;min-width:160px;display:flex;flex-direction:column;gap:3px}
+    .pair-card-title{font-size:14px;font-weight:500;color:var(--z100);letter-spacing:-.01em}
+    .pair-card-name{width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-size:13px;font-family:inherit}
+    .pair-card-name:focus{border-color:var(--accent);outline:none}
+    /* What the pair does, so a collapsed card still says something. */
+    .pair-summary{font-size:12px;color:var(--z500);line-height:1.4}
     .pair-sec{padding:16px;border-bottom:1px solid var(--line)}
     .pair-sec:last-child{border-bottom:none}
     .pair-sec-title{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label);margin-bottom:10px}
@@ -390,8 +405,13 @@
     .pair-badge.auto{border-color:rgba(124,109,247,.42);color:var(--accent);background:rgba(124,109,247,.08)}
     .pair-badge.warn{border-color:rgba(251,146,60,.45);color:var(--orange)}
     .pair-badge.danger{border-color:rgba(248,113,113,.45);color:var(--red)}
-    .pair-row-actions{display:flex;gap:6px;margin-left:auto;align-items:center}
-    .pair-row-problem{padding:0 18px 10px 18px;font-size:12px;color:var(--orange)}
+    /* Actions sit at the foot of the card, pushed down so cards of differing
+       height still line their buttons up. */
+    .pair-card-actions{display:flex;gap:6px;align-items:center;margin-top:auto;padding-top:2px}
+    /* Provider errors quote the failing URL, which is one long unbreakable
+       token — without this it sets a floor on the card's width and pushes the
+       whole panel past a narrow viewport. */
+    .pair-row-problem{font-size:12px;color:var(--orange);line-height:1.45;display:block;overflow-wrap:anywhere;min-width:0}
     /* Live sync activity */
     .live-activity-status{padding:10px 18px;border-bottom:1px solid var(--z900);font-size:13px;color:var(--z300);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .live-activity-status .live-step{color:var(--z100);font-weight:600}
@@ -544,6 +564,9 @@
       .nav-external{padding:10px 12px;font-size:13px}
     }
     @media (max-width:480px){
+      /* The 268px track floor is wider than the padded grid at 320px, so the
+         card overflowed its own container. One column below phone width. */
+      .svc-grid{grid-template-columns:minmax(0,1fr);padding:14px;gap:12px}
       nav{padding:0 12px}
       .nav-logo{font-size:16px}
       .nav-link{padding:9px 10px;font-size:13px}
@@ -2842,8 +2865,31 @@
       return PROVIDER_DASH_LABELS[key] || key;
     }
 
+    // Counts that decide a pair's status dot, shared with the panel's sort.
+    function pairRunSummary(pair, result) {
+      const errorCount = result
+        ? (Number(result.error_count || 0)
+            || ((result.errors || []).length
+                + (result.categories || []).reduce((acc, c) => acc + ((c.errors || []).length), 0)))
+        : 0;
+      const firstError = result
+        ? ((result.errors || [])[0]
+            || ((result.categories || []).flatMap(c => c.errors || [])[0] || ''))
+        : '';
+      return {
+        errorCount,
+        firstError,
+        unmapped: result ? Number(result.unmapped || 0) : 0,
+        disabled: pair.enabled === false,
+      };
+    }
+
+    // A pair is drawn in the same card language as the service→PublicMetaDB
+    // pipelines above it. It used to be a flat .pipe-status-row, so the two
+    // panels showing the same kind of thing looked like different eras of the
+    // app. Static: unlike a service card, clicking a pair filters nothing.
     function pairRowHtml(pair, result) {
-      const disabled = pair.enabled === false;
+      const { errorCount, firstError, unmapped, disabled } = pairRunSummary(pair, result);
       const twoWay = pair.mode === 'two_way';
       const arrow = twoWay ? '↔' : '→';
       const name = pair.name || `${pairDashLabel(pair.source)} ${arrow} ${pairDashLabel(pair.target)}`;
@@ -2859,56 +2905,46 @@
       const isRunning = !!activeDashboardPairRun
         && (!activeDashboardPairRun.pairId || activeDashboardPairRun.pairId === pair.pair_id);
 
-      let stats = '<span class="c-dim">never run</span>';
-      let meta = disabled ? 'disabled' : 'not run yet';
-      let firstError = '';
-      if (result) {
-        const errorCount = Number(result.error_count || 0)
-          || ((result.errors || []).length
-              + (result.categories || []).reduce((acc, c) => acc + ((c.errors || []).length), 0));
-        firstError = (result.errors || [])[0]
-          || ((result.categories || []).flatMap(c => c.errors || [])[0] || '');
-        stats = `
-          ${result.added ? `<span class="c-green">+${result.added}</span>` : '<span>+0</span>'}
-          ${result.removed ? `<span class="c-red">−${result.removed}</span>` : ''}
-          ${result.unmapped ? `<span class="c-orange">${result.unmapped} unmapped</span>` : ''}
-          ${result.cached_reads ? `<span class="c-dim">${result.cached_reads} cached read${result.cached_reads === 1 ? '' : 's'}</span>` : ''}
-          ${errorCount ? `<span class="c-red">${errorCount} error${errorCount === 1 ? '' : 's'}</span>` : ''}`;
-        const when = result.timestamp ? `ran ${esc(timeAgo(result.timestamp))}` : '';
-        const state = errorCount ? '<span class="c-red">errors</span>' : '<span class="c-green">ok</span>';
-        meta = `${result.dry_run ? 'dry run · ' : ''}${when ? when + ' · ' : ''}${state}`;
-      }
+      const level = disabled ? 'muted' : errorCount ? 'err' : unmapped ? 'warn' : result ? 'ok' : 'muted';
+      const stateText = disabled
+        ? 'disabled'
+        : errorCount ? `${errorCount} error${errorCount === 1 ? '' : 's'}`
+        : unmapped ? `${unmapped} unmatched`
+        : result ? 'ok' : 'never run';
 
-      const problem = pair.problem
-        ? `<div class="pair-row-problem"><span aria-hidden="true">⚠</span> ${esc(pair.problem)}</div>`
-        : (firstError ? `<div class="pair-row-problem"><span aria-hidden="true">⚠</span> ${esc(firstError)}</div>` : '');
+      const stats = result
+        ? `<span class="svc-stat"><span class="svc-stat-val ${result.added ? 'c-green' : ''}">${result.added ? '+' : ''}${Number(result.added || 0)}</span><span class="svc-stat-label">added</span></span>
+           ${result.removed ? `<span class="svc-stat"><span class="svc-stat-val c-red">−${Number(result.removed)}</span><span class="svc-stat-label">removed</span></span>` : ''}
+           ${unmapped ? `<span class="svc-stat"><span class="svc-stat-val c-orange">${unmapped}</span><span class="svc-stat-label">unmatched</span></span>` : ''}
+           ${result.cached_reads ? `<span class="svc-stat"><span class="svc-stat-val c-dim">${Number(result.cached_reads)}</span><span class="svc-stat-label">cached reads</span></span>` : ''}`
+        : '<span class="svc-stat"><span class="svc-stat-val c-dim">—</span><span class="svc-stat-label">not run yet</span></span>';
 
-      return `<div>
-        <div class="pipe-status-row ${disabled ? 'pair-row-disabled' : ''}">
-          <span class="pipe-status-name">
-            ${esc(name)}
-            <div class="pair-flow" style="margin-top:4px">
-              <span class="pair-node">${esc(pairDashLabel(pair.source))}</span>
-              <span class="pipeline-arrow">${arrow}</span>
-              <span class="pair-node">${esc(pairDashLabel(pair.target))}</span>
-              ${twoWay ? '<span class="pair-badge">two-way</span>' : ''}
-              ${removalBadge}
-              ${scheduleBadge}
-            </div>
-          </span>
-          <span class="pipe-status-stats">
-            ${categories ? `<span class="c-dim">${esc(categories)}</span>` : ''}
-            ${stats}
-          </span>
-          <span class="pair-row-actions">
-            <span class="pipe-status-meta" style="margin-left:0">${meta}</span>
-            <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
-                    data-dash-pair-dry="${escAttr(pair.pair_id || '')}">${isRunning ? 'Working…' : 'Preview'}</button>
-            <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
-                    data-dash-pair-run="${escAttr(pair.pair_id || '')}">${isRunning ? 'Syncing…' : 'Run'}</button>
-          </span>
-        </div>
-        ${problem}
+      const when = result && result.timestamp ? `${result.dry_run ? 'dry run ' : 'ran '}${timeAgo(result.timestamp)}` : '';
+      const problem = pair.problem || firstError;
+
+      return `<div class="svc-card svc-card-static ${disabled ? 'pair-row-disabled' : ''} ${
+          level === 'err' ? 'is-error' : level === 'warn' ? 'is-warn' : ''}">
+        <span class="svc-card-head">
+          <span class="svc-name">${esc(name)}</span>
+          <span class="svc-status svc-${level}"><span class="svc-dot"></span>${esc(stateText)}</span>
+        </span>
+        <span class="svc-stats">${stats}</span>
+        <span class="pair-flow">
+          <span class="pair-node">${esc(pairDashLabel(pair.source))}</span>
+          <span class="pipeline-arrow">${arrow}</span>
+          <span class="pair-node">${esc(pairDashLabel(pair.target))}</span>
+          ${twoWay ? '<span class="pair-badge">two-way</span>' : ''}
+          ${removalBadge}
+          ${scheduleBadge}
+        </span>
+        ${categories ? `<span class="svc-foot">${esc(categories)}${when ? ` · ${esc(when)}` : ''}</span>` : (when ? `<span class="svc-foot">${esc(when)}</span>` : '')}
+        ${problem ? `<span class="pair-row-problem"><span aria-hidden="true">⚠</span> ${esc(problem)}</span>` : ''}
+        <span class="pair-card-actions">
+          <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
+                  data-dash-pair-dry="${escAttr(pair.pair_id || '')}">${isRunning ? 'Working…' : 'Preview'}</button>
+          <button class="btn btn-sm" type="button" ${disabled || isRunning ? 'disabled' : ''}
+                  data-dash-pair-run="${escAttr(pair.pair_id || '')}">${isRunning ? 'Syncing…' : 'Run'}</button>
+        </span>
       </div>`;
     }
 
@@ -2967,9 +3003,19 @@
         meta.textContent = parts.join(' · ');
       }
 
-      body.innerHTML = pairs
-        .map(pair => pairRowHtml(pair, results[pair.pair_id]))
-        .join('');
+      // Same ordering rule as the service cards: anything needing attention
+      // first, so a broken pair is not buried behind healthy ones on a wide grid.
+      // Disabled pairs sink to the bottom — they are not going to run.
+      const ordered = pairs
+        .map((pair, i) => ({ pair, i, s: pairRunSummary(pair, results[pair.pair_id]) }))
+        .sort((a, b) => (Number(a.s.disabled) - Number(b.s.disabled))
+          || (b.s.errorCount - a.s.errorCount)
+          || (b.s.unmapped - a.s.unmapped)
+          || (a.i - b.i));
+
+      body.innerHTML = `<div class="svc-grid">${
+        ordered.map(({ pair }) => pairRowHtml(pair, results[pair.pair_id])).join('')
+      }</div>`;
     }
 
     async function runPairsFromDashboard(pairId, dryRun) {
@@ -6439,6 +6485,48 @@
     const pairUiByPair = new WeakMap();
     let pairsDelegated = false;
 
+    // Which pair cards are open. Keyed on the pair's id rather than its index,
+    // which shifts when a pair is removed, and rather than the pair object,
+    // which fetchPairs() replaces wholesale on every save and run. An unsaved
+    // pair has no server id yet, so it carries a client-side one until it gets
+    // saved — pairsPayload() lists the fields it sends explicitly, so _clientKey
+    // never reaches the server.
+    const expandedPairKeys = new Set();
+    let pairClientKeySeq = 0;
+
+    function pairKey(pair) {
+      if (!pair) return '';
+      if (pair.pair_id) return `id:${pair.pair_id}`;
+      if (!pair._clientKey) pair._clientKey = `new:${++pairClientKeySeq}`;
+      return pair._clientKey;
+    }
+
+    function isPairExpanded(pair) {
+      return expandedPairKeys.has(pairKey(pair));
+    }
+
+    function setPairExpanded(pair, expanded) {
+      const key = pairKey(pair);
+      if (expanded) expandedPairKeys.add(key);
+      else expandedPairKeys.delete(key);
+    }
+
+    // What a collapsed card says about itself: the flow, then what it carries,
+    // then whether it may delete anything.
+    function pairSummaryText(pair) {
+      const twoWay = pair.mode === 'two_way';
+      const flow = `${providerLabel(pair.source)} ${twoWay ? '↔' : '→'} ${providerLabel(pair.target)}`;
+      const categories = (pair.categories || [])
+        .map(key => PAIR_CATEGORY_LABELS[key] || key)
+        .join(', ');
+      const removal = String(pair.removal_mode || 'additive');
+      const removalText = removal === 'additive' ? 'never removes' : `${removal} removals`;
+      // Whether it runs on its own is exactly the kind of thing a collapsed card
+      // must not hide. pairScheduleText already covers the disabled case.
+      const parts = [flow, categories || 'nothing selected', removalText, pairScheduleText(pair)];
+      return parts.join(' · ');
+    }
+
     function pairUi(pair) {
       let state = pairUiByPair.get(pair);
       if (!state) {
@@ -6901,17 +6989,33 @@
       const listPicker = pairListPickerHtml(pair, index);
       const destinationNotes = pairDestinationNotes(pair);
 
-      return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'}" data-pair-card="${index}">
-        <div class="pair-card-top">
-          <input type="text" class="pair-card-name" id="pair-name-${index}"
-                 data-pair-index="${index}" data-pair-field="name"
-                 value="${escAttr(pair.name || '')}" aria-label="Pair name"
-                 placeholder="${escAttr(providerLabel(pair.source) + (twoWay ? ' ↔ ' : ' → ') + providerLabel(pair.target))}">
+      const open = isPairExpanded(pair);
+      const autoName = providerLabel(pair.source) + (twoWay ? ' ↔ ' : ' → ') + providerLabel(pair.target);
+      // The head carries no controls, exactly like .pipeline-head: it is one
+      // button, so the whole strip toggles and the keyboard gets Enter/Space for
+      // free. The name field lives in the body — as an input up here it covered
+      // the head and swallowed the clicks meant for the toggle.
+      return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'} ${open ? 'open' : ''}" data-pair-card="${index}">
+        <button type="button" class="pair-card-top" data-pair-toggle="${index}"
+                aria-expanded="${open}" aria-controls="pair-body-${index}">
+          <span class="pair-card-headings">
+            <span class="pair-card-title">${esc(pair.name || autoName)}</span>
+            <span class="pair-summary">${esc(pairSummaryText(pair))}</span>
+          </span>
           <span class="pair-lastrun">${pair.last_result ? esc(pairLastRunText(pair)) : 'never run'}</span>
-        </div>
+          <span class="pair-chevron" aria-hidden="true">▾</span>
+        </button>
 
+        <div class="pair-card-body" id="pair-body-${index}">
         <div class="pair-sec">
           <div class="pair-sec-title">Direction</div>
+          <label class="pair-flow-end" style="margin-bottom:12px">
+            <span>Name</span>
+            <input type="text" class="pair-card-name" id="pair-name-${index}"
+                   data-pair-index="${index}" data-pair-field="name"
+                   value="${escAttr(pair.name || '')}" aria-label="Pair name"
+                   placeholder="${escAttr(autoName)}">
+          </label>
           <div class="pair-flow-row">
             <label class="pair-flow-end">
               <span>${esc(fromLabel)}</span>
@@ -6978,6 +7082,7 @@
           <button class="btn btn-sm" type="button" data-pair-dry-run="${index}">Dry Run</button>
           <button class="btn btn-sm" type="button" data-pair-run="${index}">Run</button>
           <button class="btn btn-sm btn-danger" type="button" data-pair-remove="${index}">Remove</button>
+        </div>
         </div>
       </div>`;
     }
@@ -7108,6 +7213,13 @@
           renderPairListOptions(index);
         } else if (input.classList.contains('pair-list-search')) {
           pairUi(pair).search = input.value;
+        } else if (input.classList.contains('pair-card-name')) {
+          // The head shows the name, and it is out of view from the field that
+          // edits it — so keep it live rather than waiting for a re-render.
+          pair.name = input.value;
+          const card = node.querySelector(`[data-pair-card="${index}"]`);
+          const title = card && card.querySelector('.pair-card-title');
+          if (title) title.textContent = input.value || input.placeholder;
         }
       });
 
@@ -7120,6 +7232,25 @@
       });
 
       node.addEventListener('click', (event) => {
+        // Collapse toggle. Checked before the generic button lookup below so the
+        // head does not fall through to it.
+        const toggleHost = event.target.closest && event.target.closest('[data-pair-toggle]');
+        if (toggleHost) {
+          const index = Number(toggleHost.dataset.pairToggle);
+          const pair = pairAt(toggleHost.dataset.pairToggle);
+          const card = node.querySelector(`[data-pair-card="${index}"]`);
+          if (pair && card) {
+            const open = !card.classList.contains('open');
+            // Flip the class rather than re-render: a rebuild would throw away
+            // focus and the caret in another card's list filter, which is the
+            // whole reason renderPairCard is scoped the way it is.
+            card.classList.toggle('open', open);
+            setPairExpanded(pair, open);
+            toggleHost.setAttribute('aria-expanded', String(open));
+          }
+          return;
+        }
+
         const button = event.target.closest && event.target.closest('button');
         if (!button || !button.dataset) return;
 
@@ -7209,7 +7340,10 @@
       });
     }
 
-    async function fetchPairs() {
+    // `openByPosition` is supplied by savePairs, where a new pair's key changes
+    // as the server assigns its id. Otherwise open state is carried by pair id,
+    // which survives the object replacement below.
+    async function fetchPairs(openByPosition) {
       let result;
       try {
         result = await apiPost('/api/profile/pairs', {});
@@ -7236,6 +7370,9 @@
           ? result.data.two_way_removal_modes : ['additive', 'managed'],
         destination_rules: Array.isArray(result.data.destination_rules) ? result.data.destination_rules : [],
       };
+      if (Array.isArray(openByPosition)) {
+        pairsState.pairs.forEach((pair, i) => setPairExpanded(pair, !!openByPosition[i]));
+      }
       try {
         pairsSavedSnapshot = JSON.stringify(pairsPayload());
       } catch {
@@ -7269,6 +7406,8 @@
         auto_sync: false,
         interval_seconds: 43200,
       });
+      // You just created it and it is entirely unconfigured, so it opens.
+      setPairExpanded(pairsState.pairs[pairsState.pairs.length - 1], true);
       renderPairs();
     }
 
@@ -7305,6 +7444,10 @@
     async function savePairs(announce) {
       const btn = el('btn-pairs-save');
       if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      // A pair saved for the first time is handed a server id, so the client key
+      // its open state was filed under stops matching. Positions survive the
+      // round trip, so carry the state across by position.
+      const openByPosition = pairsState.pairs.map(isPairExpanded);
       try {
         const result = await apiPost('/api/profile/pairs/save', { pairs: pairsPayload() });
         if (!result.ok) {
@@ -7312,7 +7455,7 @@
           return false;
         }
         if (announce !== false) showToast('Sync pairs saved.', false, true);
-        await fetchPairs();
+        await fetchPairs(openByPosition);
         return true;
       } catch {
         showToast('Network error while saving sync pairs.', true);
