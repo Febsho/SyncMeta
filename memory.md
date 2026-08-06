@@ -98,6 +98,16 @@ This file is a compact working memory for future code changes. Keep it current w
   - Trakt public public
   - MDBList public
 
+## Anime Mapping Store
+
+- Fribb JSON + Anime-Lists XML load lazily; `prewarm()` is called from a daemon
+  thread at startup (`web.py:_start_anime_mapping_prewarm`) so the ~43k-entry
+  index is not built inside a sync while the store lock is held.
+- Prewarm never raises. Failures land in `cache_metadata()` as `fribb_error` /
+  `xml_error`, and the admin panel shows Loaded / Loading / Failed / Not loaded.
+- "Not loaded, checked Never" in the panel used to be the normal state until
+  something triggered a lookup — it now means something real.
+
 ## SIMKL Notes
 
 - SIMKL list endpoints use `/sync/all-items/{type}/{status}`.

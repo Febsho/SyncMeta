@@ -125,6 +125,12 @@ class AnimeMappingStore:
         self._xml_by_imdb: dict[str, list[ET.Element]] = {}
         self._same_season_group_cache: dict[tuple[str, str], dict] = {}
         self._mapping_string_cache: dict[str, list[dict]] = {}
+        #: Why a source is not loaded. Without this the admin panel can only say
+        #: "Not loaded", which is indistinguishable from "nothing asked for it
+        #: yet" — and a mapping that silently fails to load looks exactly like
+        #: anime that simply cannot be matched.
+        self._load_errors: dict[str, str] = {}
+        self._prewarm_started = False
 
     def lookup_fribb(
         self,
@@ -325,7 +331,46 @@ class AnimeMappingStore:
                 ),
                 "season_group_cache": len(self._same_season_group_cache),
                 "mapping_string_cache": len(self._mapping_string_cache),
+                "fribb_error": self._load_errors.get("fribb", ""),
+                "xml_error": self._load_errors.get("anime_lists_xml", ""),
+                "prewarm_started": self._prewarm_started,
             }
+
+    def prewarm(self) -> dict:
+        """Load both mappings now, tolerating failure.
+
+        They are otherwise loaded lazily by the first anime lookup — which
+        happens *inside* a sync, on a worker thread, holding the store lock
+        while ~40MB of JSON and a large XML are fetched and indexed. Every other
+        anime lookup in that run queues behind it, and if the download is slow
+        the cost lands on the user's sync rather than on idle startup. Calling
+        this from a background thread at boot moves that work off the sync path
+        and makes the admin panel's "Loaded" state mean something.
+        """
+        with self._lock:
+            self._prewarm_started = True
+        results = {}
+        for source_name, loader in (
+            ("fribb", self._ensure_fribb_loaded),
+            ("anime_lists_xml", self._ensure_xml_loaded),
+        ):
+            started = time.monotonic()
+            try:
+                loader()
+                with self._lock:
+                    self._load_errors.pop(source_name, None)
+                results[source_name] = {
+                    "ok": True,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                }
+            except Exception as exc:
+                # Never raise: a mapping that cannot load must degrade matching,
+                # not stop the app from starting.
+                logger.warning("Anime mapping prewarm failed for %s: %s", source_name, exc)
+                with self._lock:
+                    self._load_errors[source_name] = str(exc)
+                results[source_name] = {"ok": False, "error": str(exc)}
+        return results
 
     def force_refresh(self) -> dict:
         """Force an ETag-aware upstream re-check while preserving good cached data."""
@@ -675,6 +720,10 @@ def cache_metadata() -> dict:
 
 def force_refresh() -> dict:
     return _STORE.force_refresh()
+
+
+def prewarm() -> dict:
+    return _STORE.prewarm()
 
 
 def resolve_tvdb_episode_from_anidb_episode(

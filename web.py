@@ -1621,8 +1621,47 @@ def _scheduler_disabled() -> bool:
     return str(os.getenv("DISABLE_PROFILE_SCHEDULER", "")).strip() in {"1", "true", "yes", "on"}
 
 
+_anime_prewarm_lock = threading.Lock()
+_anime_prewarm_started = False
+
+
+def _start_anime_mapping_prewarm() -> None:
+    """Load the anime mappings in the background, once per process.
+
+    They are otherwise loaded by the first anime lookup, which happens inside a
+    sync while the store lock is held — so a slow GitHub stalls every anime
+    lookup in that run, and the admin panel shows "Not loaded / Never" for as
+    long as nothing has needed them. Runs on its own daemon thread after the
+    scheduler's startup grace so it never competes with the request that booted
+    the app.
+    """
+    global _anime_prewarm_started
+    with _anime_prewarm_lock:
+        if _anime_prewarm_started:
+            return
+        _anime_prewarm_started = True
+
+    def _run() -> None:
+        from src import anime_mapping_store as _ams  # noqa: PLC0415
+        if SCHEDULER_STARTUP_GRACE_SECONDS > 0:
+            time.sleep(min(SCHEDULER_STARTUP_GRACE_SECONDS, 30))
+        try:
+            results = _ams.prewarm()
+        except Exception:
+            logger.warning("Anime mapping prewarm failed", exc_info=True)
+            return
+        for source, outcome in results.items():
+            if outcome.get("ok"):
+                logger.info("Anime mapping %s ready (%sms)", source, outcome.get("duration_ms"))
+            else:
+                logger.warning("Anime mapping %s unavailable: %s", source, outcome.get("error"))
+
+    threading.Thread(target=_run, name="anime-mapping-prewarm", daemon=True).start()
+
+
 def _ensure_scheduler_started() -> None:
     global _scheduler_started
+    _start_anime_mapping_prewarm()
     if _scheduler_disabled():
         return
     with _scheduler_lock:
@@ -3522,6 +3561,9 @@ def _admin_stats() -> dict:  # noqa: C901
         "xml_cache_updated_at": xml_meta.get("cache_updated_at", ""),
         "xml_source_url": xml_meta.get("source_url", ""),
         "xml_etag": xml_meta.get("etag", ""),
+        "fribb_error": str(mapping_cache_meta.get("fribb_error") or ""),
+        "xml_error": str(mapping_cache_meta.get("xml_error") or ""),
+        "prewarm_started": bool(mapping_cache_meta.get("prewarm_started")),
         "mapping_refresh_interval_seconds": int(mapping_cache_meta.get("refresh_interval_seconds") or 0),
         "season_group_cache": int(mapping_cache_meta.get("season_group_cache") or 0),
         "mapping_str_cache": int(mapping_cache_meta.get("mapping_string_cache") or 0),

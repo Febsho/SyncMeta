@@ -399,6 +399,19 @@ server-side by `anilist_client.exchange_code_for_token`. The code is single-use 
 short-lived, so `/api/anilist/auth/check` persists the token immediately via
 `ProfileStore.update_anilist_auth` rather than waiting for a profile save.
 
+**The anime mappings are prewarmed at startup, not on first lookup.** Both
+`AnimeMappingStore` sources load lazily, which meant the first anime lookup of a
+process downloaded and indexed ~43k Fribb entries plus a large XML *inside a
+sync*, on a worker thread, holding the store lock — every other anime lookup in
+that run queued behind it, and a slow GitHub put that cost on the user's sync.
+`_start_anime_mapping_prewarm()` in `web.py` runs `anime_mapping_store.prewarm()`
+on a daemon thread after the scheduler's startup grace. It must never raise: a
+mapping that cannot load degrades matching, it does not stop the app. Failures
+are recorded in `_load_errors` and surfaced by `cache_metadata()` as
+`fribb_error`/`xml_error`, because the admin panel's old "Not loaded / Never"
+could not distinguish a broken download from "nothing has asked for it yet" —
+and a silently unloaded mapping looks exactly like anime that cannot be matched.
+
 **Fribb feed shapes — do not assume scalars.** Verified against the live
 `Fribb/anime-lists` feed (42,868 entries). Reading these as plain values is what
 made every anime-movie and IMDB mapping silently unreachable:

@@ -300,13 +300,23 @@
   <div class="section">
     <div class="section-head"><span class="section-title">Cache &amp; Mapping Store</span></div>
     <div class="section-body">
+      {% if stats.cache.fribb_error or stats.cache.xml_error %}
+      <div class="set-warn" style="color:var(--red);border-color:rgba(248,113,113,.25);background:rgba(248,113,113,.08)">
+        Anime mapping could not be loaded, so anime matching is degraded:
+        {{ stats.cache.fribb_error or stats.cache.xml_error }}
+      </div>
+      {% endif %}
       <div class="cache-grid">
-        <div class="cache-item">
+        <div class="cache-item" title="{{ stats.cache.fribb_error }}">
           <span class="cache-label">Fribb anime map</span>
           <span>
             {% if stats.cache.fribb_loaded %}
             <span class="badge badge-green">Loaded</span>
             <span class="cache-val" style="margin-left:6px">{{ stats.cache.fribb_entries }}</span>
+            {% elif stats.cache.fribb_error %}
+            <span class="badge badge-red">Failed</span>
+            {% elif stats.cache.prewarm_started %}
+            <span class="badge badge-blue">Loading</span>
             {% else %}
             <span class="badge badge-orange">Not loaded</span>
             {% endif %}
@@ -320,12 +330,16 @@
           <span class="cache-label">Fribb cache file</span>
           <span class="cache-val" style="font-size:12px">{{ stats.cache.fribb_cache_updated_at or 'Missing' }}</span>
         </div>
-        <div class="cache-item">
+        <div class="cache-item" title="{{ stats.cache.xml_error }}">
           <span class="cache-label">Anime-Lists XML</span>
           <span>
             {% if stats.cache.xml_loaded %}
             <span class="badge badge-green">Loaded</span>
             <span class="cache-val" style="margin-left:6px">{{ stats.cache.xml_entries }}</span>
+            {% elif stats.cache.xml_error %}
+            <span class="badge badge-red">Failed</span>
+            {% elif stats.cache.prewarm_started %}
+            <span class="badge badge-blue">Loading</span>
             {% else %}
             <span class="badge badge-orange">Not loaded</span>
             {% endif %}
