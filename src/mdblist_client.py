@@ -15,9 +15,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import MdbListConfig
+from .rate_limit import RateLimiter, retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (5, 12)
+# MDBList meters per-day on the free tier and returns X-RateLimit-* headers.
+# This paces bursts; retry_on_rate_limit handles an actual 429 using those
+# headers, including the absolute X-RateLimit-Reset epoch MDBList sends.
+RATE_LIMIT_MAX = 100
+RATE_LIMIT_WINDOW = 10.0
 
 
 class MdbListClient:
@@ -35,6 +41,7 @@ class MdbListClient:
     def __init__(self, config: MdbListConfig, cancel_requested_callback=None):
         self._config = config
         self._session = self._build_session()
+        self._limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
         self._cancel_requested_callback = cancel_requested_callback
 
     def _check_cancelled(self) -> None:
@@ -98,6 +105,7 @@ class MdbListClient:
         url = f"{self._config.base_url}{path}"
         logger.debug("GET %s params=%s", url, request_params)
         self._check_cancelled()
+        self._limiter.wait(self._cancel_requested_callback)
         response = self._session.get(
             url, params=request_params, headers=self._auth_headers(), timeout=REQUEST_TIMEOUT,
         )
@@ -106,11 +114,19 @@ class MdbListClient:
         return response
 
     def _post(self, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
+        return retry_on_rate_limit(
+            lambda: self._post_once(path, payload, params),
+            provider="MDBList",
+            check_cancelled=self._check_cancelled,
+        )
+
+    def _post_once(self, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
         request_params = dict(params or {})
         request_params.update(self._auth_params())
         url = f"{self._config.base_url}{path}"
         logger.debug("POST %s", url)
         self._check_cancelled()
+        self._limiter.wait(self._cancel_requested_callback)
         response = self._session.post(
             url,
             params=request_params,

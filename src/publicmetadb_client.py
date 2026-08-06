@@ -11,6 +11,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import PublicMetaDBConfig
+# Moved to the shared module so every provider can pace itself, not just this one.
+from .rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (5, 12)
@@ -56,50 +58,13 @@ class PublicMetaDBStats:
     list_write_failures: int = 0
 
 
-class RateLimiter:
-    """Sliding-window rate limiter."""
-
-    def __init__(self, max_requests: int = RATE_LIMIT_MAX, window_seconds: float = RATE_LIMIT_WINDOW):
-        self._max = max_requests
-        self._window = window_seconds
-        self._timestamps: list[float] = []
-        self._lock = threading.Lock()
-
-    def wait(self, cancel_requested_callback=None) -> None:
-        while True:
-            with self._lock:
-                now = time.time()
-                self._timestamps = [t for t in self._timestamps if now - t < self._window]
-                if len(self._timestamps) < self._max:
-                    self._timestamps.append(now)
-                    return
-                sleep_for = self._timestamps[0] + self._window - now + 0.1
-            if sleep_for > 0:
-                logger.debug("Rate limit: sleeping %.2fs", sleep_for)
-                deadline = time.monotonic() + sleep_for
-                while True:
-                    if cancel_requested_callback:
-                        try:
-                            if cancel_requested_callback():
-                                from .sync_service import SyncCancelled
-                                raise SyncCancelled("Sync stopped by user")
-                        except SyncCancelled:
-                            raise
-                        except Exception:
-                            logger.debug("Cancel callback failed", exc_info=True)
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    time.sleep(min(_CANCEL_POLL_INTERVAL, remaining))
-
-
 class PublicMetaDBClient:
     """Client for the PublicMetaDB external API."""
 
     def __init__(self, config: PublicMetaDBConfig, cancel_requested_callback=None):
         self._config = config
         self._session_local = threading.local()
-        self._limiter = RateLimiter()
+        self._limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
         self._lists_lock = threading.Lock()
         self._lists_by_name: dict[str, dict] | None = None
         self._lists_by_type: dict[str, dict] = {}

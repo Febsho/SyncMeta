@@ -143,6 +143,15 @@ This file is a compact working memory for future code changes. Keep it current w
 - History is account-level only; a curated list has no watch dates.
 - `/sync/ratings`, `/sync/paused`, `/sync/dropped` exist but are not wired.
 
+## Rate Limits And Retries
+
+- `src/rate_limit.py`: `retry_on_rate_limit` (writes retry ONLY on 429, never on
+  5xx/timeout — a landed `/sync/history` write would be duplicated) and
+  `RateLimiter` (sliding window, used by every client now, not just PMDB).
+- Session-level urllib3 `Retry` is GET-only on every client.
+- `src/http_timeouts.py`: read timeouts are env-tunable. Trakt/SIMKL were 6s and
+  are now 20s — the old value caused the reported read-timeout storms.
+
 ## PublicMetaDB Notes
 
 - Lists use `/api/external/lists`.

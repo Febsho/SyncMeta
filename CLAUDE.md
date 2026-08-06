@@ -257,6 +257,38 @@ back to the key — independent of the filter, the category boxes, and whether t
 provider's lists have loaded. Rendering only the ticked checkboxes made a saved
 selection look lost.
 
+**Reads may be retried automatically; writes may not.** `src/rate_limit.py`
+holds both halves of this, because urllib3's `Retry` takes one status list for
+every method and cannot express the difference.
+
+* The session-level `Retry` is **`allowed_methods=["GET"]`** on every client. It
+  already honours `Retry-After` for 429/503/413, so reads need nothing else.
+* A write is only safe to retry when it provably did *not* take effect. A 429 is
+  exactly that — rejected before any work. A 5xx or a read timeout is **not**:
+  the write may have landed, and `/sync/history` is not idempotent, so an
+  automatic retry turns one play into two. Writes therefore go through
+  `retry_on_rate_limit`, which retries a 429 and nothing else.
+
+`retry_after_seconds` reads `Retry-After`, `X-RateLimit-Reset-After` and
+MDBList's absolute `X-RateLimit-Reset` epoch, clamping the result — a provider
+asking for an hour must not stall a sync, and a skewed clock must not produce a
+negative wait.
+
+**Every client paces itself, not just PublicMetaDB.** `RateLimiter` (moved out of
+`publicmetadb_client.py` into `rate_limit.py`) is a sliding window applied in
+each client's `_get`/`_post`. Trakt's numbers come from its published ceiling of
+1000 GET per 5 minutes; SIMKL's and MDBList's are deliberately loose, there to
+stop a wide parallel fetch bursting rather than to slow a normal sync. The wait
+loop polls `cancel_requested_callback` instead of sleeping through, because
+parked on a limiter is exactly where Stop has to stay responsive.
+
+**Read timeouts are tunable, and 6s was too short.** Trakt and SIMKL used a 6s
+read timeout, which a large watchlist fetched with `extended=full` routinely
+exceeds — every one of those became three retries and then a failed sync, which
+is what the reported timeout storms were. They are now 20s by default via
+`http_timeouts._env_timeout`, overridable with `SYNCMETA_TRAKT_READ_TIMEOUT` /
+`SYNCMETA_SIMKL_READ_TIMEOUT` and clamped to 2-180s.
+
 **MDBList reads and writes — two different surfaces behind one provider.** It was
 source-only until its API grew a Trakt-shaped sync surface; the old note said
 "no write path" and is wrong now. `MdbListAdapter` handles:

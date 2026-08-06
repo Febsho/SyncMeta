@@ -15,9 +15,17 @@ from urllib3.util.retry import Retry
 from .config import AniListConfig, SimklConfig
 from . import fribb_client as _fribb
 from . import anime_mapping_store as _anime_maps
+from .http_timeouts import _env_timeout
+from .rate_limit import RateLimiter, retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
-REQUEST_TIMEOUT = (5, 6)
+# (connect, read). 6s was too tight for SIMKL's larger all-items responses; see
+# the note in trakt_client.
+REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_SIMKL_READ_TIMEOUT", 20))
+# SIMKL publishes no hard number, so this is deliberately loose: it exists to
+# stop a wide parallel anime fetch from bursting, not to slow a normal sync.
+RATE_LIMIT_MAX = 200
+RATE_LIMIT_WINDOW = 10.0
 # Batch /sync writes so one failure costs less work.
 SIMKL_SYNC_BATCH_SIZE = 100
 
@@ -78,6 +86,7 @@ class SimklClient:
     def __init__(self, config: SimklConfig, cancel_requested_callback=None):
         self._config = config
         self._session = self._build_session()
+        self._limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
         self._tmdb_season_plan_cache: dict[int, list[tuple[int, int]]] = {}
         self._anime_root_cache: dict[int, dict] = {}
         self._anime_root_client = None
@@ -104,11 +113,13 @@ class SimklClient:
         if self._config.access_token:
             session.headers["Authorization"] = f"Bearer {self._config.access_token}"
 
+        # GET only — see the note in trakt_client: a retried write may
+        # duplicate a play. Writes retry 429 explicitly instead.
         retry = Retry(
             total=3,
             backoff_factor=1.0,
             status_forcelist=[429, 500, 502, 503],
-            allowed_methods=["GET", "POST"],
+            allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)
         session.mount("https://", adapter)
@@ -124,6 +135,7 @@ class SimklClient:
         url = f"{self._config.base_url}{path}"
         logger.debug("GET %s params=%s", url, params)
         self._check_cancelled()
+        self._limiter.wait(self._cancel_requested_callback)
         resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
         resp.raise_for_status()
@@ -132,9 +144,17 @@ class SimklClient:
         return resp.json()
 
     def _post(self, path: str, data: dict) -> dict | list | None:
+        return retry_on_rate_limit(
+            lambda: self._post_once(path, data),
+            provider="SIMKL",
+            check_cancelled=self._check_cancelled,
+        )
+
+    def _post_once(self, path: str, data: dict) -> dict | list | None:
         url = f"{self._config.base_url}{path}"
         logger.debug("POST %s", url)
         self._check_cancelled()
+        self._limiter.wait(self._cancel_requested_callback)
         resp = self._session.post(url, json=data, timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
         resp.raise_for_status()

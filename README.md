@@ -174,6 +174,16 @@ the code default, both are listed.
 | `SYNCMETA_PREWARM_WORKERS` | `2` | `2` | 4 | Anime prewarm workers. |
 | `SYNCMETA_ANILIST_PREWARM_LIMIT` | `100` | `50` | 200 | AniList root lookups prewarmed per run. `0` disables. |
 
+### Network timeouts
+
+Raise these on a slow or congested host, lower them to fail faster. Clamped to
+2-180 seconds.
+
+| Variable | Default | Description |
+|---|---:|---|
+| `SYNCMETA_TRAKT_READ_TIMEOUT` | `20` | Read timeout for Trakt. Was effectively 6s, which large watchlists exceeded. |
+| `SYNCMETA_SIMKL_READ_TIMEOUT` | `20` | Read timeout for SIMKL. |
+
 ### Logging and serving
 
 | Variable | Default | Description |

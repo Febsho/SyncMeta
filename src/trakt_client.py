@@ -12,9 +12,19 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import TraktConfig
+from .http_timeouts import _env_timeout
+from .rate_limit import RateLimiter, retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
-REQUEST_TIMEOUT = (5, 6)
+# (connect, read). The read timeout was 6s, which a large watchlist fetched with
+# extended=full routinely exceeds — every one of those turned into three retries
+# and then a failed sync. Lower it on a fast link if you would rather fail early.
+REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_TRAKT_READ_TIMEOUT", 20))
+# Trakt documents 1000 GET calls per 5 minutes. Pace under it rather than
+# discovering the limit as a 429 mid-sync; the headroom keeps a parallel fetch
+# from tripping it. At ~3/s this never slows a normal sync.
+RATE_LIMIT_MAX = 900
+RATE_LIMIT_WINDOW = 300.0
 # Trakt accepts large /sync payloads; batch so one failure costs less work.
 TRAKT_SYNC_BATCH_SIZE = 100
 TOKEN_REFRESH_SKEW_SECONDS = 3600
@@ -65,6 +75,7 @@ class TraktClient:
         self._session = self._build_session()
         self._cancel_requested_callback = cancel_requested_callback
         self._token_refreshed_callback = token_refreshed_callback
+        self._limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
         self._refresh_lock = threading.Lock()
         self._refresh_attempted = False
         self._refresh_succeeded = False
@@ -130,11 +141,15 @@ class TraktClient:
         if self._config.access_token:
             session.headers["Authorization"] = f"Bearer {self._config.access_token}"
 
+        # GET only. A POST that timed out or 5xx'd may already have been
+        # applied, and /sync/history is not idempotent — an automatic retry
+        # turns one play into two. Writes handle 429 explicitly instead, via
+        # retry_on_rate_limit, because a 429 provably did no work.
         retry = Retry(
             total=3,
             backoff_factor=1.5,
             status_forcelist=[429, 500, 502, 503],
-            allowed_methods=["GET", "POST"],
+            allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)
         session.mount("https://", adapter)
@@ -201,6 +216,10 @@ class TraktClient:
     def _request_response(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self._config.base_url}{path}"
         self._check_cancelled()
+        # Stay under Trakt's published ceiling instead of finding it as a 429.
+        # The device flow runs before a sync and must not be paced behind it.
+        if not path.startswith("/oauth/"):
+            self._limiter.wait(self._cancel_requested_callback)
         if not path.startswith("/oauth/") and self._access_token_expiring_soon():
             self._attempt_token_refresh()
         response = self._session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
@@ -241,7 +260,11 @@ class TraktClient:
         return self._request("GET", path, params=params)
 
     def _post(self, path: str, data: dict) -> dict | list | None:
-        return self._request("POST", path, json=data)
+        return retry_on_rate_limit(
+            lambda: self._request("POST", path, json=data),
+            provider="Trakt",
+            check_cancelled=self._check_cancelled,
+        )
 
     def get_last_activities(self) -> dict:
         """Return Trakt /sync/last_activities.  Raises on auth/network errors."""
