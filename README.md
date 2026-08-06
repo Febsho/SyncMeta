@@ -26,16 +26,25 @@ Open `http://127.0.0.1:8080` and:
    into the profile.
 2. In **Settings -> Connections**, paste your PublicMetaDB API key, then connect
    SIMKL, Trakt, AniList or MDBList.
-3. In **Sync**, choose which lists each service should send to PublicMetaDB.
-4. On the **Dashboard**, click **Dry Run** to preview, then **Sync Lists**.
+3. In **Sync**, add a **pair**: pick a source service, a target service, and what
+   to copy. The built-in PublicMetaDB pipeline is on the same screen below it.
+4. On the **Dashboard**, click **Dry Run** to preview, then run it.
 
 After that it runs on its own every 12 hours.
 
 ## What it does
 
-**Sync into PublicMetaDB.** Every connected service feeds PublicMetaDB. For each
-one you pick which lists or statuses to send, whether entries may be removed
-again, and whether they are public or private in PublicMetaDB.
+**Sync pairs.** The main way to sync: a pair copies items between any two
+services. It is one-way or two-way, chooses what happens when an item disappears
+from the source (never remove, remove only what this pair added, or mirror the
+source exactly), and can run on its own schedule with a minimum interval of 12
+hours. Where the target can create lists — PublicMetaDB and Trakt — a pair also
+chooses whether the lists it creates are public or private; a list that already
+exists keeps whatever you set on the service itself.
+
+For SIMKL → Trakt, Plan to Watch maps to Trakt's native watchlist. Watching,
+Completed, On Hold and Dropped are kept in separate Trakt lists that SyncMeta
+creates or reuses, rather than being flattened into Trakt Collection.
 
 | Service | Reads | Writes |
 |---|---|---|
@@ -56,15 +65,12 @@ and secret in Connections, set the shown Redirect URL on your MDBList app, then
 press Connect. MDBList marks its sync API as beta, so preview with a dry run
 before trusting a real run.
 
-**Sync pairs.** Beyond the built-in service-to-PublicMetaDB pipelines, you can
-copy a list from any service to any other. A pair is one-way or two-way, and
-chooses what happens when an item disappears from the source: never remove,
-remove only what this pair added, or mirror the source exactly. Every pair can
-also run on its own automatic schedule, with a minimum interval of 12 hours.
-
-For SIMKL → Trakt, Plan to Watch maps to Trakt's native watchlist. Watching,
-Completed, On Hold, and Dropped are kept separate in private Trakt lists that
-SyncMeta creates or reuses; they are not flattened into Trakt Collection.
+**The PublicMetaDB pipeline.** The original built-in sync, still running and
+unchanged: every connected service feeds PublicMetaDB, and for each one you pick
+which lists or statuses to send, whether entries may be removed again, and
+whether they are public or private. A pair can express the same thing, so new
+setups are better served by one — but nothing about an existing pipeline
+changed, and it sits below the pairs on the Sync screen.
 
 **Anime matching.** Anime is matched across AniList, MAL, SIMKL, TMDB and IMDB
 using the Fribb anime-lists data, with sequel seasons resolved back to the root

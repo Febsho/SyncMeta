@@ -179,6 +179,7 @@
     .pair-sec{padding:16px;border-bottom:1px solid var(--line)}
     .pair-sec:last-child{border-bottom:none}
     .pair-sec-title{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label);margin-bottom:10px}
+    .pair-sec-note{font-size:11.5px;color:var(--z500);line-height:1.55;margin-top:8px}
     /* The flow row: [from] (direction) [to] reads left to right as the sync. */
     .pair-flow-row{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
     .pair-flow-end{flex:1;min-width:150px;display:flex;flex-direction:column;gap:5px}
@@ -669,12 +670,6 @@
           <div class="live-activity-console" id="live-activity-body"><div class="empty">Waiting for sync activity…</div></div>
         </div>
 
-        <!-- Per-pipeline status (one row per service feeding PublicMetaDB) -->
-        <div class="panel hidden" id="pipelines-panel">
-          <div class="panel-header"><span>Sync Pipelines</span><span class="history-time" id="pipelines-meta"></span></div>
-          <div id="pipelines-body"></div>
-        </div>
-
         <!-- Cross-service pairs (any service to any other), hidden until one exists -->
         <div class="panel hidden" id="pairs-dash-panel">
           <div class="panel-header">
@@ -687,6 +682,13 @@
           </div>
           <div id="pairs-dash-body"></div>
         </div>
+
+        <!-- Per-pipeline status (one row per service feeding PublicMetaDB) -->
+        <div class="panel hidden" id="pipelines-panel">
+          <div class="panel-header"><span>PublicMetaDB Pipeline</span><span class="history-time" id="pipelines-meta"></span></div>
+          <div id="pipelines-body"></div>
+        </div>
+
 
         <!-- Activity sync (hidden until configured) -->
         <div class="panel hidden" id="activity-panel">
@@ -754,16 +756,49 @@
         <div class="topbar">
           <div>
             <h1 class="page-title">Sync</h1>
-            <div class="page-sub" id="sync-pairs-sub">Your service pipelines into PublicMetaDB, plus custom pairs between any services.</div>
+            <div class="page-sub" id="sync-pairs-sub">Sync pairs move items between any two services. The built-in PublicMetaDB pipeline is below.</div>
           </div>
         </div>
         <div class="cards" id="sync-cards"></div>
 
+        <div class="panel">
+          <!-- The run actions live in this header rather than the page topbar.
+               They used to sit in both places under the same element ids, so
+               getElementById bound only the topbar copy and the buttons down
+               here were dead — and "Run All" on a page that also holds the
+               service pipelines read as if it ran those too. -->
+          <div class="panel-header">
+            <span>Sync Pairs</span>
+            <span class="actions-bar" style="margin-top:0">
+              <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
+              <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
+              <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
+            </span>
+          </div>
+          <div class="panel-body">
+            <div class="desc" style="margin-bottom:14px;max-width:74ch">
+              A pair copies items between any two services — this is the main way to
+              sync. <strong>One-way</strong> sends from the first to the second;
+              <strong>two-way</strong> keeps both holding the same items. To feed one
+              target from several sources, add a pair each.
+            </div>
+            <div id="pairs-capabilities" class="pair-caps"></div>
+            <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
+            <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px">
+              <div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div>
+              <div class="live-activity-console" id="pairs-live-body"><div class="empty">Waiting for provider activity…</div></div>
+            </div>
+            <div id="pairs-results" style="margin-top:12px"></div>
+          </div>
+        </div>
+
         <div id="sync-settings">
           <div class="panel">
             <div class="panel-header">
-              <span>Service Pipelines → PublicMetaDB</span>
-              <span class="catalog-note">The built-in sync — every connected service sends into PublicMetaDB. Your existing setup lives here unchanged.</span>
+              <span>PublicMetaDB Pipeline</span>
+              <span class="catalog-note">The original built-in sync: every connected service sends into PublicMetaDB. Still running, unchanged — but a pair can do the same thing and more.</span>
             </div>
             <div class="pipeline-list">
 
@@ -994,38 +1029,6 @@
               </div>
 
             </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <!-- The run actions live in this header rather than the page topbar.
-               They used to sit in both places under the same element ids, so
-               getElementById bound only the topbar copy and the buttons down
-               here were dead — and "Run All" on a page that also holds the
-               service pipelines read as if it ran those too. -->
-          <div class="panel-header">
-            <span>Sync Pairs</span>
-            <span class="actions-bar" style="margin-top:0">
-              <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
-              <button class="btn btn-sm" type="button" id="btn-pair-add">Add Pair</button>
-              <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save Pairs</button>
-              <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Dry Run</button>
-              <button class="btn btn-sm" type="button" id="btn-pairs-run">Run All</button>
-            </span>
-          </div>
-          <div class="panel-body">
-            <div class="desc" style="margin-bottom:14px;max-width:74ch">
-              A pair copies items between two services. <strong>One-way</strong> sends
-              from the first to the second; <strong>two-way</strong> keeps both holding
-              the same items. To feed one target from several sources, add a pair each.
-            </div>
-            <div id="pairs-capabilities" class="pair-caps"></div>
-            <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
-            <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px">
-              <div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div>
-              <div class="live-activity-console" id="pairs-live-body"><div class="empty">Waiting for provider activity…</div></div>
-            </div>
-            <div id="pairs-results" style="margin-top:12px"></div>
           </div>
         </div>
       </div>
@@ -7102,6 +7105,27 @@
         additive: 'Additive only — never remove from either service',
         managed: 'Propagate removals, but only for items this pair added',
       };
+      // Only two providers can act on list privacy, so the control is hidden
+      // rather than shown-and-ignored everywhere else. It also only describes
+      // lists SyncMeta creates — an existing list keeps its own setting.
+      const targetCaps = pairsState.providers.find(p => p.key === pair.target);
+      const showVisibility = !!(targetCaps && targetCaps.has_visibility);
+      const visibility = String(pair.visibility || 'private') === 'public' ? 'public' : 'private';
+      const visibilitySection = !showVisibility ? '' : `
+        <div class="pair-sec">
+          <div class="pair-sec-title">New lists on ${esc(targetCaps.label || pair.target)}</div>
+          <div class="pair-opt-grid">
+            <label class="pair-flow-end">
+              <span>Visibility</span>
+              <select id="pair-visibility-${index}" data-pair-index="${index}" data-pair-field="visibility">
+                <option value="private" ${visibility === 'private' ? 'selected' : ''}>Private — only you can see it</option>
+                <option value="public" ${visibility === 'public' ? 'selected' : ''}>Public — anyone with the link can see it</option>
+              </select>
+            </label>
+          </div>
+          <div class="pair-sec-note">Applies only to lists this pair has to create. A list that already exists keeps the visibility you set on ${esc(targetCaps.label || pair.target)}.</div>
+        </div>`;
+
       const removalOptions = pairsState.removal_modes
         .filter(mode => allowed.includes(mode.key))
         .map(mode => {
@@ -7191,6 +7215,8 @@
           </div>
           ${notesHtml}
         </div>
+
+        ${visibilitySection}
 
         <div class="pair-sec">
           <div class="pair-sec-title">Automatic sync</div>
@@ -7561,6 +7587,7 @@
         source_lists: pair.source_lists || [],
         target_list: pair.target_list || '',
         removal_mode: pair.removal_mode || 'additive',
+        visibility: pair.visibility === 'public' ? 'public' : 'private',
         mode: pair.mode || 'one_way',
         enabled: pair.enabled !== false,
         auto_sync: !!pair.auto_sync,

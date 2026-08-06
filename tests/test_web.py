@@ -2669,7 +2669,11 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="sync-settings"', html)
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
-        self.assertIn("Service Pipelines → PublicMetaDB", html)
+        # Pairs are the headline now, so the built-in pipeline is titled for
+        # what it is and sits below them.
+        self.assertIn("PublicMetaDB Pipeline", html)
+        self.assertLess(html.index(">Sync Pairs<"), html.index('id="sync-settings"'),
+                        "the pairs panel must come before the PublicMetaDB pipeline")
         self.assertNotIn('id="stab-lists"', html)
         self.assertNotIn('id="stab-behavior"', html)
         self.assertNotIn('id="snav-lists"', html)
@@ -2680,7 +2684,8 @@ class WebTests(unittest.TestCase):
                            'id="trakt-catalog-list"', 'id="mdblist-list"', 'id="opt-activity-history-source"'):
             self.assertEqual(html.count(element_id), 1, element_id)
         self.assertIn('id="pipelines-panel"', html)
-        self.assertIn("Sync Pipelines", html)
+        self.assertLess(html.index('id="pairs-dash-panel"'), html.index('id="pipelines-panel"'),
+                        "the dashboard must lead with pairs too")
 
 
 if __name__ == "__main__":

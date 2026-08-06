@@ -77,6 +77,20 @@ PAIR_MODE_LABELS = {
 #: unique items are destroyed. It is downgraded rather than offered.
 TWO_WAY_REMOVAL_MODES = (REMOVAL_ADDITIVE, REMOVAL_MANAGED)
 
+# Privacy of a list a pair *creates* on its target. Only two providers can act
+# on this — PublicMetaDB and Trakt are the only ones that both accept writes and
+# have a notion of list privacy — so `supports_visibility` gates the control
+# rather than showing a setting that silently does nothing.
+VISIBILITY_PRIVATE = "private"
+VISIBILITY_PUBLIC = "public"
+
+ALL_VISIBILITIES = (VISIBILITY_PRIVATE, VISIBILITY_PUBLIC)
+
+VISIBILITY_LABELS = {
+    VISIBILITY_PRIVATE: "Private — only you can see it",
+    VISIBILITY_PUBLIC: "Public — anyone with the link can see it",
+}
+
 
 def item_key(item: dict) -> str:
     """Return a stable cross-provider identity key for an item.
@@ -228,6 +242,9 @@ class ProviderAdapter:
     # None means an older/third-party adapter did not declare the capability;
     # built-in adapters always declare True or False explicitly.
     supports_target_lists: bool | None = None
+    #: True when this provider can create a list and be told whether it is
+    #: public. False everywhere else, and the pair editor hides the control.
+    supports_visibility: bool = False
 
     #: Whether ``search_lists`` actually queries the provider. Only Trakt and
     #: MDBList expose a public list search; offering the box elsewhere invites a
@@ -300,7 +317,12 @@ class ProviderAdapter:
             logger.warning("%s: could not enumerate writable lists", self.label, exc_info=True)
             return []
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
+        """Write ``items``. ``visibility`` applies only to a list this call has
+        to create; an existing list is never re-flagged."""
         raise NotImplementedError
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
@@ -323,6 +345,7 @@ class ProviderAdapter:
             "has_target_lists": self.supports_target_lists and self.can_write(),
             "target_list_categories": list(self.target_list_categories),
             "has_list_search": bool(self.supports_list_search),
+            "has_visibility": bool(self.supports_visibility) and self.can_write(),
         }
 
     def safe_list_sources(self) -> list[dict]:
@@ -345,6 +368,7 @@ class TraktAdapter(ProviderAdapter):
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = True
+    supports_visibility = True
     supports_list_search = True
     target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
 
@@ -469,11 +493,14 @@ class TraktAdapter(ProviderAdapter):
             return items
         return super().fetch_target(category, target_list)
 
-    def _ensure_automatic_simkl_list(self, status: str) -> tuple[str, str]:
+    def _ensure_automatic_simkl_list(
+        self, status: str, visibility: str = VISIBILITY_PRIVATE,
+    ) -> tuple[str, str]:
         label = self._SIMKL_STATUS_LABELS.get(status, status.replace("_", " ").title())
         name = f"SyncMeta · SIMKL {label}"
         meta = self._client.get_or_create_personal_list(
             name, f"Maintained by SyncMeta from the SIMKL {label} status.",
+            privacy=visibility,
         )
         return str(meta["user"]), str(meta["slug"])
 
@@ -512,7 +539,10 @@ class TraktAdapter(ProviderAdapter):
         user, slug = reference.split("/", 1)
         return (user, slug) if user and slug else None
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
         if str(target_list or "").startswith("auto:simkl:"):
             totals = {"added": 0, "not_found": 0, "batches": 0}
             grouped: dict[str, list[dict]] = {}
@@ -520,7 +550,7 @@ class TraktAdapter(ProviderAdapter):
                 status = str(item.get("_syncmeta_source_status") or "completed")
                 grouped.setdefault(status, []).append(item)
             for status, status_items in grouped.items():
-                user, slug = self._ensure_automatic_simkl_list(status)
+                user, slug = self._ensure_automatic_simkl_list(status, visibility)
                 result = self._client.add_to_custom_list(user, slug, status_items) or {}
                 for key in totals:
                     totals[key] += int(result.get(key) or 0)
@@ -650,7 +680,10 @@ class SimklAdapter(ProviderAdapter):
             out.append((status, media_type))
         return out
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
         if category == CATEGORY_HISTORY:
             return self._client.add_to_history(items)
         if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
@@ -736,7 +769,10 @@ class AniListAdapter(ProviderAdapter):
             return self._unsupported(category, "read")
         return list(self._client.get_status(status) or [])
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
         if category not in self._STATUS_FOR_CATEGORY:
             return self._unsupported(category, "write")
         return self._client.add_to_list(items, category)
@@ -754,6 +790,7 @@ class PmdbAdapter(ProviderAdapter):
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = True
+    supports_visibility = True
     target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
 
     _COLLECTION_LIST_NAME = "SyncMeta · Collection"
@@ -769,18 +806,21 @@ class PmdbAdapter(ProviderAdapter):
             return ""
         return "PublicMetaDB needs an API key before it can be written to."
 
-    def _watchlist_id(self) -> str | None:
+    def _watchlist_id(self, visibility: str = VISIBILITY_PRIVATE) -> str | None:
         existing = self._client.find_list_by_type("watchlist")
         if isinstance(existing, dict) and existing.get("id"):
             return str(existing["id"])
         created = self._client.get_or_create_list(
-            "Watchlist", "SyncMeta cross-service watchlist", False, "watchlist",
+            "Watchlist", "SyncMeta cross-service watchlist",
+            visibility == VISIBILITY_PUBLIC, "watchlist",
         )
         if isinstance(created, dict) and created.get("id"):
             return str(created["id"])
         return None
 
-    def _collection_id(self, *, create: bool = False) -> str | None:
+    def _collection_id(
+        self, *, create: bool = False, visibility: str = VISIBILITY_PRIVATE,
+    ) -> str | None:
         """Return the managed default collection list without creating on reads."""
         existing = self._client.find_list_by_name(self._COLLECTION_LIST_NAME)
         if isinstance(existing, dict) and existing.get("id"):
@@ -790,7 +830,7 @@ class PmdbAdapter(ProviderAdapter):
         created = self._client.get_or_create_list(
             self._COLLECTION_LIST_NAME,
             "Completed and collection items managed by SyncMeta pairs",
-            False,
+            visibility == VISIBILITY_PUBLIC,
             "custom",
         )
         if isinstance(created, dict) and created.get("id"):
@@ -921,7 +961,10 @@ class PmdbAdapter(ProviderAdapter):
             out.append({"key": f"list:{list_id}", "label": str(entry.get("name") or f"List {list_id}")})
         return out
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
         totals = {"added": 0, "not_found": 0, "batches": 1 if items else 0}
         destination = str(target_list or "").strip()
         if destination.startswith("list:"):
@@ -938,7 +981,7 @@ class PmdbAdapter(ProviderAdapter):
                 totals["added"] += len(payload)
             return totals
         if category == CATEGORY_WATCHLIST:
-            list_id = self._watchlist_id()
+            list_id = self._watchlist_id(visibility)
             if not list_id:
                 totals["not_found"] = len(items)
                 return totals
@@ -969,7 +1012,7 @@ class PmdbAdapter(ProviderAdapter):
                 totals["added"] += 1
             return totals
         if category == CATEGORY_COLLECTION:
-            list_id = self._collection_id(create=True)
+            list_id = self._collection_id(create=True, visibility=visibility)
             if not list_id:
                 totals["not_found"] = len(items)
                 return totals
@@ -1205,7 +1248,10 @@ class MdbListAdapter(ProviderAdapter):
             return list(self._selected_items([f"list:{list_id}"]))
         return self.fetch(category, None)
 
-    def add(self, category: str, items: list[dict], target_list: str = "") -> dict:
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
         if not self.can_write():
             raise ValueError(self.write_blocked_reason())
         if category not in self.writes:

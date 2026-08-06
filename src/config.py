@@ -161,6 +161,11 @@ class SyncPair:
     #: union of the two rather than running a second pair in reverse.
     mode: str = "one_way"
     enabled: bool = True
+    #: Privacy of any list this pair *creates* on the target. It has no effect
+    #: on a list that already exists — SyncMeta does not re-flag someone else's
+    #: list because a pair happened to write to it. Providers that have no
+    #: notion of list privacy ignore it.
+    visibility: str = "private"
     # Pair automation is independent from the main PMDB catalog schedule.  It
     # is opt-in for existing profiles and can never run more often than 12h.
     auto_sync: bool = False
@@ -181,6 +186,7 @@ class SyncPair:
             "removal_mode": self.removal_mode,
             "mode": self.mode,
             "enabled": bool(self.enabled),
+            "visibility": self.visibility,
             "auto_sync": bool(self.auto_sync),
             "interval_seconds": int(self.interval_seconds),
         }
@@ -202,6 +208,7 @@ class SyncPair:
     def from_dict(cls, raw: dict) -> "SyncPair":
         from .providers import (
             ALL_CATEGORIES,
+            ALL_VISIBILITIES,
             ALL_PAIR_MODES,
             ALL_REMOVAL_MODES,
             MODE_ONE_WAY,
@@ -209,6 +216,7 @@ class SyncPair:
             REMOVAL_ADDITIVE,
             REMOVAL_MANAGED,
             TWO_WAY_REMOVAL_MODES,
+            VISIBILITY_PRIVATE,
         )
 
         if not isinstance(raw, dict):
@@ -257,6 +265,12 @@ class SyncPair:
             if str(value).strip()
         ]
 
+        visibility = str(raw.get("visibility", "") or "").strip().lower()
+        if visibility not in ALL_VISIBILITIES:
+            # Private is the safe default: a list nobody asked to publish must
+            # not become public because the value was missing or misspelt.
+            visibility = VISIBILITY_PRIVATE
+
         interval_raw = raw.get("interval_seconds", 43200)
         try:
             interval_seconds = int(interval_raw)
@@ -275,6 +289,7 @@ class SyncPair:
             removal_mode=removal_mode,
             mode=mode,
             enabled=bool(raw.get("enabled", True)),
+            visibility=visibility,
             auto_sync=bool(raw.get("auto_sync", False)),
             interval_seconds=interval_seconds,
         )

@@ -159,6 +159,16 @@ This file is a compact working memory for future code changes. Keep it current w
   ENCRYPTION_KEY), which is otherwise invisible.
 - All read timeouts are env-tunable now (Trakt, SIMKL, MDBList, AniList, PMDB).
 
+## Sync Pairs Are The Primary Model
+
+- The Sync view and the dashboard lead with pairs; the service->PMDB pipeline is
+  below them, renamed "PublicMetaDB Pipeline". Still fully working, not removed.
+- `SyncPair.visibility` (private/public) applies to lists a pair has to CREATE
+  on the target. An existing list is never re-flagged.
+- Only PMDB and Trakt set `supports_visibility`; that flag gates both the editor
+  control and whether `visibility` is passed to `adapter.add()` at all.
+- Unknown/missing visibility resolves to private.
+
 ## Rate Limits And Retries
 
 - `src/rate_limit.py`: `retry_on_rate_limit` (writes retry ONLY on 429, never on

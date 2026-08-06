@@ -1097,6 +1097,7 @@ def _pair_capabilities(config: AppConfig) -> dict:
                 "has_target_lists": False,
                 "target_list_categories": [],
                 "has_list_search": False,
+                "has_visibility": False,
                 "unavailable_reason": _provider_unavailable_reason(config, key),
             })
             continue

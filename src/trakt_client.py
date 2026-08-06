@@ -349,7 +349,9 @@ class TraktClient:
                 metadata.append(normalized)
         return metadata
 
-    def get_or_create_personal_list(self, name: str, description: str = "") -> dict:
+    def get_or_create_personal_list(
+        self, name: str, description: str = "", privacy: str = "private",
+    ) -> dict:
         """Return a personal list by name, creating it when necessary.
 
         Cross-service status sync deliberately uses personal lists instead of
@@ -365,7 +367,9 @@ class TraktClient:
         raw = self._post("/users/me/lists", {
             "name": wanted,
             "description": str(description or ""),
-            "privacy": "private",
+            # Only applied at creation. An existing list keeps whatever
+            # privacy the user set on Trakt itself.
+            "privacy": "public" if str(privacy).strip().lower() == "public" else "private",
             "display_numbers": False,
             "allow_comments": False,
             "sort_by": "rank",

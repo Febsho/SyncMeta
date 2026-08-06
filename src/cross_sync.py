@@ -32,12 +32,37 @@ from .providers import (
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
     REMOVAL_MIRROR,
+    ALL_VISIBILITIES,
+    VISIBILITY_PRIVATE,
     enrich_identity,
     has_portable_identity,
     item_key,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _add_kwargs(adapter, pair) -> dict:
+    """Visibility is only passed to adapters that declare they can use it.
+
+    Every other provider ignores list privacy entirely, and sending it anyway
+    would make the write signature something all of them — including test
+    doubles — have to accept for no benefit.
+    """
+    if not getattr(adapter, "supports_visibility", False):
+        return {}
+    return {"visibility": _pair_visibility(pair)}
+
+
+def _pair_visibility(pair) -> str:
+    """The privacy a pair wants for lists it has to create on the target.
+
+    Read defensively: pairs stored before this field existed have no attribute,
+    and a missing value must mean private rather than publishing someone's
+    watchlist.
+    """
+    value = str(getattr(pair, "visibility", "") or "").strip().lower()
+    return value if value in ALL_VISIBILITIES else VISIBILITY_PRIVATE
 
 
 class ReadCache:
@@ -489,7 +514,9 @@ class CrossSyncService:
                 result.added = len(to_add)
             else:
                 try:
-                    totals = target.add(category, to_add, target_list) or {}
+                    totals = target.add(
+                        category, to_add, target_list, **_add_kwargs(target, pair),
+                    ) or {}
                     result.added = int(totals.get("added") or 0)
                     result.unmapped += int(totals.get("not_found") or 0)
                     wrote_added = to_add
@@ -644,8 +671,11 @@ class CrossSyncService:
                     # target_list belongs to the declared target only; writing
                     # back to the first service uses its own default list.
                     dest = "" if reverse else target_list
-                    totals = (adapter.add(category, items, dest) if verb == "add"
-                              else adapter.remove(category, items, dest)) or {}
+                    totals = (
+                        adapter.add(category, items, dest, **_add_kwargs(adapter, pair))
+                        if verb == "add"
+                        else adapter.remove(category, items, dest)
+                    ) or {}
                     count = int(totals.get("added" if verb == "add" else "deleted") or 0)
                     if verb == "add":
                         result.unmapped += int(totals.get("not_found") or 0)

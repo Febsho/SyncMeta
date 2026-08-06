@@ -129,6 +129,27 @@ items are destroyed), so `from_dict` downgrades it to `managed` and the editor
 does not offer it. Two-way writes both ends, so a read-only provider (MDBList,
 AniList without a token) is rejected at either position.
 
+**Pairs are the headline; the PMDB pipeline is the legacy path.** The Sync view
+and the dashboard both lead with pairs, and the original service→PublicMetaDB
+pipeline sits below them under "PublicMetaDB Pipeline". It is *not* deprecated
+and nothing about it changed — a pair can express everything it does, but
+existing profiles keep running on it. Do not re-order these back: two panels
+that do the same kind of thing read as one feature, and the one users should
+reach for has to come first.
+
+**A pair's `visibility` describes lists it creates, never lists that exist.**
+`SyncPair.visibility` is `private` (default) or `public` and is passed to
+`adapter.add()` only when the adapter sets `supports_visibility` — true for
+PublicMetaDB and Trakt, the only writable providers with a notion of list
+privacy, and the same flag hides the control in the pair editor everywhere else.
+Gating the *call* on the flag (`cross_sync._add_kwargs`) rather than widening
+every adapter signature keeps providers that ignore privacy — and their test
+doubles — out of it. Two things this must keep right: an unknown or missing
+value resolves to `private`, because publishing someone's watchlist over a typo
+is the one unacceptable failure; and a list that already exists is never
+re-flagged, so a pair writing into a list the user made private on Trakt does
+not make it public.
+
 **Sync pairs are additive by default.** `removal_mode` is `additive` (never deletes),
 `managed` (deletes only keys this pair previously wrote, so manual additions on
 the target survive — the same invariant as `pmdb_watchlist_managed_keys`), or

@@ -49,6 +49,7 @@ class _TraktClient:
         self.watchlist: list[dict] = []
         self.native_adds: list[list[dict]] = []
         self.custom_adds: list[tuple[str, str, list[dict]]] = []
+        self.created_privacy: list[str] = []
 
     def get_watchlist(self) -> list[dict]:
         return list(self.watchlist)
@@ -64,8 +65,11 @@ class _TraktClient:
     def get_personal_lists_metadata(self) -> list[dict]:
         return []
 
-    def get_or_create_personal_list(self, name: str, description: str = "") -> dict:
+    def get_or_create_personal_list(
+        self, name: str, description: str = "", privacy: str = "private",
+    ) -> dict:
         slug = name.lower().replace("syncmeta · simkl ", "simkl-").replace(" ", "-")
+        self.created_privacy.append(privacy)
         return {"user": "me", "slug": slug, "name": name}
 
 
@@ -121,6 +125,8 @@ class PlanToWatchRoutingTests(unittest.TestCase):
         self.assertEqual(trakt_client.native_adds, [])
         self.assertEqual(len(trakt_client.custom_adds), 1)
         self.assertEqual(trakt_client.custom_adds[0][:2], ("me", "simkl-completed"))
+        # A pair defaults to private, and the list it had to create follows it.
+        self.assertEqual(trakt_client.created_privacy, ["private"])
 
     def test_irrelevant_simkl_status_selection_does_not_fall_back_to_plan_to_watch(self) -> None:
         """A collection-only selection must not unexpectedly sync the default watchlist."""
