@@ -14,6 +14,7 @@ from urllib3.util.retry import Retry
 
 from .config import AniListConfig
 from . import fribb_client
+from .http_timeouts import _env_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ OAUTH_AUTHORIZE_URL = "https://anilist.co/api/v2/oauth/authorize"
 # AniList cannot redirect back to an arbitrary app, so its own "pin" endpoint is
 # used: the user authorises, AniList shows a code, and they paste it back here.
 OAUTH_PIN_REDIRECT_URI = "https://anilist.co/api/v2/oauth/pin"
-REQUEST_TIMEOUT = (5, 12)
+REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_ANILIST_READ_TIMEOUT", 20))
 _CANCEL_POLL_INTERVAL = 0.25
 
 # AniList statuses we care about

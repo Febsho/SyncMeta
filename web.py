@@ -21,7 +21,28 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, make_response, redirect, render_template, request, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
-from src.config import (
+from src.env_settings import SettingsError, SettingsStore, apply_overrides
+from src.env_settings import DEFAULT_SETTINGS_FILENAME as _SETTINGS_FILENAME
+from src.env_settings import describe as _describe_settings
+
+# ── environment bootstrap ────────────────────────────────────────────────────
+# This has to happen before the src modules below are imported: every tunable is
+# an `os.getenv` read into a module constant at import time, so a value that
+# arrives afterwards is simply never seen. `load_dotenv` used to run further
+# down, which is why .env could set web.py's constants but not sync_service's.
+_BASE_ENV = dict(os.environ)  # what the process was given, before .env/overrides
+load_dotenv(Path(__file__).resolve().parent / ".env")
+PROFILE_STORE_FILE = Path(
+    os.getenv("PROFILE_STORE_FILE", str(Path(__file__).resolve().parent / "data" / "profiles.json"))
+)
+_ENV_FILE_ENV = {k: v for k, v in os.environ.items() if k not in _BASE_ENV}
+_settings_store = SettingsStore(PROFILE_STORE_FILE.parent / _SETTINGS_FILENAME)
+apply_overrides(_settings_store)
+# The panel reports where each value came from, so it needs the environment as
+# it stood before the override layer was applied.
+_ENV_BEFORE_OVERRIDES = {**_BASE_ENV, **_ENV_FILE_ENV}
+
+from src.config import (  # noqa: E402
     AniListConfig,
     AppConfig,
     MdbListConfig,
@@ -65,8 +86,6 @@ from src.providers import (
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -77,9 +96,6 @@ log_capture.install(level=logging.INFO)
 logger = logging.getLogger("web")
 logger.setLevel(logging.INFO)
 
-PROFILE_STORE_FILE = Path(
-    os.getenv("PROFILE_STORE_FILE", str(Path(__file__).resolve().parent / "data" / "profiles.json"))
-)
 SCHEDULER_POLL_SECONDS = max(5, int(os.getenv("SYNCMETA_SCHEDULER_POLL_SECONDS", "5") or "5"))
 MAX_CONCURRENT_SYNCS = max(1, int(os.getenv("SYNCMETA_MAX_CONCURRENT_SYNCS", "1") or "1"))
 # Head start for the web tier before the scheduler claims anything. See
@@ -1558,8 +1574,17 @@ class ProfileScheduler:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="profile-scheduler", daemon=True)
         self._thread.start()
+
+    def stop(self) -> None:
+        """Ask the poll loop to end. It may still be inside a claim; that run
+        finishes rather than being torn down mid-sync."""
+        self._stop.set()
+
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def _run(self) -> None:
         # The scheduler is started lazily by the first HTTP request, and every
@@ -1591,9 +1616,13 @@ _scheduler = ProfileScheduler(_profile_store)
 _sync_runner = SyncRunner(MAX_CONCURRENT_SYNCS)
 
 
+def _scheduler_disabled() -> bool:
+    return str(os.getenv("DISABLE_PROFILE_SCHEDULER", "")).strip() in {"1", "true", "yes", "on"}
+
+
 def _ensure_scheduler_started() -> None:
     global _scheduler_started
-    if os.getenv("DISABLE_PROFILE_SCHEDULER") == "1":
+    if _scheduler_disabled():
         return
     with _scheduler_lock:
         if _scheduler_started:
@@ -1601,6 +1630,24 @@ def _ensure_scheduler_started() -> None:
         _sync_runner.start()
         _scheduler.start()
         _scheduler_started = True
+
+
+def _apply_scheduler_enabled() -> None:
+    """Start or stop the scheduler to match DISABLE_PROFILE_SCHEDULER now.
+
+    Without this, toggling the setting from the admin panel would only take
+    effect on the next restart, which is the opposite of what an emergency
+    "stop all automatic syncing" switch is for.
+    """
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_disabled():
+            _scheduler.stop()
+            _scheduler_started = False
+        else:
+            _sync_runner.start()
+            _scheduler.start()
+            _scheduler_started = True
 
 
 @app.before_request
@@ -3549,7 +3596,12 @@ def admin_dashboard():
         return _json_error("Admin panel is not configured. Set ADMIN_PASSWORD env var.", 404)
     if not _is_admin():
         return render_template("admin.html", view="login", error=None), 401
-    return render_template("admin.html", view="dashboard", stats=_admin_stats())
+    return render_template(
+        "admin.html",
+        view="dashboard",
+        stats=_admin_stats(),
+        settings=_describe_settings(_settings_store, _ENV_BEFORE_OVERRIDES),
+    )
 
 
 @app.route("/admin/login", methods=["POST"])
@@ -3581,6 +3633,136 @@ def admin_api_stats():
     if not _is_admin():
         return _json_error("Not authorized", 401)
     return jsonify(_admin_stats())
+
+
+def _live_apply_setting(key: str, value: str) -> bool:
+    """Apply a changed setting to the running process where that is possible.
+
+    Most tunables are captured into a module constant or a thread pool at import
+    time and genuinely cannot move until a restart — the panel says so per
+    setting rather than pretending otherwise. These few are read on every use,
+    so they can change now.
+    """
+    if key == "ADMIN_PASSWORD":
+        globals()["ADMIN_PASSWORD"] = value.strip()
+        return True
+    if key == "SITE_ACCESS_PASSWORD":
+        globals()["SITE_ACCESS_PASSWORD"] = value.strip()
+        return True
+    if key == "SYNCMETA_SCHEDULER_CLAIM_BATCH":
+        globals()["SCHEDULER_CLAIM_BATCH"] = max(1, int(value or "1"))
+        return True
+    if key == "DISABLE_PROFILE_SCHEDULER":
+        _apply_scheduler_enabled()
+        return True
+    return False
+
+
+@app.route("/admin/api/settings", methods=["GET"])
+def admin_api_settings():
+    if not ADMIN_PASSWORD:
+        return _json_error("Admin panel not configured", 404)
+    if not _is_admin():
+        return _json_error("Not authorized", 401)
+    return jsonify(_describe_settings(_settings_store, _ENV_BEFORE_OVERRIDES))
+
+
+@app.route("/admin/api/settings", methods=["POST"])
+def admin_api_settings_save():
+    if not ADMIN_PASSWORD:
+        return _json_error("Admin panel not configured", 404)
+    if not _is_admin():
+        return _json_error("Not authorized", 401)
+
+    body = request.get_json(silent=True) or {}
+    values = body.get("values")
+    if not isinstance(values, dict):
+        return _json_error("Expected a values object", 400)
+
+    try:
+        changed = _settings_store.set_many(values)
+    except SettingsError as exc:
+        return _json_error(str(exc), 400)
+    except OSError as exc:
+        return _json_error(f"Could not write {_settings_store.path}: {exc}", 500)
+
+    applied_live: list[str] = []
+    needs_restart: list[str] = []
+    for key, value in changed.items():
+        # An override that was cleared falls back to the environment value, which
+        # is what the process should go back to.
+        effective = value if value != "" else str(_ENV_BEFORE_OVERRIDES.get(key, "") or "")
+        if value == "":
+            os.environ.pop(key, None)
+            if effective:
+                os.environ[key] = effective
+        else:
+            os.environ[key] = value
+        if _live_apply_setting(key, effective):
+            applied_live.append(key)
+        else:
+            needs_restart.append(key)
+
+    if changed:
+        logger.info("Admin updated settings: %s", ", ".join(sorted(changed)))
+
+    response = jsonify({
+        "ok": True,
+        "changed": sorted(changed),
+        "applied_live": sorted(applied_live),
+        "needs_restart": sorted(needs_restart),
+        "settings": _describe_settings(_settings_store, _ENV_BEFORE_OVERRIDES),
+    })
+    if "SITE_ACCESS_PASSWORD" in changed and SITE_ACCESS_PASSWORD:
+        # The site gate covers /admin too, so turning it on from this panel
+        # would lock the admin out of the page they are standing on. They have
+        # just proved they know the password — they chose it — so hand this
+        # browser the cookie instead of bouncing it to /access.
+        return _with_access_cookie(response, _access_store.create("site-access"))
+    return response
+
+
+@app.route("/admin/api/settings/reset", methods=["POST"])
+def admin_api_settings_reset():
+    if not ADMIN_PASSWORD:
+        return _json_error("Admin panel not configured", 404)
+    if not _is_admin():
+        return _json_error("Not authorized", 401)
+
+    key = str((request.get_json(silent=True) or {}).get("key") or "").strip()
+    if key == "ADMIN_PASSWORD" and not str(_ENV_BEFORE_OVERRIDES.get(key, "") or "").strip():
+        # Nothing to fall back to: resetting would leave the panel with no
+        # password, which does not "restore the default" — it locks it out.
+        return _json_error(
+            "There is no ADMIN_PASSWORD in the environment to fall back to, so this "
+            "cannot be reset — set a new password instead.", 400,
+        )
+    try:
+        removed = _settings_store.reset(key)
+    except SettingsError as exc:
+        return _json_error(str(exc), 400)
+    except OSError as exc:
+        return _json_error(f"Could not write {_settings_store.path}: {exc}", 500)
+
+    needs_restart = False
+    if removed:
+        fallback = str(_ENV_BEFORE_OVERRIDES.get(key, "") or "")
+        os.environ.pop(key, None)
+        if fallback:
+            os.environ[key] = fallback
+        needs_restart = not _live_apply_setting(key, fallback)
+
+    response = jsonify({
+        "ok": True,
+        "removed": removed,
+        "needs_restart": needs_restart,
+        "settings": _describe_settings(_settings_store, _ENV_BEFORE_OVERRIDES),
+    })
+    if removed and key == "SITE_ACCESS_PASSWORD" and SITE_ACCESS_PASSWORD:
+        # Same as saving one: reverting to the compose value re-arms the gate
+        # in front of this very page.
+        return _with_access_cookie(response, _access_store.create("site-access"))
+    return response
 
 
 @app.route("/admin/api/repair-anime-cache", methods=["POST"])

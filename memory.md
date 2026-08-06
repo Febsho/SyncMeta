@@ -143,6 +143,22 @@ This file is a compact working memory for future code changes. Keep it current w
 - History is account-level only; a curated list has no watch dates.
 - `/sync/ratings`, `/sync/paused`, `/sync/dropped` exist but are not wired.
 
+## Admin Settings
+
+- `/admin` has a Settings section backed by `src/env_settings.py`.
+- Edits are NOT written to `.env` (host-side on Docker, and dotenv never
+  overrides an already-set variable). They go to `data/settings.json` and are
+  pushed into `os.environ` at the top of `web.py`, before the `src` imports.
+- Precedence: default < environment (.env/compose) < admin override.
+- Allow-list only. `SYNCMETA_MASTER_KEY`, `SYNCMETA_MASTER_KEY_FILE`,
+  `SYNCMETA_SESSION_SECRET` and `PROFILE_STORE_FILE` are shown as locked.
+- Secrets are write-only: blank means unchanged, and ADMIN_PASSWORD can never
+  end up empty.
+- Most settings need a restart and say so; a handful apply live.
+- The panel names environment variables SyncMeta does not read (e.g.
+  ENCRYPTION_KEY), which is otherwise invisible.
+- All read timeouts are env-tunable now (Trakt, SIMKL, MDBList, AniList, PMDB).
+
 ## Rate Limits And Retries
 
 - `src/rate_limit.py`: `retry_on_rate_limit` (writes retry ONLY on 429, never on

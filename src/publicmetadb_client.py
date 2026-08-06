@@ -13,9 +13,10 @@ from urllib3.util.retry import Retry
 from .config import PublicMetaDBConfig
 # Moved to the shared module so every provider can pace itself, not just this one.
 from .rate_limit import RateLimiter
+from .http_timeouts import _env_timeout
 
 logger = logging.getLogger(__name__)
-REQUEST_TIMEOUT = (5, 12)
+REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_PMDB_READ_TIMEOUT", 20))
 _CANCEL_POLL_INTERVAL = 0.25
 
 # Rate limit: 300 requests per 10 seconds

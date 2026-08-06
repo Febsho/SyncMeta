@@ -16,9 +16,10 @@ from urllib3.util.retry import Retry
 
 from .config import MdbListConfig
 from .rate_limit import RateLimiter, retry_on_rate_limit
+from .http_timeouts import _env_timeout
 
 logger = logging.getLogger(__name__)
-REQUEST_TIMEOUT = (5, 12)
+REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_MDBLIST_READ_TIMEOUT", 20))
 # MDBList meters per-day on the free tier and returns X-RateLimit-* headers.
 # This paces bursts; retry_on_rate_limit handles an actual 429 using those
 # headers, including the absolute X-RateLimit-Reset epoch MDBList sends.

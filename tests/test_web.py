@@ -1944,6 +1944,132 @@ class WebTests(unittest.TestCase):
         self.assertIn("XML checked", html)
         self.assertIn("Refresh interval", html)
 
+    # ── admin settings ────────────────────────────────────────────────────
+    def _admin_login(self) -> None:
+        web.ADMIN_PASSWORD = "secret"
+        self.client.post("/admin/login", data={"password": "secret"})
+
+    def _use_temp_settings(self) -> None:
+        from src.env_settings import SettingsStore
+        self._original_settings_store = web._settings_store
+        self._original_env_before = web._ENV_BEFORE_OVERRIDES
+        web._settings_store = SettingsStore(Path(self.tmpdir.name) / "settings.json")
+        web._ENV_BEFORE_OVERRIDES = {}
+        self.addCleanup(setattr, web, "_settings_store", self._original_settings_store)
+        self.addCleanup(setattr, web, "_ENV_BEFORE_OVERRIDES", self._original_env_before)
+
+    def test_settings_endpoints_require_admin(self) -> None:
+        web.ADMIN_PASSWORD = "secret"
+        self.assertEqual(self.client.get("/admin/api/settings").status_code, 401)
+        self.assertEqual(self.client.post("/admin/api/settings", json={"values": {}}).status_code, 401)
+        self.assertEqual(self.client.post("/admin/api/settings/reset", json={"key": "x"}).status_code, 401)
+
+    def test_settings_are_saved_and_reported_as_overrides(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+
+        saved = self.client.post("/admin/api/settings", json={
+            "values": {"SYNCMETA_TRAKT_READ_TIMEOUT": "45"},
+        })
+        data = saved.get_json()
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(data["changed"], ["SYNCMETA_TRAKT_READ_TIMEOUT"])
+        # It is read into a module constant at import, so it cannot move now.
+        self.assertEqual(data["needs_restart"], ["SYNCMETA_TRAKT_READ_TIMEOUT"])
+        self.assertEqual(os.environ["SYNCMETA_TRAKT_READ_TIMEOUT"], "45")
+        self.addCleanup(os.environ.pop, "SYNCMETA_TRAKT_READ_TIMEOUT", None)
+
+        row = next(r for r in self.client.get("/admin/api/settings").get_json()["settings"]
+                   if r["key"] == "SYNCMETA_TRAKT_READ_TIMEOUT")
+        self.assertEqual(row["source"], "override")
+        self.assertEqual(row["value"], "45")
+
+    def test_an_invalid_value_is_rejected_with_a_usable_message(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+
+        resp = self.client.post("/admin/api/settings", json={
+            "values": {"SYNCMETA_MAX_CONCURRENT_SYNCS": "500"},
+        })
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("maximum is 8", resp.get_json()["error"])
+        self.assertEqual(web._settings_store.overrides(), {})
+
+    def test_an_unlisted_variable_cannot_be_written(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+
+        resp = self.client.post("/admin/api/settings", json={
+            "values": {"SYNCMETA_MASTER_KEY": "attacker-supplied"},
+        })
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotEqual(os.environ.get("SYNCMETA_MASTER_KEY"), "attacker-supplied")
+
+    def test_a_live_setting_takes_effect_without_a_restart(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+
+        resp = self.client.post("/admin/api/settings", json={
+            "values": {"SITE_ACCESS_PASSWORD": "gate"},
+        })
+
+        self.assertEqual(resp.get_json()["applied_live"], ["SITE_ACCESS_PASSWORD"])
+        self.assertEqual(web.SITE_ACCESS_PASSWORD, "gate")
+        self.addCleanup(os.environ.pop, "SITE_ACCESS_PASSWORD", None)
+
+    def test_the_admin_password_cannot_be_reset_into_nothing(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+        self.client.post("/admin/api/settings", json={"values": {"ADMIN_PASSWORD": "newpass"}})
+        self.addCleanup(os.environ.pop, "ADMIN_PASSWORD", None)
+
+        resp = self.client.post("/admin/api/settings/reset", json={"key": "ADMIN_PASSWORD"})
+
+        # There is no environment value behind it, so a reset would leave the
+        # panel with no password at all — which disables it permanently.
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(web.ADMIN_PASSWORD, "newpass")
+
+    def test_resetting_falls_back_to_the_environment_value(self) -> None:
+        self._use_temp_settings()
+        web._ENV_BEFORE_OVERRIDES = {"SITE_ACCESS_PASSWORD": "from-compose"}
+        self._admin_login()
+        self.client.post("/admin/api/settings", json={"values": {"SITE_ACCESS_PASSWORD": "from-panel"}})
+        self.assertEqual(web.SITE_ACCESS_PASSWORD, "from-panel")
+
+        resp = self.client.post("/admin/api/settings/reset", json={"key": "SITE_ACCESS_PASSWORD"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["removed"])
+        self.assertEqual(web.SITE_ACCESS_PASSWORD, "from-compose")
+        self.addCleanup(os.environ.pop, "SITE_ACCESS_PASSWORD", None)
+
+    def test_saved_secrets_are_not_returned_to_the_browser(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+        self.client.post("/admin/api/settings", json={"values": {"SITE_ACCESS_PASSWORD": "topsecret"}})
+        self.addCleanup(os.environ.pop, "SITE_ACCESS_PASSWORD", None)
+
+        body = self.client.get("/admin/api/settings").get_data(as_text=True)
+        page = self.client.get("/admin").get_data(as_text=True)
+
+        self.assertNotIn("topsecret", body)
+        self.assertNotIn("topsecret", page)
+
+    def test_admin_dashboard_renders_the_settings_form(self) -> None:
+        self._use_temp_settings()
+        self._admin_login()
+
+        html = self.client.get("/admin").get_data(as_text=True)
+
+        self.assertIn("SYNCMETA_MAX_CONCURRENT_SYNCS", html)
+        self.assertIn("Network timeouts", html)
+        # Locked keys are shown so they are visibly not-editable, not hidden.
+        self.assertIn("SYNCMETA_MASTER_KEY", html)
+
     def test_status_summary_omits_verbose_error_arrays(self) -> None:
         profile = web._profile_store.create_profile("secret", {
             "simkl": {

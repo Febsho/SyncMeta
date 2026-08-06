@@ -257,6 +257,34 @@ back to the key — independent of the filter, the category boxes, and whether t
 provider's lists have loaded. Rendering only the ticked checkboxes made a saved
 selection look lost.
 
+**Admin settings are an override layer, not a `.env` writer.** `src/env_settings.py`
+holds an allow-list of editable variables; `/admin` renders it and
+`/admin/api/settings` writes it. It does **not** write `.env`, and must not be
+changed to: on Docker that file is on the host, the container gets its values
+through compose, and `load_dotenv` does not override an already-set variable —
+so an in-container `.env` write would be both ignored while running and lost on
+the next `up`. Overrides go to `data/settings.json` (the mounted volume) and
+`apply_overrides` pushes them into `os.environ` at the *top* of `web.py`, before
+the `src` imports — every tunable is an `os.getenv` read into a module constant
+at import time, so a value that arrives afterwards is never seen. That is also
+why `load_dotenv` moved up there: it used to run below the imports, where it
+could set `web.py`'s constants but not `sync_service`'s.
+
+Things this has to keep getting right: only keys in `SETTINGS` are writable
+(`SYNCMETA_MASTER_KEY` and `PROFILE_STORE_FILE` are in `LOCKED_KEYS` — shown as
+locked rather than hidden, because a value you cannot see is one you cannot
+debug); the whole batch validates before anything is written, so one bad field
+cannot half-apply a form; a blank secret means *unchanged*, never *cleared*,
+since the panel never shows the current value; `ADMIN_PASSWORD` can be neither
+cleared nor reset-to-nothing, which would lock the panel out permanently; and
+turning on `SITE_ACCESS_PASSWORD` hands the current browser an access cookie,
+because the site gate covers `/admin` too and would otherwise evict the admin
+from the page they just used. Most settings genuinely cannot apply until a
+restart and say so; `_live_apply_setting` covers the few read on every use.
+The panel also flags variables set in the environment that SyncMeta does not
+read (`ENCRYPTION_KEY` is the common one) — a misspelt secret is otherwise
+silently absent.
+
 **Reads may be retried automatically; writes may not.** `src/rate_limit.py`
 holds both halves of this, because urllib3's `Retry` takes one status list for
 every method and cannot express the difference.

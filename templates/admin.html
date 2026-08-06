@@ -19,7 +19,17 @@
     .nav-inner{max-width:1280px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:52px}
     .nav-brand{font-size:15px;font-weight:700;color:var(--z100);letter-spacing:-.3px;display:flex;align-items:center;gap:8px;text-decoration:none}
     .nav-badge{font-size:10px;font-weight:700;background:var(--accent);color:var(--white);padding:2px 8px;border-radius:4px;letter-spacing:.6px;text-transform:uppercase}
-    .nav-right{display:flex;align-items:center;gap:10px}
+    .nav-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+    /* Four controls do not fit a phone. Let the bar grow a row rather than push
+       Logout off the right edge and give the whole page a scrollbar. */
+    @media(max-width:640px){
+      nav{padding:0 14px}
+      .nav-inner{height:auto;padding:10px 0;flex-wrap:wrap;gap:8px}
+      /* .auto-badge is declared later in this sheet, so it needs the extra
+         specificity to lose to this rule. */
+      nav .auto-badge{display:none}
+      .btn{padding:7px 12px;font-size:12px}
+    }
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 16px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:opacity .15s,background .15s}
     .btn-ghost{background:rgba(255,255,255,.07);color:var(--z300)}
     .btn-ghost:hover{background:rgba(255,255,255,.13)}
@@ -118,6 +128,36 @@
     .status-ok{color:var(--green)} .status-err{color:var(--red)} .status-warn{color:var(--orange)}
     .dur-fast{color:var(--green)} .dur-med{color:var(--orange)} .dur-slow{color:var(--red)}
     .td-url{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--z400)}
+
+    /* ── SETTINGS ── */
+    .set-note{font-size:12px;color:var(--z500);line-height:1.6;margin-bottom:14px}
+    /* The settings path can be long and has no break opportunities, which is
+       enough on its own to give the whole page a horizontal scrollbar. */
+    .set-note code{font-family:ui-monospace,monospace;color:var(--z300);background:var(--z900);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+    .set-group{margin-bottom:6px}
+    .set-group-title{font-size:10px;font-weight:700;color:var(--z500);text-transform:uppercase;letter-spacing:.7px;padding:12px 0 8px}
+    .set-row{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:14px;align-items:start;padding:10px 0;border-top:1px solid rgba(255,255,255,.05)}
+    .set-group .set-row:first-of-type{border-top:none}
+    .set-name{font-size:13px;font-weight:600;color:var(--z100);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .set-key{font-family:ui-monospace,monospace;font-size:10px;color:var(--z600)}
+    .set-help{font-size:11.5px;color:var(--z500);line-height:1.55;margin-top:3px}
+    .set-control{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+    .set-control input[type=text],.set-control input[type=password],.set-control select{
+      width:100%;background:var(--z900);border:1px solid var(--z800);border-radius:7px;padding:8px 11px;
+      font-size:13px;color:var(--z100);outline:none;transition:border-color .15s;font-family:inherit}
+    .set-control input:focus,.set-control select:focus{border-color:var(--accent)}
+    .set-control input.dirty,.set-control select.dirty{border-color:var(--accent)}
+    .set-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--z600)}
+    .set-reset{background:none;border:none;color:var(--z500);font-size:10px;cursor:pointer;padding:0;text-decoration:underline;font-weight:600}
+    .set-reset:hover{color:var(--z300)}
+    .set-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .set-status{font-size:12px;color:var(--z500)}
+    .set-warn{background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.22);color:var(--orange);
+      font-size:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;line-height:1.6}
+    .set-locked{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+    .set-locked-item{background:var(--z900);border:1px solid var(--z800);border-radius:7px;padding:7px 11px;font-size:11px;color:var(--z500)}
+    .set-locked-item b{color:var(--z300);font-family:ui-monospace,monospace;font-weight:600;font-size:10.5px}
+    @media(max-width:640px){.set-row{grid-template-columns:minmax(0,1fr)}}
 
     /* ── MISC ── */
     .auto-badge{font-size:11px;color:var(--z500);display:flex;align-items:center;gap:6px}
@@ -331,6 +371,85 @@
     </div>
   </div>
 
+  <!-- SETTINGS -->
+  <div class="section" id="settings-section">
+    <div class="section-head">
+      <span class="section-title">Settings
+        <span class="section-count">environment</span>
+      </span>
+      <div class="set-bar">
+        <span class="set-status" id="set-status"></span>
+        <button class="btn btn-ghost" id="set-save-btn" onclick="saveSettings()" disabled>Save changes</button>
+      </div>
+    </div>
+    <div class="section-body">
+      <div class="set-note">
+        Changes are stored in <code>{{ settings.path }}</code> and applied over the
+        environment on every start, so they survive a container rebuild.
+        Precedence is <b>default → environment (.env / compose) → this panel</b>.
+        Most values are read once at startup; those are marked <b>restart</b> and
+        take effect after the container restarts.
+      </div>
+
+      {% if settings.unrecognised %}
+      <div class="set-warn">
+        These variables are set in the environment but SyncMeta does not read them:
+        {% for key in settings.unrecognised %}<b>{{ key }}</b>{% if not loop.last %}, {% endif %}{% endfor %}.
+        They have no effect — check the spelling against the names below.
+      </div>
+      {% endif %}
+
+      {% for group in settings.groups %}
+      <div class="set-group">
+        <div class="set-group-title">{{ group.label }}</div>
+        {% for s in settings.settings if s.group == group.id %}
+        <div class="set-row">
+          <div>
+            <div class="set-name">
+              {{ s.label }}
+              <span class="set-key">{{ s.key }}</span>
+              {% if s.restart_required %}<span class="badge badge-orange">restart</span>{% endif %}
+              {% if s.source == 'override' %}<span class="badge badge-purple">panel</span>
+              {% elif s.source == 'environment' %}<span class="badge badge-blue">env</span>{% endif %}
+            </div>
+            <div class="set-help">{{ s.help }}</div>
+          </div>
+          <div class="set-control">
+            {% if s.kind == 'bool' %}
+            <select data-setting="{{ s.key }}" data-initial="{{ s.value }}">
+              <option value="0" {% if s.value != '1' %}selected{% endif %}>No</option>
+              <option value="1" {% if s.value == '1' %}selected{% endif %}>Yes</option>
+            </select>
+            {% elif s.kind == 'secret' %}
+            <input type="password" data-setting="{{ s.key }}" data-initial="" autocomplete="new-password"
+                   placeholder="{% if s.is_set %}Set — type to replace{% else %}Not set{% endif %}">
+            {% else %}
+            <input type="text" inputmode="numeric" data-setting="{{ s.key }}" data-initial="{{ s.value }}"
+                   value="{{ s.value }}">
+            {% endif %}
+            <div class="set-meta">
+              <span>{% if s.kind != 'secret' %}default {{ s.default }}{% if s.minimum is not none %} · {{ s.minimum }}–{{ s.maximum }}{% endif %}{% endif %}</span>
+              {% if s.overridden %}
+              <button class="set-reset" onclick="resetSetting('{{ s.key }}')">reset</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+
+      {% if settings.locked %}
+      <div class="set-group-title" style="padding-top:18px">Not editable here</div>
+      <div class="set-locked">
+        {% for item in settings.locked %}
+        <div class="set-locked-item"><b>{{ item.key }}</b> — {{ item.reason }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
   <!-- API COUNTERS -->
   <div class="section">
     <div class="section-head"><span class="section-title">API Requests by Source</span></div>
@@ -463,7 +582,110 @@
 </div>
 
 <script>
-  setTimeout(() => location.reload(), 30000);
+  // The page reloads itself to refresh the stats. It must not do that while
+  // someone is part-way through the settings form — a reload would silently
+  // discard everything typed, including a password.
+  setInterval(() => { if (!settingsDirty()) location.reload(); }, 30000);
+
+  // ── Settings ─────────────────────────────────────────────────────────────
+  function settingInputs() {
+    return Array.from(document.querySelectorAll('[data-setting]'));
+  }
+
+  function settingsDirty() {
+    return settingInputs().some(el => el.value !== (el.dataset.initial || ''));
+  }
+
+  function refreshSettingsBar() {
+    const dirty = settingInputs().filter(el => el.value !== (el.dataset.initial || ''));
+    settingInputs().forEach(el => {
+      el.classList.toggle('dirty', el.value !== (el.dataset.initial || ''));
+    });
+    const btn = document.getElementById('set-save-btn');
+    const status = document.getElementById('set-status');
+    if (!btn || !status) return;
+    btn.disabled = dirty.length === 0;
+    status.textContent = dirty.length ? `${dirty.length} unsaved change${dirty.length > 1 ? 's' : ''}` : '';
+    status.style.color = dirty.length ? 'var(--orange)' : '';
+  }
+
+  document.addEventListener('input', e => {
+    if (e.target && e.target.dataset && e.target.dataset.setting) refreshSettingsBar();
+  });
+  document.addEventListener('change', e => {
+    if (e.target && e.target.dataset && e.target.dataset.setting) refreshSettingsBar();
+  });
+  window.addEventListener('beforeunload', e => {
+    if (settingsDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  async function saveSettings() {
+    const btn = document.getElementById('set-save-btn');
+    const status = document.getElementById('set-status');
+    const values = {};
+    settingInputs().forEach(el => {
+      if (el.value !== (el.dataset.initial || '')) values[el.dataset.setting] = el.value;
+    });
+    if (!Object.keys(values).length) return;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      const resp = await fetch('/admin/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({values}),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        status.textContent = data.error || 'Save failed';
+        status.style.color = 'var(--red)';
+        btn.disabled = false;
+        btn.textContent = 'Save changes';
+        return;
+      }
+      // Mark everything saved so the reload guard lets go, then reload to pick
+      // up the new source badges and reset links.
+      settingInputs().forEach(el => { el.dataset.initial = el.value; });
+      const restart = (data.needs_restart || []).length;
+      status.textContent = restart
+        ? `Saved — ${restart} setting${restart > 1 ? 's need' : ' needs'} a restart`
+        : 'Saved and applied';
+      status.style.color = restart ? 'var(--orange)' : 'var(--green)';
+      btn.textContent = 'Saved';
+      setTimeout(() => location.reload(), restart ? 2500 : 1200);
+    } catch (err) {
+      status.textContent = 'Save failed';
+      status.style.color = 'var(--red)';
+      btn.disabled = false;
+      btn.textContent = 'Save changes';
+      console.error(err);
+    }
+  }
+
+  async function resetSetting(key) {
+    const status = document.getElementById('set-status');
+    // A reset reloads the page, so anything else typed would be lost with it.
+    if (settingsDirty() && !confirm('Reset ' + key + '? Your other unsaved changes will be discarded.')) return;
+    try {
+      const resp = await fetch('/admin/api/settings/reset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key}),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        status.textContent = data.error || 'Reset failed';
+        status.style.color = 'var(--red)';
+        return;
+      }
+      settingInputs().forEach(el => { el.dataset.initial = el.value; });
+      location.reload();
+    } catch (err) {
+      status.textContent = 'Reset failed';
+      status.style.color = 'var(--red)';
+      console.error(err);
+    }
+  }
 
   // Live uptime counter
   (function(){

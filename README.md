@@ -120,6 +120,22 @@ start at once. Manual sync and dry run are always immediate.
 Only server-level settings belong in `.env`. API keys, list choices and sync
 rules are per profile in the web UI.
 
+Most of the variables below can also be edited in the admin panel
+(`/admin`, needs `ADMIN_PASSWORD`), which is the easier route on Docker: the
+`.env` file lives on the host, so there is nothing to edit from inside the
+container. Panel edits are stored in `data/settings.json` — beside
+`profiles.json`, on the mounted volume, so they survive a rebuild — and applied
+over the environment at startup. Precedence is:
+
+```
+built-in default  <  environment (.env / compose)  <  admin panel
+```
+
+Each setting shows where its current value came from, and whether it needs a
+restart to take effect. `SYNCMETA_MASTER_KEY`, `SYNCMETA_MASTER_KEY_FILE`,
+`SYNCMETA_SESSION_SECRET` and `PROFILE_STORE_FILE` are shown but deliberately
+not editable there — a typo in any of them is data loss, not a bad setting.
+
 Worker counts are clamped to the maximum shown; values above it are capped
 rather than rejected. Where the shipped `.env.example` sets something lower than
 the code default, both are listed.
@@ -183,6 +199,9 @@ Raise these on a slow or congested host, lower them to fail faster. Clamped to
 |---|---:|---|
 | `SYNCMETA_TRAKT_READ_TIMEOUT` | `20` | Read timeout for Trakt. Was effectively 6s, which large watchlists exceeded. |
 | `SYNCMETA_SIMKL_READ_TIMEOUT` | `20` | Read timeout for SIMKL. |
+| `SYNCMETA_MDBLIST_READ_TIMEOUT` | `20` | Read timeout for MDBList. |
+| `SYNCMETA_ANILIST_READ_TIMEOUT` | `20` | Read timeout for AniList. |
+| `SYNCMETA_PMDB_READ_TIMEOUT` | `20` | Read timeout for PublicMetaDB. |
 
 ### Logging and serving
 
