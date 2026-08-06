@@ -158,6 +158,39 @@ delete rather than fall through to a destructive default. Managed keys are scope
 per pair id, so duplicate ids would let two pairs delete each other's items —
 `_normalize_sync_pairs` assigns and de-duplicates them.
 
+**The Library is a local provider, and the hub.** `src/library_store.py` is
+SyncMeta's own store; `LibraryAdapter` exposes it as a provider so any service
+can sync into it and out of it. It is always writable — no credential, no rate
+limit — which is what makes it usable as the middle of a fan-in/fan-out. It is
+first in `PROVIDER_ORDER` and its adapter is built for every profile, so
+`_build_provider_adapters` takes a `profile_id`; a call site that forgets it
+silently drops Library from the pair editor.
+
+**One entry per series, seasons inside it.** This is the TVDB/Trakt shape and
+the only one in which SIMKL and AniList can agree: SIMKL lists an anime per
+season, AniList per cour, often with a different id each. `series_key()` is
+therefore *series*-level and TMDB-first — an anime-native id is the fallback so
+an unmapped AniList entry is still storable, but it is deliberately last, since
+keying on it would put two seasons of one show in two rows and lose the whole
+point. Identity merging is fill-only: a later source may add an id or title the
+first lacked but must never overwrite one, or the entry would flip between
+romaji and English on every run. Anime-ness is sticky for the same reason — a
+provider that does not model anime must not downgrade an entry another one
+already identified.
+
+**Watched state is per episode, stored sparsely.** `{season}x{episode}` keys, a
+movie at `0x0`. A show play with no episode number is *dropped*, never guessed:
+inventing one claims episodes nobody watched, which is exactly what SIMKL's
+aggregate counts would produce. Season 0 is specials and is kept.
+
+**"Anime" is a flag on a TMDB namespace, never a third namespace.**
+`src/media_kind.py` classifies into movie / show / anime / anime_movie. The
+namespace comes from TMDB (or Fribb's mapping key); the anime flag comes from
+anime-native ids or a source explicitly saying anime. Taking SIMKL's `anime`
+media type as a namespace is what made anime films into fake one-episode TV.
+An empty filter selection means everything, so an untouched filter never hides
+anything.
+
 **Cross-provider identity must be normalized before diffing.** Keys come from
 `providers.item_key` and are TMDB-based, but AniList reports only AniList/MAL
 ids. Keyed naively the same show yields two different keys, nothing ever matches,

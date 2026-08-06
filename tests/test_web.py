@@ -737,7 +737,9 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(data["pairs"], [])
         by_key = {p["key"]: p for p in data["providers"]}
-        self.assertEqual(set(by_key), {"trakt", "simkl", "anilist", "mdblist", "pmdb"})
+        # Library is always present: it is local, needs no credential, and is
+        # the hub the remote providers are meant to feed.
+        self.assertEqual(set(by_key), {"library", "trakt", "simkl", "anilist", "mdblist", "pmdb"})
         # This profile only has a PMDB key, so PMDB is configured and the rest
         # are reported as unconfigured rather than omitted.
         self.assertTrue(by_key["pmdb"]["configured"])
@@ -2069,6 +2071,118 @@ class WebTests(unittest.TestCase):
         self.assertIn("Network timeouts", html)
         # Locked keys are shown so they are visibly not-editable, not hidden.
         self.assertIn("SYNCMETA_MASTER_KEY", html)
+
+
+    # ── local library ─────────────────────────────────────────────────────
+    def _library_profile(self):
+        creds = _blank_credentials()
+        creds["pmdb"]["api_key"] = "pk"
+        creds["anilist"] = {"username": "someone", "access_token": "", "selected_statuses": ["CURRENT"]}
+        profile = web._profile_store.create_profile("pw", creds, {})
+        profile_id = profile["profile_id"]
+        self.client.post("/api/profile/login", json={"profile_id": profile_id, "password": "pw"})
+        store = web._library_store_for(profile_id)
+        store.add("watchlist", [
+            {"media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan", "season": 1, "anilist_id": 16498},
+            {"media_type": "tv", "tmdb_id": "1429", "title": "AoT S2", "season": 2, "anilist_id": 25777},
+            {"media_type": "movie", "tmdb_id": "128", "title": "Mononoke", "mal_id": 164},
+            {"media_type": "movie", "tmdb_id": "27205", "title": "Inception"},
+        ], source="simkl")
+        store.mark_watched([
+            {"media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan", "season": 1, "episode": 1},
+            {"media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan", "season": 2, "episode": 1},
+        ], source="trakt")
+        self.addCleanup(web._library_stores.pop, profile_id, None)
+        return profile_id, store
+
+    def test_library_entries_require_a_session(self) -> None:
+        self.assertEqual(self.client.post("/api/profile/library/entries", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/profile/library/entry", json={}).status_code, 401)
+
+    def test_two_seasons_of_one_anime_are_one_library_row(self) -> None:
+        self._library_profile()
+
+        data = self.client.post("/api/profile/library/entries", json={}).get_json()
+
+        self.assertEqual(data["total"], 3)
+        titles = sorted(row["title"] for row in data["entries"])
+        self.assertEqual(titles, ["Attack on Titan", "Inception", "Mononoke"])
+
+    def test_the_kind_filter_separates_anime_films_from_films(self) -> None:
+        self._library_profile()
+
+        anime_films = self.client.post(
+            "/api/profile/library/entries", json={"kinds": ["anime_movie"]},
+        ).get_json()
+        films = self.client.post(
+            "/api/profile/library/entries", json={"kinds": ["movie"]},
+        ).get_json()
+
+        self.assertEqual([row["title"] for row in anime_films["entries"]], ["Mononoke"])
+        self.assertEqual([row["title"] for row in films["entries"]], ["Inception"])
+
+    def test_the_section_filter_selects_watched_titles(self) -> None:
+        self._library_profile()
+
+        data = self.client.post(
+            "/api/profile/library/entries", json={"section": "history"},
+        ).get_json()
+
+        self.assertEqual([row["title"] for row in data["entries"]], ["Attack on Titan"])
+
+    def test_search_matches_titles(self) -> None:
+        self._library_profile()
+
+        data = self.client.post(
+            "/api/profile/library/entries", json={"query": "incep"},
+        ).get_json()
+
+        self.assertEqual([row["title"] for row in data["entries"]], ["Inception"])
+
+    def test_the_detail_view_lists_seasons_and_watched_episodes(self) -> None:
+        self._library_profile()
+
+        data = self.client.post(
+            "/api/profile/library/entry", json={"key": "tmdb:tv:1429"},
+        ).get_json()
+
+        self.assertEqual([season["season"] for season in data["seasons"]], [1, 2])
+        self.assertEqual(data["watched_total"], 2)
+        watched = [
+            episode for season in data["seasons"]
+            for episode in season["episodes"] if episode["watched"]
+        ]
+        self.assertEqual(len(watched), 2)
+
+    def test_the_detail_view_works_without_a_tmdb_key(self) -> None:
+        # Episode numbers and watched state are local; only names and stills
+        # need TMDB, so the view degrades rather than failing.
+        self._library_profile()
+
+        data = self.client.post(
+            "/api/profile/library/entry", json={"key": "tmdb:tv:1429"},
+        ).get_json()
+
+        self.assertFalse(data["tmdb_configured"])
+        self.assertEqual(data["seasons"][0]["episodes"][0]["name"], "Episode 1")
+
+    def test_an_unknown_key_is_a_404_not_an_empty_page(self) -> None:
+        self._library_profile()
+
+        response = self.client.post("/api/profile/library/entry", json={"key": "tmdb:tv:999999"})
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_library_is_offered_as_a_pair_provider(self) -> None:
+        profile_id, _store = self._library_profile()
+
+        data = self.client.post("/api/profile/pairs", json={}).get_json()
+
+        library = next(p for p in data["providers"] if p["key"] == "library")
+        self.assertTrue(library["configured"])
+        self.assertEqual(
+            set(library["writes"]), {"watchlist", "history", "collection"},
+        )
 
     def test_status_summary_omits_verbose_error_arrays(self) -> None:
         profile = web._profile_store.create_profile("secret", {

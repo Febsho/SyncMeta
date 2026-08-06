@@ -169,6 +169,25 @@ This file is a compact working memory for future code changes. Keep it current w
   ENCRYPTION_KEY), which is otherwise invisible.
 - All read timeouts are env-tunable now (Trakt, SIMKL, MDBList, AniList, PMDB).
 
+## Local Library
+
+- `src/library_store.py` + `LibraryAdapter` = SyncMeta's own store as a provider.
+  Always writable, no credential, first in PROVIDER_ORDER.
+- `_build_provider_adapters(config, profile_id=...)` — without profile_id the
+  Library adapter is not built and vanishes from the pair editor.
+- ONE ENTRY PER SERIES, seasons inside it (TVDB/Trakt shape). This is what
+  dedupes SIMKL's per-season and AniList's per-cour entries.
+- `series_key()` is TMDB-first; anime-native ids are a last-resort fallback.
+- Identity merge is fill-only; anime-ness is sticky.
+- Watched state is `{season}x{episode}` (movies `0x0`). A show play with no
+  episode number is dropped, not guessed.
+- `src/media_kind.py`: movie / show / anime / anime_movie. Anime is a flag on a
+  TMDB namespace, never a namespace of its own.
+- Endpoints: `/api/profile/library/entries` (filters + paging),
+  `/api/profile/library/entry` (seasons + per-episode watched state).
+- UI: Library view has My Library / PublicMetaDB tabs, kind + section filter
+  chips, search, poster grid, and a click-through detail overlay.
+
 ## Sync Pairs Are The Primary Model
 
 - The Sync view and the dashboard lead with pairs; the service->PMDB pipeline is

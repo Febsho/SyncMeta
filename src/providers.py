@@ -1276,5 +1276,91 @@ class MdbListAdapter(ProviderAdapter):
         return self._client.remove_sync_items(category, items)
 
 
-#: Stable provider ordering for UI listings.
-PROVIDER_ORDER = ("trakt", "simkl", "anilist", "mdblist", "pmdb")
+class LibraryAdapter(ProviderAdapter):
+    """SyncMeta's own local library, exposed as a provider.
+
+    It is the only provider that is always writable and never rate limited, so
+    it is the natural hub: point every service at it once and any other pair can
+    read from it without touching a remote API again. The store keeps one entry
+    per *series* with seasons inside, which is what lets SIMKL's per-season and
+    AniList's per-cour entries land on the same row instead of three.
+    """
+
+    key = "library"
+    label = "Library"
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    supports_list_selection = True
+    # Named lists inside the library would be a second grouping on top of the
+    # sections, with no provider on the other side able to address them.
+    supports_target_lists = False
+    supports_visibility = False
+
+    def __init__(self, store):
+        self._store = store
+
+    def can_write(self) -> bool:
+        return self._store is not None
+
+    def write_blocked_reason(self) -> str:
+        return "" if self.can_write() else "The local library is unavailable."
+
+    def list_sources(self) -> list[dict]:
+        return [
+            {"key": "section:watchlist", "label": "Library watchlist", "category": CATEGORY_WATCHLIST},
+            {"key": "section:collection", "label": "Library collection", "category": CATEGORY_COLLECTION},
+            {"key": "section:history", "label": "Library watch history", "category": CATEGORY_HISTORY},
+        ]
+
+    @staticmethod
+    def _section_for(category: str, source_lists: list[str] | None) -> str | None:
+        """Which library section a category should read.
+
+        A selection naming only *other* categories must read nothing rather than
+        falling back to the whole category — the same rule every other adapter
+        follows, and the one that stops a pair syncing far more than asked.
+        """
+        selected = [str(value).strip() for value in (source_lists or []) if str(value).strip()]
+        if selected:
+            wanted = f"section:{category}"
+            return category if wanted in selected else None
+        return category
+
+    def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        if category not in self.reads or self._store is None:
+            return []
+        section = self._section_for(category, source_lists)
+        if section is None:
+            return []
+        return self._store.fetch(section)
+
+    def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
+        if category not in self.writes or self._store is None:
+            return []
+        return self._store.fetch(category)
+
+    def add(
+        self, category: str, items: list[dict], target_list: str = "",
+        visibility: str = VISIBILITY_PRIVATE,
+    ) -> dict:
+        if self._store is None:
+            return self._unsupported(category, "write")
+        if category == CATEGORY_HISTORY:
+            return self._store.mark_watched(items, source="pair")
+        if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
+            return self._store.add(category, items, source="pair")
+        return self._unsupported(category, "write")
+
+    def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
+        if self._store is None:
+            return self._unsupported(category, "remove from")
+        if category == CATEGORY_HISTORY:
+            return self._store.unmark_watched(items)
+        if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
+            return self._store.remove(category, items)
+        return self._unsupported(category, "remove from")
+
+
+#: Stable provider ordering for UI listings. Library is first: it is the hub the
+#: others are meant to feed, and it is the one that always works.
+PROVIDER_ORDER = ("library", "trakt", "simkl", "anilist", "mdblist", "pmdb")

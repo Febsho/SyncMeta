@@ -78,11 +78,14 @@ from src.providers import (
     REMOVAL_MODE_LABELS,
     TWO_WAY_REMOVAL_MODES,
     AniListAdapter,
+    LibraryAdapter,
     MdbListAdapter,
     PmdbAdapter,
     SimklAdapter,
     TraktAdapter,
 )
+from src.library_store import LibraryStore
+from src.media_kind import ALL_KINDS, KIND_LABELS, matches_filter
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
 
@@ -658,7 +661,8 @@ def _profile_response(profile: dict, include_credentials: bool = False):
         private_profile = _profile_store.get_private_profile_by_id(payload.get("profile_id"))
         config = _config_from_profile(private_profile)
         payload["connection_readiness"] = _connection_readiness(
-            config, list((private_profile.get("connection_health") or {}).values())
+            config, list((private_profile.get("connection_health") or {}).values()),
+            profile_id=str(private_profile.get("profile_id") or ""),
         )
     except (KeyError, ValueError, TypeError):
         payload["connection_readiness"] = {"ready": False, "blockers": ["Check your connections."], "warnings": []}
@@ -823,6 +827,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 _build_provider_adapters(
                     config,
                     cancel_requested_callback=lambda: _profile_store.is_sync_cancel_requested(profile_id),
+                    profile_id=profile_id,
                 ),
                 dry_run=dry_run,
                 managed_keys=(profile.get("activity_state") or {}).get("pair_managed_keys") or {},
@@ -984,7 +989,27 @@ def _make_anime_root_resolver(config: AppConfig):
     return resolver
 
 
-def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) -> dict:
+#: One LibraryStore per profile, kept for the process lifetime. The store holds
+#: its data in memory and writes through, so rebuilding it per request would
+#: re-read the file on every call; keeping it also means one lock per profile
+#: rather than several racing writers.
+_library_stores: dict[str, LibraryStore] = {}
+_library_stores_lock = threading.Lock()
+
+
+def _library_store_for(profile_id: str) -> LibraryStore:
+    key = str(profile_id or "").strip()
+    with _library_stores_lock:
+        store = _library_stores.get(key)
+        if store is None:
+            store = LibraryStore(PROFILE_STORE_FILE.parent / "library" / f"{key}.json")
+            _library_stores[key] = store
+        return store
+
+
+def _build_provider_adapters(
+    config: AppConfig, cancel_requested_callback=None, profile_id: str = "",
+) -> dict:
     """Build the provider adapters available for cross-service sync pairs.
 
     Only services with usable credentials are included, so a pair referencing an
@@ -992,6 +1017,11 @@ def _build_provider_adapters(config: AppConfig, cancel_requested_callback=None) 
     provider may be *written* to is a separate question the adapter answers.
     """
     adapters: dict = {}
+
+    if profile_id:
+        # Always available: it is local, needs no credential, and is the hub the
+        # other providers are meant to feed.
+        adapters["library"] = LibraryAdapter(_library_store_for(profile_id))
 
     if config.simkl.client_id and config.simkl.access_token:
         adapters["simkl"] = SimklAdapter(
@@ -1035,6 +1065,7 @@ def _sync_pairs_from_config(config: AppConfig) -> list:
 
 
 PROVIDER_LABELS = {
+    "library": "Library",
     "trakt": "Trakt",
     "simkl": "SIMKL",
     "anilist": "AniList",
@@ -1077,9 +1108,9 @@ def _source_blocked_reason(config: AppConfig, key: str) -> str:
     return ""
 
 
-def _pair_capabilities(config: AppConfig) -> dict:
+def _pair_capabilities(config: AppConfig, profile_id: str = "") -> dict:
     """Provider capability report for the pair editor."""
-    adapters = _build_provider_adapters(config)
+    adapters = _build_provider_adapters(config, profile_id=profile_id)
     providers = []
     for key in PROVIDER_ORDER:
         adapter = adapters.get(key)
@@ -1136,7 +1167,7 @@ def _pair_capabilities(config: AppConfig) -> dict:
     }
 
 
-def _connection_readiness(config: AppConfig, checks: list[dict]) -> dict:
+def _connection_readiness(config: AppConfig, checks: list[dict], profile_id: str = "") -> dict:
     by_provider = {row.get("provider"): row for row in checks if isinstance(row, dict)}
     blockers: list[str] = []
     warnings: list[str] = []
@@ -1153,7 +1184,7 @@ def _connection_readiness(config: AppConfig, checks: list[dict]) -> dict:
     if not readable_sources:
         blockers.append("Connect and verify at least one sync source.")
 
-    adapters = _build_provider_adapters(config)
+    adapters = _build_provider_adapters(config, profile_id=profile_id)
     pair_service = CrossSyncService(adapters)
     for pair in _sync_pairs_from_config(config):
         if not pair.enabled:
@@ -2503,7 +2534,10 @@ def api_profile_connections_check():
     config_profile = copy.deepcopy(private_profile)
     config_profile["credentials"] = credentials
     config = _config_from_profile(config_profile)
-    readiness = _connection_readiness(config, list(all_health.values()))
+    readiness = _connection_readiness(
+        config, list(all_health.values()),
+        profile_id=str(private_profile.get("profile_id") or ""),
+    )
     return jsonify({"checks": checks, "readiness": readiness})
 
 
@@ -2605,6 +2639,203 @@ def _enrich_library_items(items: list[dict], tmdb_api_key: str) -> tuple[list[di
             item["year"] = details["year"]
             item["poster_url"] = details["poster_url"]
     return items, ""
+
+
+# ── Local Library ─────────────────────────────────────────────────────────────
+#
+# The Library is SyncMeta's own store rather than a view onto PublicMetaDB, so
+# these endpoints never touch a remote API except to enrich with TMDB posters.
+# That is the point: it answers "what do I have" without asking anyone.
+
+#: Entries per page. A library of a few thousand titles must not be shipped in
+#: one response, and TMDB enrichment is per-item work.
+LIBRARY_PAGE_SIZE = 60
+
+
+def _library_entry_row(entry: dict) -> dict:
+    """One entry, flattened for the browser. Watched state is summarised, not sent
+    in full — a long-running show has hundreds of episodes and the grid only
+    needs the counts."""
+    watched = entry.get("watched") or {}
+    seasons = entry.get("seasons") or {}
+    return {
+        "key": entry.get("key") or "",
+        "title": entry.get("title") or "",
+        "year": entry.get("year"),
+        "kind": entry.get("kind") or "show",
+        "media_type": entry.get("media_type") or "tv",
+        "tmdb_id": entry.get("tmdb_id"),
+        "sections": sorted((entry.get("sections") or {}).keys()),
+        "sources": list(entry.get("sources") or []),
+        "watched_count": len(watched),
+        "season_count": len(seasons),
+        "updated_at": entry.get("updated_at"),
+    }
+
+
+@app.route("/api/profile/library/entries", methods=["POST"])
+def api_profile_library_entries():
+    """The local library, filtered by kind and section."""
+    private_profile = _current_private_profile()
+    if not private_profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    profile_id = str(private_profile.get("profile_id") or "")
+    store = _library_store_for(profile_id)
+
+    body = request.get_json(silent=True) or {}
+    kinds = body.get("kinds") or []
+    section = str(body.get("section") or "").strip().lower()
+    query = str(body.get("query") or "").strip().lower()
+    try:
+        page = max(1, int(body.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+
+    rows = []
+    for entry in store.entries():
+        if not matches_filter(entry.get("kind") or "show", kinds):
+            continue
+        if section:
+            if section == "history":
+                if not entry.get("watched"):
+                    continue
+            elif section not in (entry.get("sections") or {}):
+                continue
+        if query and query not in str(entry.get("title") or "").lower():
+            continue
+        rows.append(_library_entry_row(entry))
+
+    rows.sort(key=lambda row: (str(row["title"]).lower(), row.get("year") or 0))
+    total = len(rows)
+    start = (page - 1) * LIBRARY_PAGE_SIZE
+    page_rows = rows[start:start + LIBRARY_PAGE_SIZE]
+
+    credentials = normalize_credentials(private_profile.get("credentials"))
+    tmdb_key = credentials["tmdb"]["api_key"]
+    page_rows, tmdb_error = _enrich_library_items(page_rows, tmdb_key)
+
+    return jsonify({
+        "entries": page_rows,
+        "total": total,
+        "page": page,
+        "page_size": LIBRARY_PAGE_SIZE,
+        "counts": store.counts(),
+        "kinds": [{"key": key, "label": KIND_LABELS[key]} for key in ALL_KINDS],
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+    })
+
+
+@app.route("/api/profile/library/entry", methods=["POST"])
+def api_profile_library_entry():
+    """One title in full: its seasons, and which episodes are watched.
+
+    Episode names and stills come from TMDB one season at a time, the same shape
+    the watch-history breakdown uses. Without a TMDB key the endpoint still
+    answers — episode numbers and watched state are local — so the detail view
+    degrades rather than failing.
+    """
+    private_profile = _current_private_profile()
+    if not private_profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    store = _library_store_for(str(private_profile.get("profile_id") or ""))
+
+    key = str((request.get_json(silent=True) or {}).get("key") or "").strip()
+    entry = store.entry(key)
+    if not entry:
+        return _json_error("Not in your library", 404)
+
+    watched = entry.get("watched") or {}
+    watched_by_season: dict[int, dict[int, str]] = {}
+    for slot, watched_at in watched.items():
+        season_text, _, episode_text = str(slot).partition("x")
+        try:
+            season_number = int(season_text)
+            episode_number = int(episode_text)
+        except (TypeError, ValueError):
+            continue
+        watched_by_season.setdefault(season_number, {})[episode_number] = watched_at
+
+    row = _library_entry_row(entry)
+    credentials = normalize_credentials(private_profile.get("credentials"))
+    tmdb_key = credentials["tmdb"]["api_key"]
+    enriched, tmdb_error = _enrich_library_items([row], tmdb_key)
+    row = enriched[0] if enriched else row
+
+    seasons = []
+    tmdb_id = entry.get("tmdb_id")
+    if entry.get("media_type") == "movie":
+        seasons.append({
+            "season": 0,
+            "label": "Film",
+            "episodes": [{
+                "episode": 0,
+                "name": row.get("title") or entry.get("title") or "",
+                "watched": "0x0" in watched,
+                "watched_at": watched.get("0x0", ""),
+                "still_url": "",
+            }],
+        })
+    else:
+        known_seasons = sorted({
+            *(int(number) for number in (entry.get("seasons") or {}) if str(number).lstrip("-").isdigit()),
+            *watched_by_season.keys(),
+        })
+        client = None
+        if tmdb_key and str(tmdb_id or "").strip().isdigit():
+            try:
+                client = TmdbClient(tmdb_key)
+            except Exception:
+                client = None
+        for season_number in known_seasons:
+            # get_season_episodes returns {episode_number: {...}} — one request
+            # per season, not per episode.
+            episodes_meta: dict[int, dict] = {}
+            if client is not None:
+                try:
+                    episodes_meta = client.get_season_episodes(int(tmdb_id), season_number) or {}
+                except TmdbError as exc:
+                    tmdb_error = tmdb_error or str(exc)
+                except Exception:
+                    logger.debug("Library detail: TMDB season fetch failed", exc_info=True)
+            season_watched = watched_by_season.get(season_number, {})
+            episodes = []
+            for number, meta in sorted(episodes_meta.items()):
+                episodes.append({
+                    "episode": number,
+                    "name": meta.get("name") or f"Episode {number}",
+                    "air_date": meta.get("air_date") or "",
+                    "still_url": meta.get("still_url") or "",
+                    "watched": number in season_watched,
+                    "watched_at": season_watched.get(number, ""),
+                })
+            # Episodes watched but unknown to TMDB (or with no key at all) still
+            # have to appear, or the view would claim they were never watched.
+            known_numbers = {episode["episode"] for episode in episodes}
+            for number in sorted(season_watched):
+                if number not in known_numbers:
+                    episodes.append({
+                        "episode": number,
+                        "name": f"Episode {number}",
+                        "air_date": "",
+                        "still_url": "",
+                        "watched": True,
+                        "watched_at": season_watched[number],
+                    })
+            episodes.sort(key=lambda episode: episode["episode"] or 0)
+            seasons.append({
+                "season": season_number,
+                "label": "Specials" if season_number == 0 else f"Season {season_number}",
+                "episodes": episodes,
+            })
+
+    return jsonify({
+        "entry": row,
+        "seasons": seasons,
+        "watched_total": len(watched),
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+    })
 
 
 @app.route("/api/profile/library/overview", methods=["POST"])
@@ -3100,7 +3331,7 @@ def api_profile_pairs():
 
     config = _config_from_profile(private_profile)
     pairs = []
-    adapters = _build_provider_adapters(config)
+    adapters = _build_provider_adapters(config, profile_id=profile_id)
     service = CrossSyncService(adapters)
     # Last outcome per pair, so the editor can show what a pair actually did
     # instead of only what it is configured to do.
@@ -3117,7 +3348,7 @@ def api_profile_pairs():
         entry["next_sync_at"] = schedule.get("next_sync_at")
         pairs.append(entry)
 
-    return jsonify({"pairs": pairs, **_pair_capabilities(config)})
+    return jsonify({"pairs": pairs, **_pair_capabilities(config, profile_id=profile_id)})
 
 
 @app.route("/api/profile/pairs/lists", methods=["POST"])
@@ -3141,7 +3372,7 @@ def api_profile_pairs_lists():
     except KeyError:
         return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
 
-    adapters = _build_provider_adapters(_config_from_profile(private_profile))
+    adapters = _build_provider_adapters(_config_from_profile(private_profile), profile_id=profile_id)
     adapter = adapters.get(provider)
     if adapter is None:
         return jsonify({"provider": provider, "lists": [], "results": []})
@@ -3254,7 +3485,7 @@ def api_profile_pairs_run():
     if not background:
         activity_state = private_profile.get("activity_state") or {}
         service = CrossSyncService(
-            _build_provider_adapters(config), dry_run=dry_run,
+            _build_provider_adapters(config, profile_id=profile_id), dry_run=dry_run,
             managed_keys=activity_state.get("pair_managed_keys") or {},
             status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
         )

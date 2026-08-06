@@ -53,6 +53,7 @@ creates or reuses, rather than being flattened into Trakt Collection.
 | AniList | Lists by status | only with an access token |
 | MDBList | Your lists and public lists, watchlist, collection, watch history | yes, with an API key or OAuth |
 | PublicMetaDB | Watchlist and lists | yes |
+| Library (local) | Watchlist, collection, watch history | yes, always |
 
 **Watch history and resume progress.** Optional and off by default. Watch
 history can come from SIMKL or Trakt; resume progress is Trakt only. History is
@@ -77,8 +78,17 @@ using the Fribb anime-lists data, with sequel seasons resolved back to the root
 series. Anything it cannot match with confidence is listed as unresolved for you
 to map by hand rather than guessed at.
 
-**Library.** Browse what SyncMeta has put in PublicMetaDB, with posters and
-titles if you add a free TMDB API key. Without one it still works and shows ids.
+**Library.** SyncMeta's own local store, and a sync target like any other
+service — point every service at it once and any other pair can read from it
+without touching a remote API again. It holds **one entry per series with the
+seasons inside it**, the shape Trakt and TVDB use, which is what makes SIMKL's
+per-season anime entries and AniList's per-cour entries land on the same row
+instead of three. Filter by **movies, shows, anime and anime films** (anime is
+tracked as a flag on the TMDB type, so an anime film is a film), by watchlist /
+collection / watched, or search by title. Click a title to see its seasons and
+exactly which episodes are watched. Posters, titles and episode names need a
+free TMDB API key; without one it still works and shows ids and episode numbers.
+The PublicMetaDB browser is still there on its own tab.
 
 **Diagnostics.** Per-list results, row-level errors, failed and unresolved
 samples, timings, and the last 25 detailed run records. A dry run previews
