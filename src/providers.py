@@ -1361,6 +1361,31 @@ class LibraryAdapter(ProviderAdapter):
         return self._unsupported(category, "remove from")
 
 
-#: Stable provider ordering for UI listings. Library is first: it is the hub the
-#: others are meant to feed, and it is the one that always works.
-PROVIDER_ORDER = ("library", "trakt", "simkl", "anilist", "mdblist", "pmdb")
+#: Every provider, in the order the UI lists them. Library is first: it is the
+#: hub the others are meant to feed, and it is the one that always works.
+#:
+#: This tuple is the *only* place a provider is enrolled. The order, the key
+#: lookup and the labels are all derived from it, because the alternative —
+#: a second hand-written mapping somewhere else — is what let `/pairs/save`
+#: reject every Library pair as an "unknown provider" while the pair editor
+#: happily offered Library at both ends.
+_ADAPTER_CLASSES = (
+    LibraryAdapter,
+    TraktAdapter,
+    SimklAdapter,
+    AniListAdapter,
+    MdbListAdapter,
+    PmdbAdapter,
+)
+
+#: provider key -> adapter class. Class attributes (`reads`, `writes`,
+#: `supports_target_lists`, ...) are enough to validate a pair, so callers that
+#: only need capabilities do not have to build a credentialed instance.
+ADAPTER_TYPES: dict[str, type[ProviderAdapter]] = {
+    cls.key: cls for cls in _ADAPTER_CLASSES
+}
+
+PROVIDER_ORDER = tuple(ADAPTER_TYPES)
+
+#: Display names, taken from the adapters so a provider is named once.
+PROVIDER_LABELS = {key: cls.label for key, cls in ADAPTER_TYPES.items()}

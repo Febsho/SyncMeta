@@ -43,6 +43,12 @@
     .card-label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--label);margin-bottom:10px;font-weight:400}
     .card-value{font-size:26px;font-weight:500;color:var(--z100);letter-spacing:-.025em;line-height:1.1}
     .card-sub{font-size:11.5px;color:var(--label);margin-top:5px}
+    /* A tile that opens something. Three inert tiles beside one clickable tile
+       that looks identical is the problem this solves; the hover lift is the
+       same one .svc-card uses, so a card behaves the same wherever it appears. */
+    .card-actionable{cursor:pointer;transition:border-color .15s,background .15s}
+    .card-actionable:hover{border-color:var(--z600)}
+    .card-actionable:focus-visible{outline:2px solid var(--z600);outline-offset:2px}
     .panel{overflow:hidden;margin-bottom:20px}
     .panel-header{padding:16px 20px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px;font-weight:400;letter-spacing:.1em;text-transform:uppercase;color:var(--z300);display:flex;align-items:center;justify-content:space-between;gap:10px}
     .panel-body{padding:20px}
@@ -157,6 +163,10 @@
     .pair-cap-read .pair-cap-dot{background:var(--orange);box-shadow:0 0 0 3px rgba(251,191,36,.12)}
     .pair-card{border:1px solid var(--line);border-radius:12px;background:var(--z950);margin-bottom:14px;overflow:hidden}
     .pair-card.is-disabled{opacity:.62}
+    /* The card the last save was rejected for. Colour is reserved for status,
+       and a refused save is one — the toast says what is wrong, this says
+       where. */
+    .pair-card.is-invalid{border-color:rgba(248,113,113,.45)}
     /* Collapsed by default: a pair is ~600px of controls and two of them buried
        the service pipelines above. Same idiom as .pipeline-card so the Sync view
        has one collapse behaviour, not two. Plain display toggling rather than
@@ -382,6 +392,9 @@
     /* Composition of what was fetched, unlike the old bar which showed the
        resolve rate and so sat at ~100% for every row regardless of outcome. */
     .svc-bar{display:flex;height:2px;overflow:hidden;background:var(--z800)}
+    /* Share column: the bar sits with the number rather than replacing it. */
+    .share-cell{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+    .share-bar{width:72px;flex:none;border-radius:1px}
     .svc-bar span{display:block;height:100%}
     /* Activity cards reuse the service card, minus the click affordance. */
     .svc-card-static{cursor:default}
@@ -826,7 +839,7 @@
             <div class="page-sub" id="sync-pairs-sub">Sync pairs move items between any two services. The built-in PublicMetaDB pipeline is below.</div>
           </div>
         </div>
-        <div class="cards" id="sync-cards"></div>
+        <div class="cards activity-cards" id="sync-cards" style="margin-bottom:20px"></div>
 
         <div class="panel">
           <!-- The run actions live in this header rather than the page topbar.
@@ -4064,15 +4077,35 @@
         .replace(/'/g, '&#39;');
     }
 
+    // One builder for both states. The no-data branch used to carry its own copy
+    // of the four tiles, which is two things to keep in step for one row.
+    function siteStatsCardsHtml(stats) {
+      const totals = (stats && stats.totals) || {};
+      const last24h = (stats && stats.last_24h) || {};
+      const added = last24h.added || 0;
+      const tiles = [
+        ['Profiles', totals.profiles || 0, stats
+          ? `${totals.profiles_with_sync || 0} with at least one completed sync`
+          : 'No data', ''],
+        ['Current Lists', totals.current_synced_lists || 0, stats
+          ? `${totals.managed_lists || 0} managed across all users`
+          : '0 managed', ''],
+        ['Sync Runs', totals.sync_runs || 0, stats
+          ? `${totals.profiles_syncing_now || 0} running right now`
+          : 'All time', ''],
+        ['Added (24h)', added, stats
+          ? `${last24h.removed || 0} removed in the same window`
+          : 'Waiting for activity', added > 0 ? 'c-green' : ''],
+      ];
+      return tiles.map(([label, value, sub, valueClass]) => `
+        <div class="card"><div class="card-label">${esc(label)}</div><div class="card-value ${
+          stats ? valueClass : 'c-dim'}">${value}</div><div class="card-sub">${esc(sub)}</div></div>`).join('');
+    }
+
     function renderSiteStats(stats) {
       lastSiteStats = stats || null;
       if (!stats) {
-        el('site-stats-cards').innerHTML = `
-          <div class="card"><div class="card-label">Profiles</div><div class="card-value">0</div><div class="card-sub">No data</div></div>
-          <div class="card"><div class="card-label">Current Lists</div><div class="card-value">0</div><div class="card-sub">0 managed</div></div>
-          <div class="card"><div class="card-label">Sync Runs</div><div class="card-value">0</div><div class="card-sub">All time</div></div>
-          <div class="card"><div class="card-label">Added (24h)</div><div class="card-value">0</div><div class="card-sub">Waiting for activity</div></div>
-        `;
+        el('site-stats-cards').innerHTML = siteStatsCardsHtml(null);
         el('site-stats-time').textContent = '';
         el('site-stats-sources').innerHTML = '<div class="empty">Site stats are unavailable.</div>';
         el('site-stats-window').innerHTML = '<div class="empty">Site stats are unavailable.</div>';
@@ -4083,19 +4116,19 @@
       const sourceUsage = stats.source_usage || {};
       const last24h = stats.last_24h || {};
 
-      el('site-stats-cards').innerHTML = `
-        <div class="card"><div class="card-label">Profiles</div><div class="card-value">${totals.profiles || 0}</div><div class="card-sub">${totals.profiles_with_sync || 0} with at least one completed sync</div></div>
-        <div class="card"><div class="card-label">Current Lists</div><div class="card-value">${totals.current_synced_lists || 0}</div><div class="card-sub">${totals.managed_lists || 0} managed across all users</div></div>
-        <div class="card"><div class="card-label">Sync Runs</div><div class="card-value">${totals.sync_runs || 0}</div><div class="card-sub">${totals.profiles_syncing_now || 0} running right now</div></div>
-        <div class="card"><div class="card-label">Added (24h)</div><div class="card-value" style="color:${(last24h.added || 0) > 0 ? 'var(--green)' : 'var(--z100)'}">${last24h.added || 0}</div><div class="card-sub">${last24h.removed || 0} removed in the same window</div></div>
-      `;
+      el('site-stats-cards').innerHTML = siteStatsCardsHtml(stats);
       el('site-stats-time').textContent = stats.generated_at ? `Updated ${timeAgo(stats.generated_at)}` : '';
       el('site-stats-sources').innerHTML = `<div class="table-scroll"><table><thead><tr><th>Source</th><th class="num">Profiles Using It</th><th class="num">Share</th></tr></thead><tbody>${[
         ['SIMKL', sourceUsage.simkl || 0],
         ['AniList', sourceUsage.anilist || 0],
         ['Trakt', sourceUsage.trakt || 0],
         ['MDBList', sourceUsage.mdblist || 0],
-      ].map(([label, count]) => `<tr><td>${label}</td><td class="num">${count}</td><td class="num">${(totals.profiles || 0) ? Math.round((count / totals.profiles) * 100) : 0}%</td></tr>`).join('')}</tbody></table></div>`;
+      ].map(([label, count]) => {
+        const share = (totals.profiles || 0) ? Math.round((count / totals.profiles) * 100) : 0;
+        // The same 2px bar the service cards use, not a second chart idiom.
+        return `<tr><td>${label}</td><td class="num">${count}</td>
+          <td class="num"><div class="share-cell"><span class="svc-bar share-bar"><span style="width:${share}%;background:var(--z600)"></span></span>${share}%</div></td></tr>`;
+      }).join('')}</tbody></table></div>`;
       // The backend already computes a run-outcome breakdown and a duplicate
       // count; both were dropped, leaving a bare "sync runs" number with no
       // indication of how many of those runs actually succeeded.
@@ -5039,8 +5072,8 @@
       el('cards').innerHTML = `
         <div class="card"><div class="card-label">Last Sync</div><div class="card-value">Never</div><div class="card-sub">No profile loaded</div></div>
         <div class="card"><div class="card-label">Items Fetched</div><div class="card-value">0</div><div class="card-sub">0 resolved</div></div>
-        <div class="card"><div class="card-label">Added</div><div class="card-value" style="color:var(--z600)">0</div><div class="card-sub">0 removed</div></div>
-        <div class="card"><div class="card-label">Issues</div><div class="card-value" style="color:var(--z600)">0</div><div class="card-sub">Waiting for a saved profile</div></div>
+        <div class="card"><div class="card-label">Added</div><div class="card-value c-dim">0</div><div class="card-sub">0 removed</div></div>
+        <div class="card"><div class="card-label">Issues</div><div class="card-value c-dim">0</div><div class="card-sub">Waiting for a saved profile</div></div>
       `;
       el('activity-panel').classList.add('hidden');
       el('activity-cards').innerHTML = '';
@@ -5500,8 +5533,10 @@
       el('cards').innerHTML = `
         <div class="card"><div class="card-label">Last Sync</div><div class="card-value">${profile.last_sync ? timeAgo(profile.last_sync) : 'Never'}</div><div class="card-sub">${lastSyncSub}</div></div>
         <div class="card"><div class="card-label">Items Fetched</div><div class="card-value">${totals.fetched}</div><div class="card-sub">${totals.resolved} resolved</div></div>
-        <div class="card"><div class="card-label">Added</div><div class="card-value" style="color:${totals.added > 0 ? 'var(--green)' : 'var(--z100)'}">${totals.added}</div><div class="card-sub" style="color:${totals.removed > 0 ? 'var(--red)' : 'var(--z500)'}">${totals.removed} removed</div></div>
-        <div class="card" style="${totals.unresolved > 0 ? 'cursor:pointer' : ''}" id="card-issues" title="${totals.unresolved > 0 ? 'Click to view unresolved items' : ''}"><div class="card-label">Issues</div><div class="card-value" style="color:${totals.unresolved + totals.errors > 0 ? 'var(--orange)' : 'var(--z600)'}">${totals.unresolved + totals.errors}</div><div class="card-sub">${totals.unresolved} unresolved${totals.unresolved > 0 ? ' — click to view' : ''}, ${totals.errors} errors</div></div>
+        <div class="card"><div class="card-label">Added</div><div class="card-value ${totals.added > 0 ? 'c-green' : ''}">${totals.added}</div><div class="card-sub ${totals.removed > 0 ? 'c-red' : ''}">${totals.removed} removed</div></div>
+        <div class="card card-actionable" id="card-issues" role="button" tabindex="0"
+             title="Open the issues panel"><div class="card-label">Issues</div><div class="card-value ${
+               totals.unresolved + totals.errors > 0 ? 'c-orange' : 'c-dim'}">${totals.unresolved + totals.errors}</div><div class="card-sub">${totals.unresolved} unresolved · ${totals.errors} errors</div></div>
       `;
 
       updateLiveActivityPanel(profile);
@@ -5511,12 +5546,22 @@
       renderAnimeHealth(profile);
       renderDryRunPreview(profile, results);
 
-      // Wire Issues card to open the unresolved panel
+      // The Issues card opens the panel below — the unresolved tab when there is
+      // something to resolve, errors otherwise. It has always been clickable in
+      // both cases, but only *looked* clickable in one, so the affordance now
+      // rides on the class and the keyboard gets the same door as the mouse.
       const issuesCard = el('card-issues');
-      if (issuesCard && totals.unresolved > 0) {
-        issuesCard.onclick = () => { switchIssuesTab('unresolved'); fetchUnresolved(); el('issues-panel').scrollIntoView({ behavior: 'smooth' }); };
-      } else if (issuesCard) {
-        issuesCard.onclick = () => { switchIssuesTab('errors'); el('issues-panel').scrollIntoView({ behavior: 'smooth' }); };
+      if (issuesCard) {
+        const openIssues = () => {
+          const tab = totals.unresolved > 0 ? 'unresolved' : 'errors';
+          switchIssuesTab(tab);
+          if (tab === 'unresolved') fetchUnresolved();
+          el('issues-panel').scrollIntoView({ behavior: 'smooth' });
+        };
+        issuesCard.onclick = openIssues;
+        issuesCard.onkeydown = (event) => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openIssues(); }
+        };
       }
 
       const nextSyncText = options.auto_sync === false
@@ -6158,7 +6203,9 @@
     const issuesTabUnresolved = el('issues-tab-unresolved');
     const issuesTabErrors = el('issues-tab-errors');
     const pairAddBtn = el('btn-pair-add');
-    if (pairAddBtn) pairAddBtn.addEventListener('click', addPair);
+    // Called with no arguments on purpose: addPair takes preferred providers,
+    // and handing it a MouseEvent would read as one.
+    if (pairAddBtn) pairAddBtn.addEventListener('click', () => addPair());
     const pairsSaveBtn = el('btn-pairs-save');
     if (pairsSaveBtn) pairsSaveBtn.addEventListener('click', () => savePairs(true));
     const pairsRunBtn = el('btn-pairs-run');
@@ -7049,6 +7096,14 @@
     const expandedPairKeys = new Set();
     let pairClientKeySeq = 0;
 
+    // Which card the last save was rejected for. The server names it in the
+    // message ("Pair 3: ..."), but a toast over a stack of collapsed cards
+    // leaves the user counting them; this outlines and opens the actual one.
+    // Held by index, which is what the server reports — and cleared whenever
+    // the list is reordered or re-saved, since an index means nothing after
+    // a pair is removed.
+    let invalidPairIndex = null;
+
     function pairKey(pair) {
       if (!pair) return '';
       if (pair.pair_id) return `id:${pair.pair_id}`;
@@ -7187,12 +7242,44 @@
       const enabled = pairs.filter(p => p.enabled !== false).length;
       const automatic = pairs.filter(p => p.enabled !== false && p.auto_sync).length;
       const problems = pairs.filter(p => p.problem).length;
-      const connected = (pairsState.providers || []).filter(p => p.configured).length;
+      const providers = pairsState.providers || [];
+      const connected = providers.filter(p => p.configured).length;
+      const readOnly = providers.filter(p => p.configured && p.write_blocked_reason).length;
+
+      // Same card vocabulary as the dashboard: a state is a dot plus its name,
+      // and colour only marks something that is actually wrong. These were four
+      // `.card` tiles, one number each, which is a lot of chrome to say "2".
+      const pairLevel = problems ? 'warn' : (pairs.length ? 'ok' : 'muted');
+      const pairState = problems
+        ? `${problems} need${problems === 1 ? 's' : ''} attention`
+        : (pairs.length ? 'all runnable' : 'none yet');
+      const connLevel = connected > 1 ? 'ok' : 'muted';
+
       node.innerHTML = `
-        <div class="card"><div class="card-label">Pairs</div><div class="card-value">${pairs.length}</div><div class="card-sub">${enabled} enabled</div></div>
-        <div class="card"><div class="card-label">Automatic</div><div class="card-value" style="color:${automatic ? 'var(--accent)' : 'var(--z600)'}">${automatic}</div><div class="card-sub">${automatic ? 'pair schedule(s) active' : 'all pairs run manually'}</div></div>
-        <div class="card"><div class="card-label">Services</div><div class="card-value">${connected}</div><div class="card-sub">of ${(pairsState.providers || []).length} connected</div></div>
-        <div class="card"><div class="card-label">Needs Attention</div><div class="card-value" style="color:${problems ? 'var(--orange)' : 'var(--z600)'}">${problems}</div><div class="card-sub">${problems ? 'pair(s) cannot run' : 'all pairs runnable'}</div></div>
+        <div class="svc-card svc-card-static ${problems ? 'is-warn' : ''}">
+          <div class="svc-card-head">
+            <span class="svc-name">Pairs</span>
+            <span class="svc-status svc-${pairLevel}"><span class="svc-dot"></span>${esc(pairState)}</span>
+          </div>
+          <div class="svc-stats">
+            <span class="svc-stat"><span class="svc-stat-val">${pairs.length}</span><span class="svc-stat-label">configured</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${enabled ? '' : 'c-dim'}">${enabled}</span><span class="svc-stat-label">enabled</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${automatic ? '' : 'c-dim'}">${automatic}</span><span class="svc-stat-label">scheduled</span></span>
+            ${problems ? `<span class="svc-stat"><span class="svc-stat-val c-orange">${problems}</span><span class="svc-stat-label">blocked</span></span>` : ''}
+          </div>
+          <div class="svc-foot">${automatic ? 'the rest run when you press Run All' : 'all pairs run manually'}</div>
+        </div>
+        <div class="svc-card svc-card-static">
+          <div class="svc-card-head">
+            <span class="svc-name">Connections</span>
+            <span class="svc-status svc-${connLevel}"><span class="svc-dot"></span>${connected} of ${providers.length}</span>
+          </div>
+          <div class="svc-stats">
+            <span class="svc-stat"><span class="svc-stat-val">${connected}</span><span class="svc-stat-label">connected</span></span>
+            ${readOnly ? `<span class="svc-stat"><span class="svc-stat-val c-dim">${readOnly}</span><span class="svc-stat-label">source only</span></span>` : ''}
+          </div>
+          <div class="svc-foot">the library is always available as either end</div>
+        </div>
       `;
       const count = el('pairs-count');
       if (count) count.textContent = pairs.length ? `${pairs.length} configured` : '';
@@ -7571,7 +7658,8 @@
       // button, so the whole strip toggles and the keyboard gets Enter/Space for
       // free. The name field lives in the body — as an input up here it covered
       // the head and swallowed the clicks meant for the toggle.
-      return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'} ${open ? 'open' : ''}" data-pair-card="${index}">
+      return `<div class="pair-card ${pair.enabled ? '' : 'is-disabled'} ${open ? 'open' : ''} ${
+        invalidPairIndex === index ? 'is-invalid' : ''}" data-pair-card="${index}">
         <button type="button" class="pair-card-top" data-pair-toggle="${index}"
                 aria-expanded="${open}" aria-controls="pair-body-${index}">
           <span class="pair-card-headings">
@@ -7701,7 +7789,21 @@
       if (!node) return;
       bindPairEvents(node);
       if (!pairsState.pairs.length) {
-        node.innerHTML = '<div class="empty">No sync pairs yet. Add one to copy a list from one service to another.</div>';
+        // The library is the hub these pairs exist to fill, so the empty state
+        // offers that pair outright rather than describing the idea and leaving
+        // the user to assemble it from two dropdowns.
+        const suggestion = pairsState.providers.find(
+          p => p.configured && p.reads.length && p.key !== 'library',
+        );
+        const hasLibrary = pairsState.providers.some(p => p.key === 'library' && p.configured);
+        node.innerHTML = `<div class="empty">
+          <div>No sync pairs yet. A pair copies items between any two services.</div>
+          ${suggestion && hasLibrary ? `<div style="margin-top:12px">
+            <button class="btn btn-sm btn-primary" type="button"
+                    data-pair-suggest="${escAttr(suggestion.key)}">Add ${esc(suggestion.label)} → Library</button>
+          </div>
+          <div class="catalog-note" style="margin-top:8px">The library is local, always writable, and can be read back out by any other pair — point your services at it once and it becomes the hub.</div>` : ''}
+        </div>`;
         return;
       }
       node.innerHTML = pairsState.pairs.map((pair, index) => pairCardHtml(pair, index)).join('');
@@ -7884,6 +7986,11 @@
           renderSyncCards();
           return;
         }
+        if (button.dataset.pairSuggest !== undefined) {
+          addPair(button.dataset.pairSuggest, 'library');
+          renderSyncCards();
+          return;
+        }
         if (button.dataset.pairClearLists !== undefined) {
           const index = Number(button.dataset.pairClearLists);
           const pair = pairAt(button.dataset.pairClearLists);
@@ -7895,7 +8002,10 @@
         }
         if (button.dataset.pairRemove !== undefined) {
           pairsState.pairs.splice(Number(button.dataset.pairRemove), 1);
-          // Indices shift, so this is the one edit that needs a full rebuild.
+          // Indices shift, so this is the one edit that needs a full rebuild —
+          // and the rejected-card marker is an index, so it no longer points
+          // at anything meaningful.
+          invalidPairIndex = null;
           renderPairs();
           renderSyncCards();
           return;
@@ -7961,15 +8071,26 @@
       renderPairs();
     }
 
-    function addPair() {
+    // A new pair defaults to <a connected service> → Library, the fan-in the
+    // library exists for. It used to take the first usable source, and since the
+    // library is listed first *and* is always configured, every new pair opened
+    // as Library → something — the one direction a new user does not want yet.
+    function addPair(preferredSource, preferredTarget) {
       const sources = pairsState.providers.filter(p => p.configured && p.reads.length);
       const targets = pairsState.providers.filter(p => p.configured && p.writes.length);
       if (!sources.length || !targets.length) {
         showToast('Connect at least two services before creating a pair.', true);
         return;
       }
-      const source = sources[0].key;
-      const target = (targets.find(p => p.key !== source) || targets[0]).key;
+      const remoteSources = sources.filter(p => p.key !== 'library');
+      const source = (
+        sources.find(p => p.key === preferredSource) || remoteSources[0] || sources[0]
+      ).key;
+      const preferred = targets.find(p => p.key === preferredTarget && p.key !== source);
+      const library = targets.find(p => p.key === 'library' && p.key !== source);
+      const target = (
+        preferred || library || targets.find(p => p.key !== source) || targets[0]
+      ).key;
       pairsState.pairs.push({
         pair_id: '',
         name: '',
@@ -8020,6 +8141,18 @@
       }
     }
 
+    // A refused save names one pair; open it, outline it and bring it on screen
+    // rather than leaving the user to count collapsed cards against the toast.
+    function highlightRejectedPair(data) {
+      const index = Number(data && data.pair_index);
+      if (!Number.isInteger(index) || index < 0 || index >= pairsState.pairs.length) return;
+      invalidPairIndex = index;
+      setPairExpanded(pairsState.pairs[index], true);
+      renderPairs();
+      const card = document.querySelector(`[data-pair-card="${index}"]`);
+      if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
     async function savePairs(announce) {
       const btn = el('btn-pairs-save');
       if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
@@ -8027,10 +8160,12 @@
       // its open state was filed under stops matching. Positions survive the
       // round trip, so carry the state across by position.
       const openByPosition = pairsState.pairs.map(isPairExpanded);
+      invalidPairIndex = null;
       try {
         const result = await apiPost('/api/profile/pairs/save', { pairs: pairsPayload() });
         if (!result.ok) {
           showToast(formatApiError(result.data, 'Could not save sync pairs.'), true, false);
+          highlightRejectedPair(result.data);
           return false;
         }
         if (announce !== false) showToast('Sync pairs saved.', false, true);

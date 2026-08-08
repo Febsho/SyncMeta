@@ -168,6 +168,22 @@ first in `PROVIDER_ORDER` and its adapter is built for every profile, so
 `_build_provider_adapters` takes a `profile_id`; a call site that forgets it
 silently drops Library from the pair editor.
 
+Because it is always configured *and* listed first, a new pair must not simply
+take the first usable source — that made every pair open as `Library → …`, the
+one direction a new user does not want yet. `addPair()` defaults to the first
+connected **remote** source with **Library as the target**, which is the fan-in
+the library exists for, and the pairs empty state offers exactly that pair.
+
+**`providers.ADAPTER_TYPES` is the only provider registry.** Adding a provider
+means adding its class to `_ADAPTER_CLASSES`; `ADAPTER_TYPES`, `PROVIDER_ORDER`
+and `PROVIDER_LABELS` are all derived from it. `/api/profile/pairs/save` used to
+validate against its own hand-written copy of that mapping, which never learned
+about Library — so the editor offered Library at both ends and every pair using
+it came back `unknown provider` and was lost. Do not re-declare the mapping at a
+call site; import it. A rejected save also returns `pair_index`, and the editor
+opens and outlines that card — the message names "Pair 3" and counting collapsed
+cards is not the user's job.
+
 **One entry per series, seasons inside it.** This is the TVDB/Trakt shape and
 the only one in which SIMKL and AniList can agree: SIMKL lists an anime per
 season, AniList per cour, often with a different id each. `series_key()` is

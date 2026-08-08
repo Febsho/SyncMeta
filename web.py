@@ -72,8 +72,10 @@ from src.providers import (
     ALL_CATEGORIES,
     ALL_PAIR_MODES,
     ALL_REMOVAL_MODES,
+    ADAPTER_TYPES,
     CATEGORY_LABELS,
     PAIR_MODE_LABELS,
+    PROVIDER_LABELS,
     PROVIDER_ORDER,
     REMOVAL_MODE_LABELS,
     TWO_WAY_REMOVAL_MODES,
@@ -595,12 +597,18 @@ def _json_error(
     *,
     provider: str | None = None,
     hint: str | None = None,
+    pair_index: int | None = None,
 ):
     payload: dict = {"error": message}
     if details:
         payload["details"] = details
     if provider:
         payload["provider"] = provider
+    # Which pair in the submitted list was rejected. The message already names
+    # it ("Pair 3: ..."), but counting collapsed cards to find pair 3 is the
+    # user's job only if the editor cannot point at it.
+    if pair_index is not None:
+        payload["pair_index"] = int(pair_index)
     if hint:
         payload["hint"] = hint
     payload["status_code"] = status_code
@@ -1063,15 +1071,6 @@ def _sync_pairs_from_config(config: AppConfig) -> list:
             logger.warning("Ignoring invalid sync pair %r: %s", raw, exc)
     return pairs
 
-
-PROVIDER_LABELS = {
-    "library": "Library",
-    "trakt": "Trakt",
-    "simkl": "SIMKL",
-    "anilist": "AniList",
-    "mdblist": "MDBList",
-    "pmdb": "PublicMetaDB",
-}
 
 
 def _provider_unavailable_reason(config: AppConfig, key: str) -> str:
@@ -3404,47 +3403,53 @@ def api_profile_pairs_save():
     # Validate strictly here (unlike profile load, which drops bad entries) so
     # the user gets told what is wrong instead of silently losing a pair.
     normalized: list[dict] = []
-    adapter_types = {
-        "trakt": TraktAdapter, "simkl": SimklAdapter, "anilist": AniListAdapter,
-        "mdblist": MdbListAdapter, "pmdb": PmdbAdapter,
-    }
+    # ADAPTER_TYPES is the one provider registry (src/providers.py). Re-declaring
+    # it here is what made every Library pair unsavable while the editor offered
+    # Library at both ends.
     for index, raw in enumerate(raw_pairs):
         try:
             pair = SyncPair.from_dict(raw)
         except (ValueError, TypeError) as exc:
-            return _json_error(f"Pair {index + 1}: {exc}", 400)
+            return _json_error(f"Pair {index + 1}: {exc}", 400, pair_index=index)
         pair.pair_id = pair.pair_id or SyncPair._clean_pair_id(
             f"{pair.source}-{pair.target}-{index + 1}"
         ) or f"pair-{index + 1}"
-        source_type = adapter_types.get(pair.source)
-        target_type = adapter_types.get(pair.target)
+        source_type = ADAPTER_TYPES.get(pair.source)
+        target_type = ADAPTER_TYPES.get(pair.target)
         if source_type is None or target_type is None:
-            return _json_error(f"Pair {index + 1}: unknown provider", 400)
+            unknown = pair.source if source_type is None else pair.target
+            return _json_error(
+                f"Pair {index + 1}: unknown provider {unknown!r}", 400, pair_index=index,
+            )
         unsupported = [
             category for category in pair.categories
             if category not in source_type.reads or category not in target_type.writes
         ]
         if unsupported:
             return _json_error(
-                f"Pair {index + 1}: {pair.source} → {pair.target} does not support "
-                f"{', '.join(unsupported)}", 400,
+                f"Pair {index + 1}: {source_type.label} → {target_type.label} does not support "
+                f"{', '.join(unsupported)}", 400, pair_index=index,
             )
         if pair.target_list and not target_type.supports_target_lists:
             return _json_error(
-                f"Pair {index + 1}: {target_type.label} does not support writable custom lists", 400,
+                f"Pair {index + 1}: {target_type.label} does not support writable custom lists",
+                400, pair_index=index,
             )
         if pair.target_list and any(
             category not in target_type.target_list_categories for category in pair.categories
         ):
             return _json_error(
-                f"Pair {index + 1}: the selected custom list cannot receive every selected category", 400,
+                f"Pair {index + 1}: the selected custom list cannot receive every selected category",
+                400, pair_index=index,
             )
         normalized.append(pair.to_dict())
 
     seen = set()
-    for pair in normalized:
+    for index, pair in enumerate(normalized):
         if pair["pair_id"] in seen:
-            return _json_error(f"Duplicate pair id {pair['pair_id']!r}", 400)
+            return _json_error(
+                f"Duplicate pair id {pair['pair_id']!r}", 400, pair_index=index,
+            )
         seen.add(pair["pair_id"])
 
     try:

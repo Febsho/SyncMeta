@@ -768,6 +768,64 @@ class WebTests(unittest.TestCase):
         # Trakt is not configured on this profile, so the pair explains itself.
         self.assertIn("not configured", listed[0]["problem"])
 
+    def test_saving_a_pair_that_uses_the_library_round_trips(self) -> None:
+        """The Library is a provider like any other, at either end.
+
+        It was missing from the save endpoint's own copy of the provider table,
+        so every pair pointed at the local library came back as "unknown
+        provider" even though the editor offered it.
+        """
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        save = self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {
+                "name": "SIMKL into the library",
+                "source": "simkl",
+                "target": "library",
+                "categories": ["watchlist", "collection"],
+            },
+            {
+                "name": "Library out to Trakt",
+                "source": "library",
+                "target": "trakt",
+                "categories": ["history"],
+            },
+        ]})
+        self.assertEqual(save.status_code, 200, save.get_json())
+
+        listed = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
+        self.assertEqual(
+            [(pair["source"], pair["target"]) for pair in listed],
+            [("simkl", "library"), ("library", "trakt")],
+        )
+
+    def test_every_provider_in_the_listing_can_be_saved(self) -> None:
+        """No provider may be offered by the editor but rejected by the save.
+
+        Both sides now read `providers.ADAPTER_TYPES`; this pins them together
+        so a new provider cannot be half-enrolled again.
+        """
+        from src.providers import ADAPTER_TYPES, PROVIDER_ORDER
+
+        self.assertEqual(set(ADAPTER_TYPES), set(PROVIDER_ORDER))
+        for key, adapter_class in ADAPTER_TYPES.items():
+            self.assertEqual(adapter_class.key, key)
+            self.assertTrue(adapter_class.label)
+
+    def test_a_rejected_pair_reports_which_one_failed(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {"source": "simkl", "target": "library", "categories": ["watchlist"]},
+            {"source": "trakt", "target": "trakt", "categories": ["watchlist"]},
+        ]})
+
+        self.assertEqual(response.status_code, 400)
+        # Zero-based, so the editor can index straight into its own card list.
+        self.assertEqual(response.get_json()["pair_index"], 1)
+
     def test_saving_simkl_pmdb_collection_pair_is_supported(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
