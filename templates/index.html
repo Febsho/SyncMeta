@@ -5236,12 +5236,67 @@
         return;
       }
       panel.style.display = '';
-      summary.textContent = health.unresolved_anime ? `${health.unresolved_anime} needs review` : 'Healthy';
+
+      const verified = Math.max(0, (profile.last_results || []).reduce(
+        (acc, row) => acc
+          + Number((row.match_breakdown || {})['confidence:exact'] || 0)
+          + Number((row.match_breakdown || {})['confidence:verified'] || 0),
+        0));
+      const ambiguous = Number(health.ambiguous_anime || 0);
+      const unresolved = Number(health.unresolved_anime || 0);
+      const overrides = Number(health.manual_overrides || 0);
+      const remapped = Number(health.remapped_anime || 0);
+      const reviewed = Number(health.reviewed || 0);
+
+      // A state is a dot plus its name, never prose — the same vocabulary the
+      // service cards use, rather than a bare word in the meta slot.
+      const level = unresolved > 0 ? 'warn' : (ambiguous > 0 ? 'muted' : 'ok');
+      const stateText = unresolved > 0
+        ? `${unresolved} need${unresolved === 1 ? 's' : ''} review`
+        : (ambiguous > 0 ? `${ambiguous} held back` : 'healthy');
+      summary.innerHTML = `<span class="svc-status svc-${level}"><span class="svc-dot"></span>${esc(stateText)}</span>`;
+
+      // Composition of what the matcher did with anime this run, same segments
+      // as the service cards: trusted / held back / unmatched.
+      const barTotal = Math.max(1, verified + ambiguous + unresolved);
+      const pctOk = Math.round((verified / barTotal) * 100);
+      const pctAmb = Math.round((ambiguous / barTotal) * 100);
+      const pctUnres = Math.max(0, 100 - pctOk - pctAmb);
+
+      // Two cards, matching the Activity Sync panel: what matching produced,
+      // and what a human had to help with.
       cards.innerHTML = `
-        <div class="card"><div class="card-label">Exact / Verified</div><div class="card-value">${Math.max(0, (profile.last_results || []).reduce((acc, row) => acc + Number((row.match_breakdown || {})['confidence:exact'] || 0) + Number((row.match_breakdown || {})['confidence:verified'] || 0), 0))}</div><div class="card-sub">trusted anime matches</div></div>
-        <div class="card"><div class="card-label">Ambiguous</div><div class="card-value" style="color:${(health.ambiguous_anime || 0) > 0 ? 'var(--orange)' : 'var(--z100)'}">${health.ambiguous_anime || 0}</div><div class="card-sub">held back for safety</div></div>
-        <div class="card"><div class="card-label">Unresolved</div><div class="card-value" style="color:${(health.unresolved_anime || 0) > 0 ? 'var(--orange)' : 'var(--z100)'}">${health.unresolved_anime || 0}</div><div class="card-sub">need mapping help</div></div>
-        <div class="card"><div class="card-label">Manual Overrides</div><div class="card-value">${health.manual_overrides || 0}</div><div class="card-sub">${health.remapped_anime || 0} remapped via root/season help</div></div>
+        <div class="svc-card svc-card-static ${unresolved > 0 ? 'is-warn' : ''}">
+          <div class="svc-card-head">
+            <span class="svc-name">Anime Matching</span>
+            <span class="svc-status svc-${level}"><span class="svc-dot"></span>${pctOk}% matched</span>
+          </div>
+          <div class="svc-stats">
+            <span class="svc-stat"><span class="svc-stat-val">${verified}</span><span class="svc-stat-label">verified</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${ambiguous > 0 ? 'c-orange' : 'c-dim'}">${ambiguous}</span><span class="svc-stat-label">ambiguous</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${unresolved > 0 ? 'c-orange' : 'c-dim'}">${unresolved}</span><span class="svc-stat-label">unresolved</span></span>
+          </div>
+          <div class="svc-bar" aria-hidden="true">
+            ${pctOk ? `<span style="width:${pctOk}%;background:var(--green)"></span>` : ''}
+            ${pctAmb ? `<span style="width:${pctAmb}%;background:var(--z700)"></span>` : ''}
+            ${pctUnres ? `<span style="width:${pctUnres}%;background:var(--orange)"></span>` : ''}
+          </div>
+          <div class="svc-foot">trusted matches in the latest run</div>
+          <div class="svc-foot">${ambiguous > 0 ? 'ambiguous entries are held back rather than guessed' : 'nothing held back for safety'}</div>
+        </div>
+        <div class="svc-card svc-card-static ${overrides || remapped ? '' : 'svc-card-off'}">
+          <div class="svc-card-head">
+            <span class="svc-name">Mapping Help</span>
+            <span class="svc-status svc-${overrides || remapped ? 'ok' : 'muted'}"><span class="svc-dot"></span>${overrides || remapped ? 'in use' : 'none yet'}</span>
+          </div>
+          <div class="svc-stats">
+            <span class="svc-stat"><span class="svc-stat-val">${overrides}</span><span class="svc-stat-label">overrides</span></span>
+            <span class="svc-stat"><span class="svc-stat-val ${remapped > 0 ? '' : 'c-dim'}">${remapped}</span><span class="svc-stat-label">remapped</span></span>
+            ${reviewed > 0 ? `<span class="svc-stat"><span class="svc-stat-val c-dim">${reviewed}</span><span class="svc-stat-label">reviewed</span></span>` : ''}
+          </div>
+          <div class="svc-foot">TMDB ids you pinned by hand</div>
+          <div class="svc-foot">root-series and season remaps applied on top</div>
+        </div>
       `;
     }
 
@@ -5497,13 +5552,19 @@
           const removed = row.items_removed || 0;
           const unresolved = row.items_skipped_unresolved || 0;
           const errors = row.error_count || 0;
+          // A row whose source fingerprint matched the last run never reaches
+          // the resolver, so it carries 0 resolved. Reporting that as
+          // "11 items → 0 resolved" reads as the matcher having failed on
+          // every item; it means the list did not change.
+          const unchanged = row.items_skipped_fingerprint || 0;
           // Composition of what was fetched, matching the service cards. This
           // used to plot resolved/fetched, which is ~100% for almost every list
           // and so drew a full bar whether the run changed anything or not.
           const barTotal = Math.max(1, fetched);
           const pctAdded = Math.round((added / barTotal) * 100);
           const pctUnres = Math.round((unresolved / barTotal) * 100);
-          const pctRest = Math.max(0, 100 - pctAdded - pctUnres);
+          const pctSkipped = Math.round((unchanged / barTotal) * 100);
+          const pctRest = Math.max(0, 100 - pctAdded - pctUnres - pctSkipped);
           const sourceBadge = row.source_name ? esc(row.source_name) : '';
           const title = esc(row.display_name || row.list_name || 'Unknown list');
           // Only rows backed by a real PMDB list can show its contents; history
@@ -5517,19 +5578,24 @@
                           aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} the items in this list"` : ''}>
             <div class="result-row-left">
               <div class="result-row-title">${expandable ? '<span class="result-chevron" aria-hidden="true">▶</span>' : ''}${title}</div>
-              <div class="result-row-source">${sourceBadge}${sourceBadge && fetched ? ' · ' : ''}${fetched} items → ${resolved} resolved</div>
-              <div class="result-bar" aria-hidden="true">
+              <div class="result-row-source">${[
+                sourceBadge,
+                fetched ? `${fetched} item${fetched === 1 ? '' : 's'}` : 'no items',
+                fetched ? (unchanged > 0 ? 'source unchanged' : `${resolved} resolved`) : '',
+              ].filter(Boolean).join(' · ')}</div>
+              ${fetched ? `<div class="result-bar" aria-hidden="true">
                 ${pctAdded ? `<div class="result-bar-fill" style="width:${pctAdded}%;background:var(--green)"></div>` : ''}
                 ${pctRest ? `<div class="result-bar-fill" style="width:${pctRest}%;background:${errors > 0 ? 'var(--red)' : 'var(--z700)'}"></div>` : ''}
+                ${pctSkipped ? `<div class="result-bar-fill" style="width:${pctSkipped}%;background:var(--z800)"></div>` : ''}
                 ${pctUnres ? `<div class="result-bar-fill" style="width:${pctUnres}%;background:var(--orange)"></div>` : ''}
-              </div>
+              </div>` : ''}
             </div>
             <div class="result-row-right">
               ${added > 0 ? `<div class="result-stat"><div class="result-stat-val c-green">+${added}</div><div class="result-stat-label">added</div></div>` : ''}
               ${removed > 0 ? `<div class="result-stat"><div class="result-stat-val c-red">-${removed}</div><div class="result-stat-label">removed</div></div>` : ''}
               ${unresolved > 0 ? `<div class="result-stat"><div class="result-stat-val c-orange">${unresolved}</div><div class="result-stat-label">unresolved</div></div>` : ''}
               ${errors > 0 ? `<div class="result-stat"><div class="result-stat-val c-red">${errors}</div><div class="result-stat-label">errors</div></div>` : ''}
-              ${added === 0 && removed === 0 && unresolved === 0 && errors === 0 ? `<div class="result-stat"><div class="result-stat-val c-dim">—</div><div class="result-stat-label">no changes</div></div>` : ''}
+              ${added === 0 && removed === 0 && unresolved === 0 && errors === 0 ? `<div class="result-stat"><div class="result-stat-val c-dim">—</div><div class="result-stat-label">${unchanged > 0 ? 'unchanged' : 'no changes'}</div></div>` : ''}
               <div class="result-row-actions">${buildDeleteActions(row)}</div>
             </div>
           </div>
