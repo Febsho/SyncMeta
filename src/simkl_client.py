@@ -1143,14 +1143,17 @@ class SimklClient:
                 "ids": ids,
             }]
 
-        def add_episode(season: int | None, episode: int | None, watched_at: str | None) -> None:
+        def add_episode(
+            season: int | None, episode: int | None, watched_at: str | None,
+            replaces_episode: str | None = None, coordinates_are_tmdb: bool = False,
+        ) -> None:
             if season is None or episode is None:
                 return
             key = (int(season), int(episode))
             if key in seen:
                 return
             seen.add(key)
-            history.append({
+            row = {
                 "tmdb_id": tmdb_id,
                 "media_type": "tv",
                 "season": int(season),
@@ -1179,7 +1182,12 @@ class SimklClient:
                 "anidb_id": str(ids["anidb"]) if ids.get("anidb") else None,
                 "tvdb_id": str(ids["tvdb"]) if ids.get("tvdb") else None,
                 "ids": ids,
-            })
+            }
+            if replaces_episode:
+                row["_syncmeta_replaces_episode"] = str(replaces_episode)
+            if coordinates_are_tmdb:
+                row["_syncmeta_tmdb_coordinates"] = True
+            history.append(row)
 
         for season_entry in self._history_seasons(entry, show):
             season_number = season_entry.get("number") or season_entry.get("season")
@@ -1214,6 +1222,8 @@ class SimklClient:
                     episode.get("season"),
                     episode.get("number") or episode.get("episode"),
                     episode.get("watched_at") or episode.get("last_watched_at"),
+                    episode.get("_syncmeta_replaces_episode"),
+                    bool(episode.get("_syncmeta_tmdb_coordinates")),
                 )
         elif media_key == "anime":
             for episode in synthesized:
@@ -1223,6 +1233,8 @@ class SimklClient:
                     episode.get("season"),
                     episode.get("number") or episode.get("episode"),
                     episode.get("watched_at") or episode.get("last_watched_at") or fallback_watched_at,
+                    episode.get("_syncmeta_replaces_episode"),
+                    bool(episode.get("_syncmeta_tmdb_coordinates")),
                 )
 
         return history
@@ -1566,6 +1578,9 @@ class SimklClient:
                 **item,
                 "season": row["season"],
                 "episode": row["number"],
+                "_syncmeta_tmdb_coordinates": True,
+                **({"_syncmeta_replaces_episode": row["_syncmeta_replaces_episode"]}
+                   if row.get("_syncmeta_replaces_episode") else {}),
             }
             for row in expanded
         ]
@@ -1576,30 +1591,59 @@ class SimklClient:
             return []
         episodes: list[dict] = []
         remaining = watched_total
-        positive_seasons = [(season_number, season_episodes) for season_number, season_episodes in season_plan if season_number > 0 and season_episodes > 0]
         for season_number, season_episodes in season_plan:
             if season_number <= 0 or season_episodes <= 0:
                 continue
             take = min(remaining, season_episodes)
             episodes.extend(
-                {"season": season_number, "number": episode_number, "watched_at": watched_at}
+                {
+                    "season": season_number, "number": episode_number,
+                    "watched_at": watched_at, "_syncmeta_tmdb_coordinates": True,
+                }
                 for episode_number in range(1, take + 1)
             )
             remaining -= take
             if remaining <= 0:
                 break
         if remaining > 0:
-            if len(positive_seasons) == 1 and positive_seasons[0][0] == 1:
-                known_episodes = positive_seasons[0][1]
+            pending_seasons = [
+                season_number for season_number, season_episodes in season_plan
+                if season_number > 0 and season_episodes == 0
+            ]
+            if pending_seasons:
+                # TMDB creates a season before its episode records are filled.
+                # A process that checked during that window used to cache the
+                # zero forever and deliberately append the new episodes to S1,
+                # producing rows such as Frieren 1x29..1x38. The presence of a
+                # later TMDB season is a stronger boundary than that fallback:
+                # put the remaining watched episodes into the first pending
+                # season, starting at episode 1.
+                pending_season = pending_seasons[0]
                 logger.info(
-                    "Falling back to Season 1 overflow for aggregate SIMKL anime history on TMDB %s (%d known, %d watched, later seasons absent or 0-episode placeholders)",
+                    "Using pending TMDB season %d for aggregate SIMKL anime history on TMDB %s (%d remaining watched episodes)",
+                    pending_season,
                     tmdb_id,
-                    known_episodes,
-                    watched_total,
+                    remaining,
+                )
+                known_positive = [
+                    row for row in season_plan if row[0] > 0 and row[1] > 0
+                ]
+                legacy_overflow_base = (
+                    known_positive[0][1]
+                    if len(known_positive) == 1 and known_positive[0][0] == 1
+                    else None
                 )
                 episodes.extend(
-                    {"season": 1, "number": episode_number, "watched_at": watched_at}
-                    for episode_number in range(known_episodes + 1, watched_total + 1)
+                    {
+                        "season": pending_season,
+                        "number": episode_number,
+                        "watched_at": watched_at,
+                        "_syncmeta_tmdb_coordinates": True,
+                        **({
+                            "_syncmeta_replaces_episode": f"1x{legacy_overflow_base + episode_number}",
+                        } if legacy_overflow_base is not None else {}),
+                    }
+                    for episode_number in range(1, remaining + 1)
                 )
                 return episodes
             logger.info(
@@ -1613,14 +1657,25 @@ class SimklClient:
 
     @classmethod
     def _get_tmdb_season_plan_cached(cls, tmdb_id: int) -> list[tuple[int, int]]:
+        # Season placeholders change as episodes air. A process may run for
+        # months, so this cache must expire instead of preserving `(2, 0)` for
+        # the lifetime of the instance.
+        cache_ttl_seconds = 6 * 60 * 60
         cache = getattr(cls, "_shared_tmdb_season_plan_cache", None)
         if cache is None:
             cache = {}
             setattr(cls, "_shared_tmdb_season_plan_cache", cache)
-        if tmdb_id in cache:
-            return list(cache[tmdb_id])
+        cached = cache.get(tmdb_id)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            cached_at, cached_plan = cached
+            if time.time() - float(cached_at) < cache_ttl_seconds:
+                return list(cached_plan)
+        elif isinstance(cached, list):
+            # Values written by an older process/test are treated as stale once
+            # so they are upgraded to the timestamped format.
+            cached = None
         plan = cls._fetch_tmdb_season_plan(tmdb_id)
-        cache[tmdb_id] = list(plan)
+        cache[tmdb_id] = (time.time(), list(plan))
         return list(plan)
 
     @staticmethod

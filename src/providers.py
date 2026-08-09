@@ -155,18 +155,31 @@ def has_portable_identity(item: dict) -> bool:
 
 
 def enrich_identity(item: dict) -> dict:
-    """Add a TMDB id to anime-native items so keys compare across services.
+    """Map anime identity and episode coordinates into TMDB's structure.
 
     AniList reports AniList/MAL ids and no TMDB id, while Trakt and PMDB report
     TMDB.  Without this the same show read from two services would produce two
     different keys, every item would look new on every run, and a pair would
     re-add its whole source list forever.
 
-    Returns the item unchanged when nothing can be added.  Never overwrites an
-    id the provider already supplied.
+    SIMKL and AniList model each anime season/cour as its own title, while TMDB
+    commonly stores the whole series under one id with several seasons.  The
+    exact AniList/MAL/AniDB mapping is therefore authoritative for anime: it may
+    replace a provider's season-title TMDB id with the mapped series id and, for
+    history rows, translate local episode numbers to TMDB season/episode.
+
+    Returns the item unchanged when no exact anime mapping is available.
     """
     ids = item.get("ids") or {}
-    if str(item.get("tmdb_id") or ids.get("tmdb") or "").strip():
+    has_tmdb = bool(str(item.get("tmdb_id") or ids.get("tmdb") or "").strip())
+    looks_anime = bool(
+        str(item.get("simkl_type") or "").lower() == "anime"
+        or item.get("anime_identity")
+        or item.get("anilist_id") or ids.get("anilist")
+        or item.get("mal_id") or ids.get("mal")
+        or item.get("anidb_id") or ids.get("anidb")
+    )
+    if has_tmdb and not looks_anime:
         return item
 
     from . import fribb_client
@@ -207,7 +220,7 @@ def enrich_identity(item: dict) -> dict:
     enriched = dict(item)
     enriched["tmdb_id"] = str(tmdb_id)
     enriched_ids = dict(ids)
-    enriched_ids.setdefault("tmdb", str(tmdb_id))
+    enriched_ids["tmdb"] = str(tmdb_id)
     # The same Fribb entry usually carries the IMDB id too. Trakt and SIMKL
     # match on IMDB more reliably than on a TMDB tv id, so an anime-native item
     # gains the id the target's writer actually wants.
@@ -216,6 +229,82 @@ def enrich_identity(item: dict) -> dict:
         if imdb_id:
             enriched["imdb_id"] = imdb_id
             enriched_ids.setdefault("imdb", imdb_id)
+
+    # Prefer direct TMDB episode coordinates from Anime-Lists XML. They cover
+    # entries whose TVDB numbering has splits/offsets that a simple season
+    # number cannot express.
+    episode_raw = item.get("episode")
+    if episode_raw is None:
+        episode_raw = item.get("number")
+    try:
+        episode = int(episode_raw) if episode_raw is not None else None
+    except (TypeError, ValueError):
+        episode = None
+    try:
+        source_season = int(item.get("season") or 1)
+    except (TypeError, ValueError):
+        source_season = 1
+
+    direct_coordinates = None
+    anidb_raw = item.get("anidb_id") or ids.get("anidb") or entry.get("anidb_id")
+    if episode is not None and anidb_raw:
+        try:
+            from . import anime_mapping_store
+            direct_coordinates = anime_mapping_store.resolve_tvdb_episode_from_anidb_episode(
+                int(anidb_raw), episode, anidb_season=max(1, source_season),
+            )
+        except (TypeError, ValueError):
+            direct_coordinates = None
+        except Exception:
+            logger.debug("Anime episode-coordinate lookup failed for %r", item.get("title"), exc_info=True)
+
+    coordinates_are_tmdb = bool(item.get("_syncmeta_tmdb_coordinates"))
+    mapped_season = source_season if coordinates_are_tmdb else None
+    mapped_episode = episode if coordinates_are_tmdb else None
+    mapped_tmdb_id = None
+    if mapped_season is None and isinstance(direct_coordinates, dict):
+        if direct_coordinates.get("tmdb_season") is not None and direct_coordinates.get("tmdb_episode") is not None:
+            mapped_season = direct_coordinates.get("tmdb_season")
+            mapped_episode = direct_coordinates.get("tmdb_episode")
+            mapped_tmdb_id = direct_coordinates.get("tmdb_id")
+
+    season_map = entry.get("season")
+    offset_map = entry.get("episode_offset")
+    if mapped_season is None and isinstance(season_map, dict):
+        mapped_season = season_map.get("tmdb")
+        if mapped_season is not None and episode is not None:
+            offset = offset_map.get("tmdb", 0) if isinstance(offset_map, dict) else 0
+            try:
+                mapped_episode = int(offset or 0) + episode
+            except (TypeError, ValueError):
+                mapped_episode = episode
+
+    # Some mappings only carry TVDB coordinates. Anime-Lists is still a better
+    # coordinate than the provider-local "season 1"; for the common case TMDB
+    # follows the same season boundary, and PMDB-specific remapping can refine it
+    # later when that provider is the target.
+    if mapped_season is None and isinstance(direct_coordinates, dict):
+        mapped_season = direct_coordinates.get("tvdb_season")
+        mapped_episode = direct_coordinates.get("tvdb_episode")
+    if mapped_season is None and isinstance(season_map, dict):
+        mapped_season = season_map.get("tvdb")
+        if mapped_season is not None and episode is not None:
+            offset = offset_map.get("tvdb", 0) if isinstance(offset_map, dict) else 0
+            try:
+                mapped_episode = int(offset or 0) + episode
+            except (TypeError, ValueError):
+                mapped_episode = episode
+
+    try:
+        if mapped_tmdb_id:
+            enriched["tmdb_id"] = str(int(mapped_tmdb_id))
+            enriched_ids["tmdb"] = str(int(mapped_tmdb_id))
+        if mapped_season is not None and int(mapped_season) > 0:
+            enriched["season"] = int(mapped_season)
+            if mapped_episode is not None and int(mapped_episode) > 0:
+                enriched["episode"] = int(mapped_episode)
+    except (TypeError, ValueError):
+        logger.debug("Ignoring invalid mapped anime coordinates for %r", item.get("title"))
     enriched["ids"] = enriched_ids
     return enriched
 
@@ -389,14 +478,24 @@ class TraktAdapter(ProviderAdapter):
             {"key": "collection", "label": "Collection", "category": CATEGORY_COLLECTION, "kind": "status"},
             {"key": "history", "label": "Watch History", "category": CATEGORY_HISTORY, "kind": "status"},
         ]
-        for meta in (self._client.get_personal_lists_metadata() or []):
+        try:
+            personal_lists = self._client.get_personal_lists_metadata() or []
+        except Exception:
+            personal_lists = []
+            logger.warning("Trakt: could not enumerate personal lists", exc_info=True)
+        for meta in personal_lists:
             out.append({
                 "key": f"list:{meta.get('user')}/{meta.get('slug')}",
                 "label": f"{meta.get('name')} (personal)",
                 "category": CATEGORY_WATCHLIST,
                 "kind": "list",
             })
-        for meta in (self._client.get_liked_lists_metadata() or []):
+        try:
+            liked_lists = self._client.get_liked_lists_metadata() or []
+        except Exception:
+            liked_lists = []
+            logger.warning("Trakt: could not enumerate liked lists", exc_info=True)
+        for meta in liked_lists:
             out.append({
                 "key": f"list:{meta.get('user')}/{meta.get('slug')}",
                 "label": f"{meta.get('name')} (liked)",
@@ -1082,9 +1181,9 @@ class MdbListAdapter(ProviderAdapter):
 
     Two different things live behind this one provider:
 
-    * MDBList's account-level sync API — ``/sync/watchlist``, ``/sync/collection``
-      and ``/sync/watched`` — which is Trakt-shaped and both readable and
-      writable. MDBList marks these endpoints BETA.
+    * MDBList's account-level APIs — ``/watchlist/items``, ``/sync/collection``
+      and ``/sync/watched`` — which are Trakt-shaped and both readable and
+      writable.
     * The user's curated static lists, read through ``/lists/{id}/items`` and
       written through ``/lists/{id}/items/{add|remove}``. A curated list has no
       watched/unwatched semantics, so the same items answer both the watchlist
@@ -1128,10 +1227,21 @@ class MdbListAdapter(ProviderAdapter):
         )
 
     def list_sources(self) -> list[dict]:
+        """Native feeds plus every list owned by the authenticated account."""
         sources = [
             {"key": key, "label": label, "category": category, "kind": "status"}
             for key, label, category in self._NATIVE_SOURCES
         ]
+        try:
+            user_lists = list(self._client.get_user_lists() or [])
+        except Exception:
+            user_lists = []
+            logger.warning("MDBList: could not enumerate account lists", exc_info=True)
+        by_id = {
+            str(entry.get("id")): entry
+            for entry in [*user_lists, *self._selected_lists]
+            if entry.get("id")
+        }
         sources.extend(
             {
                 "key": f"list:{entry.get('id')}",
@@ -1139,19 +1249,29 @@ class MdbListAdapter(ProviderAdapter):
                 "category": CATEGORY_WATCHLIST,
                 "kind": "list",
             }
-            for entry in self._selected_lists
+            for entry in by_id.values()
             if entry.get("id")
         )
         return sources
 
     def target_lists(self) -> list[dict]:
         """The user's own static lists — the only ones this app can write to."""
+        try:
+            user_lists = self._client.get_user_lists() or []
+        except Exception:
+            user_lists = []
+            logger.warning("MDBList: could not enumerate writable account lists", exc_info=True)
+        by_id = {
+            str(entry.get("id")): entry
+            for entry in [*user_lists, *self._selected_lists]
+            if entry.get("id")
+        }
         return [
             {
                 "key": f"list:{entry.get('id')}",
                 "label": str(entry.get("name") or f"List {entry.get('id')}"),
             }
-            for entry in self._selected_lists
+            for entry in by_id.values()
             if entry.get("id")
         ]
 
@@ -1178,18 +1298,16 @@ class MdbListAdapter(ProviderAdapter):
             return self._cache
         items: list[dict] = []
         seen: set[str] = set()
-        for entry in self._selected_lists:
-            if chosen and str(entry.get("id")) not in chosen:
-                continue
-            list_id = entry.get("id")
-            if not list_id:
-                continue
+        selected_ids = {
+            str(entry.get("id")) for entry in self._selected_lists if entry.get("id")
+        }
+        list_ids = chosen or selected_ids
+        for list_id in sorted(list_ids):
             try:
                 fetched = self._client.get_list_items(int(list_id)) or []
             except Exception:
                 logger.warning(
-                    "MDBList: could not read list %s (%s)",
-                    list_id, entry.get("name") or "unnamed", exc_info=True,
+                    "MDBList: could not read list %s", list_id, exc_info=True,
                 )
                 continue
             for item in fetched:

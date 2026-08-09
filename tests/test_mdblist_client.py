@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from src.config import MdbListConfig
 from src.mdblist_client import MdbListClient
 
@@ -188,13 +190,53 @@ class MdbListSyncWriteTests(unittest.TestCase):
         self.assertEqual(items[0]["media_type"], "movie")
         self.assertEqual(items[0]["watched_at"], "2025-10-21T12:00:00Z")
 
+    def test_watchlist_uses_the_dedicated_items_endpoint_and_cursor(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        first = Mock()
+        first.json.return_value = {
+            "movies": [{"id": 278, "title": "The Shawshank Redemption", "imdb_id": "tt0111161"}],
+            "pagination": {"next_cursor": "next-page"},
+        }
+        first.headers = {}
+        second = Mock()
+        second.json.return_value = {
+            "shows": [{"id": 1396, "title": "Breaking Bad", "tvdb_id": 81189}],
+            "pagination": {"next_cursor": None},
+        }
+        second.headers = {}
+
+        with patch.object(client, "_get", side_effect=[first, second]) as get:
+            items = client.get_sync_items("watchlist")
+
+        self.assertEqual([item["tmdb_id"] for item in items], ["278", "1396"])
+        self.assertEqual(get.call_args_list[0].args[0], "/watchlist/items")
+        self.assertEqual(get.call_args_list[1].args[1]["cursor"], "next-page")
+
     def test_each_category_maps_to_its_own_endpoint(self) -> None:
         client = MdbListClient(MdbListConfig(api_key="key"))
         with patch.object(client, "_post", return_value={}) as post:
             client.add_sync_items("history", [{"media_type": "movie", "tmdb_id": "1"}])
             client.remove_sync_items("watchlist", [{"media_type": "movie", "tmdb_id": "1"}])
         self.assertEqual(post.call_args_list[0].args[0], "/sync/watched")
-        self.assertEqual(post.call_args_list[1].args[0], "/sync/watchlist/remove")
+        self.assertEqual(post.call_args_list[1].args[0], "/watchlist/items/remove")
+
+    def test_watchlist_add_uses_the_dedicated_write_endpoint(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        with patch.object(client, "_post", return_value={}) as post:
+            client.add_sync_items("watchlist", [{"media_type": "movie", "tmdb_id": "1"}])
+        self.assertEqual(post.call_args.args[0], "/watchlist/items/add")
+
+    def test_http_errors_do_not_echo_the_api_key(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="top-secret"))
+        response = Mock(status_code=405)
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "405 for https://api.mdblist.com/watchlist?apikey=top-secret",
+            response=response,
+        )
+        with patch.object(client._session, "get", return_value=response):
+            with self.assertRaisesRegex(Exception, r"apikey=\[redacted\]") as caught:
+                client._get("/watchlist")
+        self.assertNotIn("top-secret", str(caught.exception))
 
     def test_an_unknown_category_is_refused_rather_than_guessed(self) -> None:
         client = MdbListClient(MdbListConfig(api_key="key"))

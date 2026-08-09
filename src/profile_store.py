@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,21 @@ ALLOWED_VISIBILITIES = {"private", "public"}
 ALLOWED_ACTIVITY_SOURCES = {"off", "simkl", "trakt"}
 CONNECTION_HEALTH_PROVIDERS = {"pmdb", "tmdb", "simkl", "trakt", "anilist", "mdblist"}
 DEFAULT_KEY_FILE_NAME = "profiles.key"
+
+_SECRET_URL_RE = re.compile(
+    r"(?i)([?&](?:apikey|api_key|access_token|refresh_token|client_secret|token)=)[^&\s]+"
+)
+
+
+def _redact_secret_urls(value):
+    """Recursively remove credentials accidentally captured in provider URLs."""
+    if isinstance(value, str):
+        return _SECRET_URL_RE.sub(r"\1[redacted]", value)
+    if isinstance(value, list):
+        return [_redact_secret_urls(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_secret_urls(item) for key, item in value.items()}
+    return value
 
 ACTIVITY_RESULT_NAMES = {
     "Watch History": "watch_history",
@@ -986,7 +1002,7 @@ class ProfileStore:
             "activity_results": _normalize_activity_results(raw_profile.get("activity_results")),
             "activity_state": _normalize_activity_state(raw_profile.get("activity_state")),
             "managed_lists": _normalize_managed_lists(raw_profile.get("managed_lists", [])),
-            "last_pair_results": copy.deepcopy(raw_profile.get("last_pair_results", {})) if isinstance(raw_profile.get("last_pair_results"), dict) else {},
+            "last_pair_results": _redact_secret_urls(copy.deepcopy(raw_profile.get("last_pair_results", {}))) if isinstance(raw_profile.get("last_pair_results"), dict) else {},
             "pair_sync_schedule": pair_sync_schedule,
             "anime_manual_overrides": copy.deepcopy(raw_profile.get("anime_manual_overrides", {})) if isinstance(raw_profile.get("anime_manual_overrides"), dict) else {},
             "anime_review_decisions": copy.deepcopy(raw_profile.get("anime_review_decisions", {})) if isinstance(raw_profile.get("anime_review_decisions"), dict) else {},
@@ -1040,7 +1056,7 @@ class ProfileStore:
             "activity_results": copy.deepcopy(profile.get("activity_results", {})),
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "managed_lists": copy.deepcopy(profile.get("managed_lists", [])),
-            "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
+            "last_pair_results": _redact_secret_urls(copy.deepcopy(profile.get("last_pair_results", {}))),
             "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
             "anime_manual_overrides": copy.deepcopy(profile.get("anime_manual_overrides", {})),
             "anime_review_decisions": copy.deepcopy(profile.get("anime_review_decisions", {})),
@@ -1118,6 +1134,10 @@ class ProfileStore:
         if sync_modes["lists"]:
             profile["last_sync"] = utc_now_iso()
             profile["next_sync_at"] = self._next_sync_iso(options["interval_seconds"], profile.get("profile_id", "")) if auto_sync else None
+        elif sync_modes.get("pairs"):
+            # This is the dashboard timestamp for whichever result set ran
+            # latest, including pair-only jobs.
+            profile["last_sync"] = utc_now_iso()
         if sync_modes["history"]:
             profile["last_history_sync"] = utc_now_iso()
             if auto_history_sync and options.get("activity_history_source") != "off":
@@ -1363,7 +1383,7 @@ class ProfileStore:
             "activity_results": copy.deepcopy(profile.get("activity_results", {})),
             "activity_state": copy.deepcopy(profile.get("activity_state", {})),
             "options": copy.deepcopy(profile.get("options", {})),
-            "last_pair_results": copy.deepcopy(profile.get("last_pair_results", {})),
+            "last_pair_results": _redact_secret_urls(copy.deepcopy(profile.get("last_pair_results", {}))),
             "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
             "sync_job_id": profile.get("sync_job_id"),
@@ -1850,7 +1870,11 @@ class ProfileStore:
             profile = self._profiles[normalized_id]
             now = utc_now_iso()
             normalized_modes = self._normalize_sync_modes(sync_modes)
-            if normalized_modes["lists"]:
+            if normalized_modes["pairs"]:
+                # Pair rows intentionally have no PMDB list_name. They still
+                # belong in Latest Sync Results and the shared run history.
+                profile["last_results"] = [copy.deepcopy(row) for row in results]
+            elif normalized_modes["lists"]:
                 profile["last_results"] = [
                     copy.deepcopy(row)
                     for row in results

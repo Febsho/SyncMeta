@@ -214,6 +214,22 @@ class LibraryAdapterTests(unittest.TestCase):
         ])
         self.assertEqual(len(self.adapter.fetch(CATEGORY_HISTORY)), 1)
 
+    def test_corrected_anime_episode_removes_legacy_season_one_overflow(self) -> None:
+        stale = {
+            "title": "Mapped Anime", "media_type": "tv", "tmdb_id": "9000",
+            "season": 1, "episode": 29,
+        }
+        corrected = {
+            "title": "Mapped Anime", "media_type": "tv", "tmdb_id": "9000",
+            "season": 2, "episode": 1, "_syncmeta_replaces_episode": "1x29",
+        }
+        self.adapter.add(CATEGORY_HISTORY, [stale])
+
+        self.adapter.add(CATEGORY_HISTORY, [corrected])
+        rows = self.adapter.fetch(CATEGORY_HISTORY)
+
+        self.assertEqual([(row["season"], row["episode"]) for row in rows], [(2, 1)])
+
     def test_removing_history_unmarks_the_episode(self) -> None:
         item = {"media_type": "tv", "tmdb_id": "1429", "season": 1, "episode": 3, "title": "AoT"}
         self.adapter.add(CATEGORY_HISTORY, [item])

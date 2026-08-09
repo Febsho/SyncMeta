@@ -513,7 +513,7 @@ class SimklClientTests(unittest.TestCase):
         self.assertEqual(history[0]["tmdb_id"], 1575337)
         self.assertEqual(history[0]["watched_at"], "2026-04-03T13:00:00Z")
 
-    def test_expand_aggregate_history_item_overflows_into_season_one_when_only_season_one_is_known(self) -> None:
+    def test_expand_aggregate_history_item_uses_pending_later_tmdb_season(self) -> None:
         client = RecordingSimklClient()
 
         expanded = client.expand_aggregate_history_item({
@@ -526,8 +526,12 @@ class SimklClientTests(unittest.TestCase):
         })
 
         self.assertEqual(len(expanded), 38)
-        self.assertTrue(all(item["season"] == 1 for item in expanded))
-        self.assertEqual(expanded[-1]["episode"], 38)
+        self.assertEqual(
+            [(item["season"], item["episode"]) for item in expanded[27:]],
+            [(1, 28), *[(2, episode) for episode in range(1, 11)]],
+        )
+        self.assertEqual(expanded[28]["_syncmeta_replaces_episode"], "1x29")
+        self.assertEqual(expanded[-1]["_syncmeta_replaces_episode"], "1x38")
 
     def test_expand_aggregate_history_item_still_skips_unsafe_multi_season_gap(self) -> None:
         client = RecordingSimklClient()

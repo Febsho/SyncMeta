@@ -440,6 +440,81 @@ def _stats_to_detail_dict(stats: SyncStats) -> dict:
     return data
 
 
+def _sanitize_pair_result(result: dict) -> dict:
+    """Redact provider errors before they reach profile storage or the browser."""
+    data = copy.deepcopy(result or {})
+    data["errors"] = [
+        _sanitize_error_text(item) for item in (data.get("errors") or [])
+        if str(item or "").strip()
+    ]
+    categories = []
+    for category in data.get("categories") or []:
+        if not isinstance(category, dict):
+            continue
+        row = copy.deepcopy(category)
+        row["errors"] = [
+            _sanitize_error_text(item) for item in (row.get("errors") or [])
+            if str(item or "").strip()
+        ]
+        categories.append(row)
+    data["categories"] = categories
+    data["error_count"] = len(data["errors"]) + sum(
+        len(category.get("errors") or []) for category in categories
+    )
+    return data
+
+
+def _pair_result_rows(results: list[dict], run_id: str = "") -> tuple[list[dict], list[dict]]:
+    """Translate pair outcomes into the dashboard's shared result-row shape."""
+    summaries: list[dict] = []
+    details: list[dict] = []
+    for raw in results or []:
+        if not isinstance(raw, dict):
+            continue
+        result = _sanitize_pair_result(raw)
+        categories = result.get("categories") or []
+        fetched = sum(int(category.get("source_items") or 0) for category in categories)
+        unmapped = int(result.get("unmapped") or 0)
+        errors = list(result.get("errors") or [])
+        for category in categories:
+            errors.extend(category.get("errors") or [])
+        source = str(result.get("source") or "").strip()
+        target = str(result.get("target") or "").strip()
+        display_name = str(result.get("name") or "").strip() or f"{source} → {target}"
+        row = {
+            "row_key": f"pair:{result.get('pair_id') or display_name}",
+            "pair_id": str(result.get("pair_id") or ""),
+            "sync_kind": "pair",
+            "list_name": "",
+            "display_name": display_name,
+            "source_name": source.upper(),
+            "target_name": target.upper(),
+            "items_fetched": fetched,
+            "items_resolved": max(0, fetched - unmapped),
+            "items_added": int(result.get("added") or 0),
+            "items_removed": int(result.get("removed") or 0),
+            "items_skipped_duplicate": sum(
+                int(category.get("skipped_existing") or 0) for category in categories
+            ),
+            "items_skipped_unresolved": 0,
+            "pair_unmapped": unmapped,
+            "error_count": len(errors),
+            "has_details": bool(errors or unmapped),
+        }
+        if run_id:
+            row["run_id"] = run_id
+        summaries.append(row)
+        details.append({
+            **row,
+            "errors": errors,
+            "categories": copy.deepcopy(categories),
+            "mode": result.get("mode"),
+            "removal_mode": result.get("removal_mode"),
+            "dry_run": bool(result.get("dry_run", False)),
+        })
+    return summaries, details
+
+
 def _sanitize_run_detail(run: dict) -> dict:
     sanitized = copy.deepcopy(run or {})
     sanitized["error_message"] = _sanitize_error_text(str(sanitized.get("error_message", "") or ""))
@@ -851,10 +926,18 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
             )
             pair_results = pair_service.run_pairs(pairs)
+            pair_result_dicts = [
+                _sanitize_pair_result(result.to_dict()) for result in pair_results
+            ]
+            pair_summaries, pair_details = _pair_result_rows(
+                pair_result_dicts, run_id=str(profile.get("sync_job_id", "") or ""),
+            )
+            result_dicts.extend(pair_summaries)
+            detailed_result_dicts.extend(pair_details)
             if not dry_run:
                 _profile_store.update_pair_managed_keys(profile_id, pair_service.managed_keys)
                 _profile_store.update_pair_last_results(
-                    profile_id, [result.to_dict() for result in pair_results], dry_run=False,
+                    profile_id, pair_result_dicts, dry_run=False,
                 )
         _profile_store.record_sync_success(
             profile_id,
@@ -2665,6 +2748,136 @@ def _enrich_library_items(items: list[dict], tmdb_api_key: str) -> tuple[list[di
     return items, ""
 
 
+REMOTE_LIBRARY_PROVIDERS = {"simkl", "trakt", "anilist", "mdblist"}
+REMOTE_LIBRARY_LABELS = {
+    "simkl": "SIMKL", "trakt": "Trakt", "anilist": "AniList", "mdblist": "MDBList",
+}
+
+
+def _remote_library_context(provider: str):
+    """Resolve a configured provider adapter for the remote Library tabs."""
+    private_profile = _current_private_profile()
+    if not private_profile:
+        return None, "", None, (_clear_session_cookie(_json_error("Sign in first", 401)[0]), 401)
+    provider = str(provider or "").strip().lower()
+    if provider not in REMOTE_LIBRARY_PROVIDERS:
+        return None, "", private_profile, _json_error("Unsupported library provider", 400)
+    config = _config_from_profile(private_profile)
+    adapter = _build_provider_adapters(
+        config, profile_id=str(private_profile.get("profile_id") or ""),
+    ).get(provider)
+    if adapter is None:
+        return None, "", private_profile, _json_error(
+            f"Connect {REMOTE_LIBRARY_LABELS[provider]} first", 409,
+        )
+    credentials = normalize_credentials(private_profile.get("credentials"))
+    return adapter, credentials["tmdb"]["api_key"], private_profile, None
+
+
+def _remote_library_sources(adapter) -> list[dict]:
+    """Normalize provider-native sources for the Library picker."""
+    sources = []
+    seen = set()
+    for raw in adapter.safe_list_sources():
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip()
+        category = str(raw.get("category") or "").strip().lower()
+        if not key or category not in set(adapter.readable_categories()) or key in seen:
+            continue
+        seen.add(key)
+        kind = str(raw.get("kind") or "status").strip().lower()
+        source_type = "history" if category == "history" else (
+            "watchlist" if key == "watchlist" else ("list" if kind == "list" else "status")
+        )
+        sources.append({
+            "id": key,
+            "name": str(raw.get("label") or key).strip(),
+            "type": source_type,
+            "category": category,
+            "source": adapter.label,
+        })
+    return sources
+
+
+def _remote_library_item(raw: dict) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    ids = raw.get("ids") if isinstance(raw.get("ids"), dict) else {}
+    tmdb_id = raw.get("tmdb_id") or ids.get("tmdb")
+    media_type = str(raw.get("media_type") or raw.get("simkl_type") or "").strip().lower()
+    if media_type in {"show", "shows", "tv", "anime"}:
+        media_type = "tv"
+    elif media_type in {"movie", "movies"}:
+        media_type = "movie"
+    else:
+        media_type = "tv" if raw.get("season") is not None or raw.get("episode") is not None else "movie"
+    title = str(raw.get("title") or raw.get("name") or "Unknown").strip()
+    return {
+        "tmdb_id": str(tmdb_id) if tmdb_id else None,
+        "media_type": media_type,
+        "title": title,
+        "year": raw.get("year") or raw.get("release_year"),
+        "poster_url": str(raw.get("poster_url") or ""),
+        "season": raw.get("season"),
+        "episode": raw.get("episode"),
+        "last_watched_at": raw.get("watched_at") or raw.get("last_watched_at") or raw.get("added_at"),
+        "play_count": int(raw.get("plays") or raw.get("play_count") or 1),
+    }
+
+
+@app.route("/api/profile/library/provider/overview", methods=["POST"])
+def api_profile_library_provider_overview():
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider") or "").strip().lower()
+    adapter, tmdb_key, _private_profile, error_response = _remote_library_context(provider)
+    if error_response is not None:
+        return error_response
+    return jsonify({
+        "provider": provider,
+        "label": adapter.label,
+        "lists": _remote_library_sources(adapter),
+        "tmdb_configured": bool(tmdb_key),
+    })
+
+
+@app.route("/api/profile/library/provider/items", methods=["POST"])
+def api_profile_library_provider_items():
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider") or "").strip().lower()
+    source_key = str(body.get("source_key") or "").strip()
+    if not source_key:
+        return _json_error("source_key is required", 400)
+    adapter, tmdb_key, _private_profile, error_response = _remote_library_context(provider)
+    if error_response is not None:
+        return error_response
+    source = next(
+        (entry for entry in _remote_library_sources(adapter) if entry["id"] == source_key), None,
+    )
+    if source is None:
+        return _json_error("Library source not found", 404)
+    try:
+        raw_items = adapter.fetch(source["category"], [source_key]) or []
+    except Exception as exc:
+        logger.warning("Library provider %s source %s failed: %s", provider, source_key, exc)
+        return _json_error(f"Could not load {source['name']} from {adapter.label}", 502)
+    items = []
+    for raw in raw_items[:1000]:
+        normalized = _remote_library_item(raw)
+        if normalized:
+            items.append(normalized)
+    items, tmdb_error = _enrich_library_items(items, tmdb_key)
+    return jsonify({
+        "provider": provider,
+        "source": source,
+        "items": items,
+        "total": len(raw_items),
+        "limited": len(raw_items) > len(items),
+        "tmdb_configured": bool(tmdb_key),
+        "tmdb_error": tmdb_error,
+    })
+
+
 # ── Local Library ─────────────────────────────────────────────────────────────
 #
 # The Library is SyncMeta's own store rather than a view onto PublicMetaDB, so
@@ -3537,13 +3750,14 @@ def api_profile_pairs_run():
             return _json_error(f"Sync failed: {exc}", 500)
         finally:
             _log_profile_id.reset(log_token)
+        result_dicts = [_sanitize_pair_result(result.to_dict()) for result in results]
         if not dry_run:
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
-            _profile_store.update_pair_last_results(profile_id, [r.to_dict() for r in results])
+            _profile_store.update_pair_last_results(profile_id, result_dicts)
             _profile_store.mark_pairs_synced(profile_id, [pair.pair_id for pair in pairs])
         return jsonify({
             "status": "completed", "dry_run": dry_run,
-            "results": [result.to_dict() for result in results],
+            "results": result_dicts,
             "provider_reads": service.last_run_provider_reads,
             "cached_reads": service.last_run_cache_hits,
         })

@@ -27,6 +27,15 @@ RATE_LIMIT_MAX = 100
 RATE_LIMIT_WINDOW = 10.0
 
 
+def _redact_secret_query(text: str) -> str:
+    """Keep requests errors useful without echoing credentials in their URL."""
+    return re.sub(
+        r"(?i)([?&](?:apikey|api_key|access_token|refresh_token|client_secret)=)[^&\s]+",
+        r"\1[redacted]",
+        str(text or ""),
+    )
+
+
 class MdbListClient:
     """Client for the MDBList REST API."""
 
@@ -111,7 +120,12 @@ class MdbListClient:
             url, params=request_params, headers=self._auth_headers(), timeout=REQUEST_TIMEOUT,
         )
         self._check_cancelled()
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise requests.HTTPError(
+                _redact_secret_query(str(exc)), response=exc.response, request=exc.request,
+            ) from None
         return response
 
     def _post(self, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
@@ -136,7 +150,12 @@ class MdbListClient:
             timeout=REQUEST_TIMEOUT,
         )
         self._check_cancelled()
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise requests.HTTPError(
+                _redact_secret_query(str(exc)), response=exc.response, request=exc.request,
+            ) from None
         try:
             return response.json() or {}
         except ValueError:
@@ -456,14 +475,20 @@ class MdbListClient:
         return payload
 
     # ── sync surface ───────────────────────────────────────────────────────
-    # MDBList marks /sync/* BETA. Bodies are Trakt-shaped: {"movies": [...],
-    # "shows": [...]} with an ids object, which is why the app's item dicts map
-    # over with only id translation.
+    # Bodies are Trakt-shaped: {"movies": [...], "shows": [...]} with an ids
+    # object. Watchlist is now part of the dedicated /watchlist surface, while
+    # collection and watched history remain under /sync.
 
     _SYNC_PATHS = {
-        "watchlist": "/sync/watchlist",
+        "watchlist": "/watchlist/items",
         "collection": "/sync/collection",
         "history": "/sync/watched",
+    }
+
+    _SYNC_WRITE_PATHS = {
+        "watchlist": ("/watchlist/items/add", "/watchlist/items/remove"),
+        "collection": ("/sync/collection", "/sync/collection/remove"),
+        "history": ("/sync/watched", "/sync/watched/remove"),
     }
 
     @classmethod
@@ -523,7 +548,7 @@ class MdbListClient:
                     continue
                 ids = media.get("ids") or {}
                 imdb_id = ids.get("imdb") or media.get("imdb_id")
-                tmdb_id = ids.get("tmdb") or media.get("tmdb_id")
+                tmdb_id = ids.get("tmdb") or media.get("tmdb_id") or media.get("id")
                 if not imdb_id and not tmdb_id:
                     continue
                 out.append({
@@ -545,19 +570,40 @@ class MdbListClient:
         return out
 
     def get_sync_items(self, category: str) -> list[dict]:
-        """Read one sync category, following offset pagination."""
+        """Read one sync category, preferring the current cursor pagination."""
         path = self._sync_path(category)
         offset = 0
         limit = 1000
+        cursor = ""
         items: list[dict] = []
         while True:
-            payload = self._get(path, {"limit": limit, "offset": offset}).json() or {}
+            params = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            else:
+                # Kept as a fallback for older MDBList deployments. The current
+                # API returns next_cursor and never reaches the second offset.
+                params["offset"] = offset
+            response = self._get(path, params)
+            payload = response.json() or {}
             batch = self._from_sync_payload(payload, category)
             items.extend(batch)
             pagination = payload.get("pagination") if isinstance(payload, dict) else None
-            if not isinstance(pagination, dict) or not pagination.get("has_more") or not batch:
+            pagination = pagination if isinstance(pagination, dict) else {}
+            next_cursor = str(
+                pagination.get("next_cursor")
+                or response.headers.get("X-Next-Cursor", "")
+                or ""
+            ).strip()
+            has_more = bool(next_cursor or pagination.get("has_more") or self._has_more(response, payload))
+            if not has_more or not batch:
                 break
-            offset += limit
+            if next_cursor:
+                if next_cursor == cursor:
+                    break
+                cursor = next_cursor
+            else:
+                offset += limit
         logger.info("MDBList: fetched %d %s item(s)", len(items), category)
         return items
 
@@ -565,7 +611,10 @@ class MdbListClient:
         payload = self._to_sync_payload(items)
         if not payload["movies"] and not payload["shows"]:
             return {"added": 0}
-        result = self._post(self._sync_path(category), payload)
+        paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
+        if not paths:
+            raise ValueError(f"MDBList has no sync endpoint for {category!r}")
+        result = self._post(paths[0], payload)
         logger.info(
             "MDBList: added %d movie(s) and %d show(s) to %s",
             len(payload["movies"]), len(payload["shows"]), category,
@@ -576,7 +625,10 @@ class MdbListClient:
         payload = self._to_sync_payload(items)
         if not payload["movies"] and not payload["shows"]:
             return {"removed": 0}
-        result = self._post(f"{self._sync_path(category)}/remove", payload)
+        paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
+        if not paths:
+            raise ValueError(f"MDBList has no sync endpoint for {category!r}")
+        result = self._post(paths[1], payload)
         logger.info(
             "MDBList: removed %d movie(s) and %d show(s) from %s",
             len(payload["movies"]), len(payload["shows"]), category,

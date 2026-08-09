@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import threading
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from collections import deque
 
 _lock = threading.Lock()
 _log: deque[dict] = deque(maxlen=600)
 _counters: dict[str, int] = {}   # source -> total requests
 _error_counters: dict[str, int] = {}  # source -> total errors
+
+_SECRET_QUERY_KEYS = {
+    "apikey", "api_key", "access_token", "refresh_token", "client_secret", "token",
+}
+
+
+def _safe_url(url: str) -> str:
+    """Remove query-string credentials before storing request diagnostics."""
+    try:
+        parts = urlsplit(str(url or ""))
+        query = urlencode([
+            (key, "[redacted]" if key.lower() in _SECRET_QUERY_KEYS else value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ])
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except Exception:
+        return str(url or "")
 
 
 def record(source: str, method: str, url: str, status: int, duration_ms: float) -> None:
@@ -21,7 +39,7 @@ def record(source: str, method: str, url: str, status: int, duration_ms: float) 
             "ts": now,
             "source": source,
             "method": method.upper(),
-            "url": url,
+            "url": _safe_url(url),
             "status": status,
             "duration_ms": round(duration_ms, 1),
             "error": is_err,
@@ -34,7 +52,10 @@ def record(source: str, method: str, url: str, status: int, duration_ms: float) 
 def snapshot(limit: int = 300) -> list[dict]:
     """Return up to *limit* most-recent records (newest first)."""
     with _lock:
-        return list(_log)[:limit]
+        return [
+            {**entry, "url": _safe_url(entry.get("url", ""))}
+            for entry in list(_log)[:limit]
+        ]
 
 
 def counters() -> dict:

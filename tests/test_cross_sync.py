@@ -338,11 +338,118 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(item_key(enriched), "movie:tmdb:128")
 
     @patch("src.fribb_client.lookup_by_anilist")
-    def test_enrichment_never_overwrites_a_supplied_tmdb_id(self, lookup_by_anilist) -> None:
+    def test_exact_anime_mapping_replaces_a_season_title_tmdb_id(self, lookup_by_anilist) -> None:
         lookup_by_anilist.return_value = {"themoviedb_id": {"movie": [999]}}
         enriched = enrich_identity({"media_type": "movie", "tmdb_id": "128", "anilist_id": "164"})
-        self.assertEqual(enriched["tmdb_id"], "128")
-        lookup_by_anilist.assert_not_called()
+        self.assertEqual(enriched["tmdb_id"], "999")
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_anime_episode_is_mapped_to_tmdb_series_season(
+        self, lookup_by_anilist, _resolve_episode,
+    ) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 200,
+            "anidb_id": 300,
+            "themoviedb_id": {"tv": 9000},
+            "season": {"tvdb": 2, "tmdb": 3},
+            "episode_offset": {"tvdb": 12, "tmdb": 0},
+        }
+
+        enriched = enrich_identity({
+            "title": "Season title", "media_type": "tv", "simkl_type": "anime",
+            "tmdb_id": "8123", "anilist_id": "200", "anidb_id": "300",
+            "season": 1, "episode": 7,
+        })
+
+        self.assertEqual(enriched["tmdb_id"], "9000")
+        self.assertEqual((enriched["season"], enriched["episode"]), (3, 7))
+        self.assertEqual(item_key(enriched), "tv:tmdb:9000:s3e7")
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_anilist_season_entries_share_the_mapped_tmdb_series_key(
+        self, lookup_by_anilist,
+    ) -> None:
+        mappings = {
+            100: {"themoviedb_id": {"tv": 9000}, "season": {"tmdb": 1}},
+            200: {"themoviedb_id": {"tv": 9000}, "season": {"tmdb": 2}},
+        }
+        lookup_by_anilist.side_effect = lambda value: mappings[int(value)]
+
+        first = enrich_identity({
+            "media_type": "tv", "anilist_id": "100", "tmdb_id": "8100",
+        })
+        second = enrich_identity({
+            "media_type": "tv", "anilist_id": "200", "tmdb_id": "8200",
+        })
+
+        self.assertEqual(item_key(first), "tv:tmdb:9000")
+        self.assertEqual(item_key(second), "tv:tmdb:9000")
+        self.assertEqual((first["season"], second["season"]), (1, 2))
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode")
+    @patch("src.fribb_client.lookup_by_anidb")
+    def test_anime_lists_xml_direct_tmdb_coordinates_take_priority(
+        self, lookup_by_anidb, resolve_episode,
+    ) -> None:
+        lookup_by_anidb.return_value = {
+            "anidb_id": 300, "themoviedb_id": {"tv": 9000},
+            "season": {"tmdb": 2}, "episode_offset": {"tmdb": 0},
+        }
+        resolve_episode.return_value = {
+            "tvdb_id": 10, "tvdb_season": 4, "tvdb_episode": 19,
+            "tmdb_id": 9000, "tmdb_season": 5, "tmdb_episode": 2,
+        }
+
+        enriched = enrich_identity({
+            "media_type": "tv", "simkl_type": "anime", "anidb_id": "300",
+            "season": 1, "episode": 2,
+        })
+
+        self.assertEqual((enriched["season"], enriched["episode"]), (5, 2))
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_live_tmdb_plan_coordinates_are_not_remapped_through_root_entry(
+        self, lookup_by_anilist,
+    ) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 154587, "themoviedb_id": {"tv": 209867},
+            "season": {"tmdb": 1},
+        }
+
+        enriched = enrich_identity({
+            "media_type": "tv", "simkl_type": "anime", "tmdb_id": "209867",
+            "anilist_id": "154587", "season": 2, "episode": 1,
+            "_syncmeta_tmdb_coordinates": True,
+        })
+
+        self.assertEqual((enriched["season"], enriched["episode"]), (2, 1))
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_pair_writes_tmdb_episode_coordinates_to_library_target(
+        self, lookup_by_anilist, _resolve_episode,
+    ) -> None:
+        lookup_by_anilist.return_value = {
+            "anilist_id": 200, "themoviedb_id": {"tv": 9000},
+            "season": {"tmdb": 2}, "episode_offset": {"tmdb": 0},
+        }
+        source = FakeAdapter("simkl", {CATEGORY_HISTORY: [{
+            "media_type": "tv", "simkl_type": "anime", "tmdb_id": "8123",
+            "anilist_id": "200", "season": 1, "episode": 4,
+        }]}, reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,))
+        target = FakeAdapter(
+            "library", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+
+        stats = CrossSyncService({"simkl": source, "library": target}).run_pair(
+            _pair(source="simkl", target="library", categories=[CATEGORY_HISTORY]),
+        )
+
+        self.assertEqual(stats.added, 1)
+        written = target.added[0][1][0]
+        self.assertEqual((written["tmdb_id"], written["season"], written["episode"]), ("9000", 2, 4))
 
     @patch("src.fribb_client.lookup_by_anilist")
     def test_enrichment_refuses_a_cross_namespace_mapping(self, lookup_by_anilist) -> None:
@@ -431,6 +538,38 @@ class SourceListSelectionTests(unittest.TestCase):
         service.run_pair(_pair(source_lists=["list:me/faves"]))
 
         self.assertEqual(target.fetched[0][1], [])
+
+
+class TraktListDiscoveryTests(unittest.TestCase):
+    class Client:
+        def get_personal_lists_metadata(self):
+            return [{"user": "me", "slug": "mine", "name": "Mine"}]
+
+        def get_liked_lists_metadata(self):
+            return [{"user": "other", "slug": "liked", "name": "Liked"}]
+
+    def test_personal_and_liked_lists_are_shown(self) -> None:
+        from src.providers import TraktAdapter
+        sources = TraktAdapter(self.Client()).list_sources()
+        keys = {entry["key"] for entry in sources}
+
+        self.assertIn("list:me/mine", keys)
+        self.assertIn("list:other/liked", keys)
+
+    def test_one_failed_catalog_does_not_hide_the_other_or_native_feeds(self) -> None:
+        from src.providers import TraktAdapter
+
+        class PartiallyFailingClient(self.Client):
+            def get_personal_lists_metadata(self):
+                raise RuntimeError("Trakt personal lists unavailable")
+
+        sources = TraktAdapter(PartiallyFailingClient()).list_sources()
+        keys = {entry["key"] for entry in sources}
+
+        self.assertIn("watchlist", keys)
+        self.assertIn("collection", keys)
+        self.assertIn("history", keys)
+        self.assertIn("list:other/liked", keys)
 
 
 class TwoWayPairTests(unittest.TestCase):
@@ -951,7 +1090,10 @@ class MdbListProviderTests(unittest.TestCase):
     """MDBList reads and writes: its own sync API plus the user's static lists."""
 
     class FakeMdbClient:
-        def __init__(self, items_by_list=None, failing=(), sync_items=None, write_auth=True):
+        def __init__(
+            self, items_by_list=None, failing=(), sync_items=None, write_auth=True,
+            user_lists=None,
+        ):
             self._items = items_by_list or {}
             self._failing = set(failing)
             self._sync = sync_items or {}
@@ -961,6 +1103,7 @@ class MdbListProviderTests(unittest.TestCase):
             self.added: list[tuple[str, list]] = []
             self.removed: list[tuple[str, list]] = []
             self.list_changes: list[tuple] = []
+            self.user_lists = list(user_lists or [])
 
         def has_write_auth(self):
             return self._write_auth
@@ -970,6 +1113,9 @@ class MdbListProviderTests(unittest.TestCase):
             if list_id in self._failing:
                 raise RuntimeError("mdblist 500")
             return list(self._items.get(list_id, []))
+
+        def get_user_lists(self):
+            return list(self.user_lists)
 
         def get_sync_items(self, category):
             self.sync_reads.append(category)
@@ -1015,6 +1161,28 @@ class MdbListProviderTests(unittest.TestCase):
         items = adapter.fetch(CATEGORY_HISTORY)
         self.assertEqual([i["tmdb_id"] for i in items], ["7"])
         self.assertEqual(client.sync_reads, [CATEGORY_HISTORY])
+
+    def test_account_lists_are_discovered_without_legacy_selections(self) -> None:
+        client = self.FakeMdbClient(user_lists=[{"id": 42, "name": "Mine"}])
+        adapter = self._adapter(client=client, selected_lists=[])
+
+        sources = adapter.list_sources()
+
+        self.assertIn(
+            {"key": "list:42", "label": "Mine", "category": CATEGORY_WATCHLIST, "kind": "list"},
+            sources,
+        )
+        self.assertEqual(adapter.target_lists(), [{"key": "list:42", "label": "Mine"}])
+
+    def test_newly_discovered_list_can_be_read_without_legacy_selection(self) -> None:
+        client = self.FakeMdbClient(
+            {42: [_movie("7")]}, user_lists=[{"id": 42, "name": "Mine"}],
+        )
+        adapter = self._adapter(client=client, selected_lists=[])
+
+        items = adapter.fetch(CATEGORY_WATCHLIST, ["list:42"])
+
+        self.assertEqual([item["tmdb_id"] for item in items], ["7"])
 
     def test_history_never_folds_in_a_curated_list(self) -> None:
         # A curated list carries no watch dates, so mixing one into history

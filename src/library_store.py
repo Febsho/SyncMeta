@@ -274,6 +274,14 @@ class LibraryStore:
                         skipped += 1
                         continue
                 watched = entry.setdefault("watched", {})
+                replacement = str(item.get("_syncmeta_replaces_episode") or "").strip()
+                if replacement and replacement != slot:
+                    # Older SIMKL aggregate-history imports intentionally
+                    # overflowed later seasons into S1 (for example Frieren
+                    # 1x29 instead of 2x1). Corrected rows carry the exact stale
+                    # slot they supersede so the next sync repairs existing
+                    # libraries without touching unrelated watched episodes.
+                    watched.pop(replacement, None)
                 if slot not in watched:
                     watched[slot] = str(item.get("watched_at") or "") or time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()

@@ -1018,6 +1018,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["lists"], [])
 
+    @patch("web.MdbListClient.get_user_lists")
+    def test_pair_lists_include_live_mdblist_account_lists(self, mock_get_user_lists) -> None:
+        mock_get_user_lists.return_value = [{"id": 27, "name": "My Anime"}]
+        profile = web._profile_store.create_profile("secret", {
+            **_blank_credentials(),
+            "mdblist": {"api_key": "mdb-key", "selected_lists": []},
+        }, {"auto_sync": False, "media_types": ["shows"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/lists", json={"provider": "mdblist"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            {"key": "list:27", "label": "My Anime", "category": "watchlist", "kind": "list"},
+            response.get_json()["lists"],
+        )
+
     def test_pair_source_lists_round_trip(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
@@ -1251,6 +1268,47 @@ class WebTests(unittest.TestCase):
         # The editor gets the same outcome attached to each pair.
         pairs = self.client.post("/api/profile/pairs", json={}).get_json()["pairs"]
         self.assertEqual(pairs[0]["last_result"]["added"], 1)
+
+    def test_background_pair_run_populates_latest_results_and_sync_history(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        saved = self.client.post("/api/profile/pairs/save", json={"pairs": [
+            {"name": "T-S", "source": "trakt", "target": "simkl", "categories": ["watchlist"]},
+        ]}).get_json()
+        pair_id = saved["profile"]["options"]["sync_pairs"][0]["pair_id"]
+        modes = {
+            "lists": False, "history": False, "resume": False,
+            "pairs": True, "pair_ids": [pair_id],
+        }
+        claimed = web._profile_store.claim_profile_for_sync_by_id(profile["profile_id"], modes)
+        movie = {"title": "M", "media_type": "movie", "tmdb_id": "1", "ids": {"tmdb": "1"}}
+        adapters = self._fake_pair_adapters({"trakt": [movie], "simkl": []})
+
+        with patch.object(web, "_build_provider_adapters", return_value=adapters):
+            web._run_profile_sync(claimed, False, modes)
+
+        status = self.client.post("/api/profile/status", json={}).get_json()["profile"]
+        self.assertEqual(status["last_results"][0]["display_name"], "T-S")
+        self.assertEqual(status["last_results"][0]["items_added"], 1)
+        self.assertEqual(status["history"][0]["results"][0]["items_added"], 1)
+        self.assertEqual(status["history"][0]["status"], "completed")
+        self.assertTrue(status["last_sync"])
+
+    def test_pair_result_errors_are_redacted_before_returning_or_storing(self) -> None:
+        raw = {
+            "pair_id": "a-b", "name": "A-B", "source": "a", "target": "b",
+            "categories": [{
+                "category": "watchlist",
+                "errors": ["405 for https://api.mdblist.com/watchlist?apikey=secret-value"],
+            }],
+            "errors": [],
+        }
+
+        sanitized = web._sanitize_pair_result(raw)
+
+        message = sanitized["categories"][0]["errors"][0]
+        self.assertNotIn("secret-value", message)
+        self.assertIn("apikey=[redacted]", message)
 
     def test_a_dry_run_does_not_overwrite_the_stored_pair_result(self) -> None:
         profile = self._make_bare_profile()
@@ -2834,6 +2892,54 @@ class WebTests(unittest.TestCase):
         self.assertIn("rejected", data["tmdb_error"])
         self.assertEqual(data["items"][0]["tmdb_id"], 100)
 
+    def test_library_provider_overview_and_items_use_the_shared_adapter(self) -> None:
+        from src.providers import CATEGORY_WATCHLIST, ProviderAdapter
+
+        class FakeTrakt(ProviderAdapter):
+            key = "trakt"
+            label = "Trakt"
+            reads = (CATEGORY_WATCHLIST,)
+
+            def list_sources(self):
+                return [{
+                    "key": "list:me/favorites", "label": "Favorites",
+                    "category": CATEGORY_WATCHLIST, "kind": "list",
+                }]
+
+            def fetch(self, category, source_lists=None):
+                self.last_fetch = (category, source_lists)
+                return [{
+                    "title": "The Matrix", "year": 1999, "media_type": "movie",
+                    "tmdb_id": "603", "ids": {"tmdb": "603"},
+                }]
+
+        self._login(self._make_library_profile(tmdb_key=""))
+        adapter = FakeTrakt()
+        with patch.object(web, "_build_provider_adapters", return_value={"trakt": adapter}):
+            overview = self.client.post(
+                "/api/profile/library/provider/overview", json={"provider": "trakt"},
+            )
+            items = self.client.post(
+                "/api/profile/library/provider/items",
+                json={"provider": "trakt", "source_key": "list:me/favorites"},
+            )
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.get_json()["lists"][0]["name"], "Favorites")
+        self.assertEqual(items.status_code, 200)
+        self.assertEqual(items.get_json()["items"][0]["tmdb_id"], "603")
+        self.assertEqual(adapter.last_fetch, (CATEGORY_WATCHLIST, ["list:me/favorites"]))
+
+    def test_library_provider_requires_a_configured_connection(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+
+        response = self.client.post(
+            "/api/profile/library/provider/overview", json={"provider": "trakt"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Connect Trakt", response.get_json()["error"])
+
     def test_library_history_groups_plays_per_title(self) -> None:
         self._login(self._make_library_profile(tmdb_key=""))
         with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
@@ -2922,6 +3028,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="view-library"', html)
         self.assertIn('id="library-chips"', html)
         self.assertIn('id="library-tmdb-notice"', html)
+        for provider in ("pmdb", "simkl", "trakt", "anilist", "mdblist"):
+            self.assertIn(f'data-lib-mode="{provider}"', html)
         self.assertIn('id="tmdb-api-key"', html)
         self.assertIn('id="dot-tmdb"', html)
         self.assertIn('id="live-activity-panel"', html)

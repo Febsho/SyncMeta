@@ -1167,6 +1167,10 @@
         <div class="lib-modes" role="tablist" aria-label="Library source">
           <button class="lib-mode active" type="button" role="tab" data-lib-mode="local">My Library</button>
           <button class="lib-mode" type="button" role="tab" data-lib-mode="pmdb">PublicMetaDB</button>
+          <button class="lib-mode" type="button" role="tab" data-lib-mode="simkl">SIMKL</button>
+          <button class="lib-mode" type="button" role="tab" data-lib-mode="trakt">Trakt</button>
+          <button class="lib-mode" type="button" role="tab" data-lib-mode="anilist">AniList</button>
+          <button class="lib-mode" type="button" role="tab" data-lib-mode="mdblist">MDBList</button>
         </div>
         <div class="tmdb-notice hidden" id="library-tmdb-notice">
           <span>🎬</span>
@@ -2764,6 +2768,7 @@
       stopLiveActivityFeed();
       // A new sign-in must not show the previous profile's cached library.
       libraryOverviewLoaded = false;
+      libraryOverviewProvider = '';
       librarySelection = '';
       libraryLists = [];
       // This 1s countdown timer had no stop path and kept ticking on the landing
@@ -3443,14 +3448,19 @@
     let libraryTmdbConfigured = false;
     let librarySelection = '';       // 'history' or a PMDB list id
     let libraryOverviewLoaded = false;
+    let libraryOverviewProvider = '';
     let libraryLoadToken = 0;
+
+    const LIBRARY_PROVIDER_LABELS = {
+      pmdb: 'PublicMetaDB', simkl: 'SIMKL', trakt: 'Trakt', anilist: 'AniList', mdblist: 'MDBList',
+    };
 
     async function openLibrary() {
       // The local library is the default: it needs no remote call and it is the
       // thing the pairs are meant to fill. PublicMetaDB is only fetched when
       // that tab is actually opened.
       if (libMode === 'local') { await loadLocalLibrary(); return; }
-      if (!libraryOverviewLoaded) await refreshLibrary();
+      if (!libraryOverviewLoaded || libraryOverviewProvider !== libMode) await refreshLibrary();
     }
 
     function updateLibraryTmdbNotice(tmdbError) {
@@ -3484,22 +3494,34 @@
     let libRequestSeq = 0;
 
     function setLibraryMode(mode) {
-      libMode = mode === 'pmdb' ? 'pmdb' : 'local';
+      const allowed = new Set(['local', 'pmdb', 'simkl', 'trakt', 'anilist', 'mdblist']);
+      const nextMode = allowed.has(mode) ? mode : 'local';
+      const providerChanged = nextMode !== libMode && nextMode !== 'local';
+      libMode = nextMode;
+      if (providerChanged) {
+        libraryOverviewLoaded = false;
+        libraryOverviewProvider = '';
+        librarySelection = '';
+        libraryLists = [];
+        librarySourceFilter = 'all';
+        libraryTextFilter = '';
+      }
       document.querySelectorAll('[data-lib-mode]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.libMode === libMode);
+        btn.setAttribute('aria-selected', btn.dataset.libMode === libMode ? 'true' : 'false');
       });
       const local = el('library-local-panel');
       const pmdb = el('library-pmdb-panel');
       if (local) local.classList.toggle('hidden', libMode !== 'local');
-      if (pmdb) pmdb.classList.toggle('hidden', libMode !== 'pmdb');
+      if (pmdb) pmdb.classList.toggle('hidden', libMode === 'local');
       const sub = el('library-sub');
       if (sub) {
         sub.textContent = libMode === 'local'
           ? 'Everything SyncMeta holds locally — sync any service into it, and out of it.'
-          : 'Browse what SyncMeta keeps in PublicMetaDB — your lists and watch history.';
+          : `Browse your ${LIBRARY_PROVIDER_LABELS[libMode] || libMode} lists and activity directly.`;
       }
       if (libMode === 'local') loadLocalLibrary();
-      else if (!libraryOverviewLoaded) refreshLibrary();
+      else if (!libraryOverviewLoaded || libraryOverviewProvider !== libMode) refreshLibrary();
     }
 
     function libKindCount(key) {
@@ -3720,25 +3742,41 @@
       const btn = el('btn-library-refresh');
       if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
       try {
-        const result = await apiPost('/api/profile/library/overview', {});
+        const result = libMode === 'pmdb'
+          ? await apiPost('/api/profile/library/overview', {})
+          : await apiPost('/api/profile/library/provider/overview', { provider: libMode });
         if (!result.ok) {
           const message = result.status === 401
             ? 'Sign in and save a profile to browse your library.'
-            : ((result.data && result.data.error) || 'Could not load your library.');
+            : ((result.data && result.data.error) || `Could not load ${LIBRARY_PROVIDER_LABELS[libMode] || 'this service'}.`);
           el('library-chips').innerHTML = `<div class="empty">${esc(message)}</div>`;
           el('library-body').innerHTML = '';
           el('library-count').textContent = '';
           return;
         }
         libraryOverviewLoaded = true;
+        libraryOverviewProvider = libMode;
         libraryLists = Array.isArray(result.data.lists) ? result.data.lists : [];
         libraryTmdbConfigured = !!result.data.tmdb_configured;
         updateLibraryTmdbNotice('');
-        if (librarySelection !== 'history' && !libraryLists.some(entry => entry.id === librarySelection)) {
-          librarySelection = 'history';
+        const validSelection = libMode === 'pmdb'
+          ? (librarySelection === 'history' || libraryLists.some(entry => entry.id === librarySelection))
+          : libraryLists.some(entry => entry.id === librarySelection);
+        if (!validSelection) {
+          if (libMode === 'pmdb') librarySelection = 'history';
+          else {
+            const preferred = libraryLists.find(entry => entry.type === 'history')
+              || libraryLists.find(entry => entry.type === 'watchlist')
+              || libraryLists[0];
+            librarySelection = preferred ? preferred.id : '';
+          }
         }
         renderLibraryChips();
-        loadLibrarySelection();
+        if (librarySelection) loadLibrarySelection();
+        else {
+          el('library-body').innerHTML = `<div class="empty">No readable lists are available from ${esc(LIBRARY_PROVIDER_LABELS[libMode] || libMode)}.</div>`;
+          el('library-count').textContent = '';
+        }
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; }
       }
@@ -3813,11 +3851,19 @@
       return '';
     }
 
+    function libraryPinnedLists() {
+      return libraryLists.filter(entry => entry.type === 'watchlist' || entry.type === 'history');
+    }
+
+    function libraryBrowsableLists() {
+      const pinned = new Set(libraryPinnedLists().map(entry => entry.id));
+      return libraryLists.filter(entry => !pinned.has(entry.id));
+    }
+
     function libraryListSources() {
       const sources = new Set();
       let hasOther = false;
-      for (const entry of libraryLists) {
-        if (entry.type === 'watchlist') continue;
+      for (const entry of libraryBrowsableLists()) {
         if (entry.source) sources.add(entry.source);
         else hasOther = true;
       }
@@ -3826,8 +3872,7 @@
 
     function libraryFilteredLists() {
       const text = libraryTextFilter.trim().toLowerCase();
-      return libraryLists
-        .filter(entry => entry.type !== 'watchlist')
+      return libraryBrowsableLists()
         .filter(entry => {
           if (librarySourceFilter === 'all') return true;
           if (librarySourceFilter === 'other') return !entry.source;
@@ -3841,14 +3886,14 @@
       const container = el('library-chips');
       if (!container) return;
       bindLibraryPickerDismiss();
-      const watchlists = libraryLists.filter(entry => entry.type === 'watchlist');
-      const listCount = libraryLists.length - watchlists.length;
+      const pinnedLists = libraryPinnedLists();
+      const listCount = libraryBrowsableLists().length;
       const { sources, hasOther } = libraryListSources();
       // Watch History and the watchlists are the entries people actually reach
       // for, and there are only ever a couple, so they stay as direct buttons.
       const pinned = [
-        `<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`,
-        ...watchlists.map(entry => libraryChipHtml(entry)),
+        ...(libMode === 'pmdb' ? [`<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`] : []),
+        ...pinnedLists.map(entry => libraryChipHtml(entry)),
       ].join('');
 
       const selectedName = librarySelectedListName();
@@ -3927,10 +3972,18 @@
       const token = ++libraryLoadToken;
       body.innerHTML = '<div class="empty"><span class="spinner" style="vertical-align:middle;margin-right:8px"></span>Loading…</div>';
       el('library-count').textContent = '';
-      const isHistory = librarySelection === 'history';
-      const result = isHistory
-        ? await apiPost('/api/profile/library/history', { limit: 500 })
-        : await apiPost('/api/profile/library/items', { list_id: librarySelection });
+      const selectedSource = libraryLists.find(entry => entry.id === librarySelection);
+      const isHistory = librarySelection === 'history' || (selectedSource && selectedSource.category === 'history');
+      let result;
+      if (libMode === 'pmdb') {
+        result = isHistory
+          ? await apiPost('/api/profile/library/history', { limit: 500 })
+          : await apiPost('/api/profile/library/items', { list_id: librarySelection });
+      } else {
+        result = await apiPost('/api/profile/library/provider/items', {
+          provider: libMode, source_key: librarySelection,
+        });
+      }
       if (token !== libraryLoadToken) return;   // superseded by a newer selection
       if (!result.ok) {
         body.innerHTML = `<div class="empty">${esc((result.data && result.data.error) || 'Could not load items.')}</div>`;
@@ -3946,7 +3999,7 @@
       } else {
         el('library-count').textContent = `${items.length} item${items.length === 1 ? '' : 's'}`;
       }
-      renderLibraryGrid(items, isHistory);
+      renderLibraryGrid(items, isHistory, isHistory && libMode === 'pmdb');
     }
 
     function libraryPosterHtml(item, title) {
@@ -3955,11 +4008,13 @@
         : `<div class="poster-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M8 4v4"/><path d="M16 4v4"/></svg><span>${esc(title)}</span></div>`;
     }
 
-    function renderLibraryGrid(items, isHistory) {
+    function renderLibraryGrid(items, isHistory, hasHistoryDetails = false) {
       const body = el('library-body');
       if (!body) return;
       if (!items.length) {
-        body.innerHTML = `<div class="empty">${isHistory ? 'No watch history in PublicMetaDB yet.' : 'This list is empty.'}</div>`;
+        body.innerHTML = `<div class="empty">${isHistory
+          ? `No watch history in ${esc(LIBRARY_PROVIDER_LABELS[libMode] || libMode)} yet.`
+          : 'This list is empty.'}</div>`;
         return;
       }
       const cards = items.map((item, index) => {
@@ -3983,14 +4038,14 @@
         } else if (item.year) {
           sub = item.year;
         }
-        const clickable = isHistory ? ` data-library-title="${index}" role="button" tabindex="0" title="${escAttr('Show watch details for ' + title)}"` : '';
-        return `<div class="poster-card${isHistory ? ' poster-card-clickable' : ''}"${clickable}>
+        const clickable = hasHistoryDetails ? ` data-library-title="${index}" role="button" tabindex="0" title="${escAttr('Show watch details for ' + title)}"` : '';
+        return `<div class="poster-card${hasHistoryDetails ? ' poster-card-clickable' : ''}"${clickable}>
           <div class="poster-frame">${libraryPosterHtml(item, title)}<span class="poster-badge">${mediaBadge}</span>${cornerBadge}</div>
           <div class="poster-meta"><div class="poster-title" title="${escAttr(title)}">${esc(title)}</div>${sub ? `<div class="poster-sub">${esc(sub)}</div>` : ''}</div>
         </div>`;
       }).join('');
       body.innerHTML = `<div class="poster-grid">${cards}</div>`;
-      if (isHistory) {
+      if (hasHistoryDetails) {
         body.querySelectorAll('[data-library-title]').forEach(node => {
           const item = items[Number(node.dataset.libraryTitle)];
           if (!item) return;
@@ -7440,7 +7495,7 @@
       const chosenCategories = new Set(pair.categories || []);
       return pairListEntries(pair).filter(entry => {
         // Only entries feeding a category this pair actually syncs.
-        if (entry.category && !chosenCategories.has(entry.category)) return false;
+        if (chosenCategories.size && entry.kind !== 'list' && entry.category && !chosenCategories.has(entry.category)) return false;
         if (!filter) return true;
         return String(entry.label || '').toLowerCase().includes(filter)
           || String(entry.key || '').toLowerCase().includes(filter);
@@ -7474,7 +7529,9 @@
 
     function pairEntryMatchesUi(pair, entry) {
       const chosenCategories = new Set(pair.categories || []);
-      if (entry.category && !chosenCategories.has(entry.category)) return false;
+      // With no category chosen yet, show everything so the user can begin by
+      // choosing a named list. The selected list will enable its category.
+      if (chosenCategories.size && entry.kind !== 'list' && entry.category && !chosenCategories.has(entry.category)) return false;
       const filter = pairUi(pair).filter.trim().toLowerCase();
       if (!filter) return true;
       return String(entry.label || '').toLowerCase().includes(filter)
@@ -7494,8 +7551,8 @@
       const visibleKnown = known.filter(entry => pairEntryMatchesUi(pair, entry));
 
       const groups = pairsState.categories
-        .filter(cat => (pair.categories || []).includes(cat.key))
-        .map(cat => ({ cat: cat, entries: visibleKnown.filter(entry => entry.category === cat.key) }))
+        .filter(cat => !(pair.categories || []).length || (pair.categories || []).includes(cat.key))
+        .map(cat => ({ cat: cat, entries: visibleKnown.filter(entry => entry.kind !== 'list' && entry.category === cat.key) }))
         .filter(group => group.entries.length);
 
       const sections = groups.map(group => `
@@ -7505,6 +7562,17 @@
             ${group.entries.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
           </div>
         </div>`);
+
+      const accountLists = visibleKnown.filter(entry => entry.kind === 'list');
+      if (accountLists.length) {
+        sections.push(`
+        <div class="pair-list-group">
+          <div class="pair-list-group-title">My and saved lists</div>
+          <div class="pair-list-grid">
+            ${accountLists.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+      }
 
       if (searchOnly.length) {
         sections.push(`
@@ -7960,7 +8028,17 @@
 
         if (input.dataset.pairList) {
           const chosen = new Set(pair.source_lists || []);
-          if (input.checked) chosen.add(input.dataset.pairList);
+          if (input.checked) {
+            chosen.add(input.dataset.pairList);
+            const entry = pairListEntries(pair).find(item => item.key === input.dataset.pairList);
+            if (entry && entry.category && !(pair.categories || []).length) {
+              pair.categories = [...(pair.categories || []), entry.category];
+              pair.source_lists = Array.from(chosen);
+              renderPairCard(index);
+              renderSyncCards();
+              return;
+            }
+          }
           else chosen.delete(input.dataset.pairList);
           pair.source_lists = Array.from(chosen);
           // The checkbox already shows its own new state; only the chips and
@@ -8041,10 +8119,16 @@
           const pair = pairAt(button.dataset.pairSelectShown);
           if (!pair) return;
           const chosen = new Set(pair.source_lists || []);
-          pairVisibleListEntries(pair).forEach(entry => chosen.add(entry.key));
+          const shown = pairVisibleListEntries(pair);
+          shown.forEach(entry => chosen.add(entry.key));
           pair.source_lists = Array.from(chosen);
-          renderPairListSelection(index);
-          renderPairListOptions(index);
+          if (!(pair.categories || []).length) {
+            const categories = new Set();
+            shown.forEach(entry => { if (entry.category) categories.add(entry.category); });
+            pair.categories = Array.from(categories);
+          }
+          renderPairCard(index);
+          renderSyncCards();
           return;
         }
         if (button.dataset.pairToggleMode !== undefined) {

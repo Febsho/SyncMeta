@@ -900,6 +900,25 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertTrue(results["a-b-1"]["timestamp"])
         self.assertFalse(results["a-b-1"]["dry_run"])
 
+    def test_pair_result_provider_urls_never_expose_persisted_api_keys(self) -> None:
+        created = self.store.create_profile("pw", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        self.store.update_pair_last_results(profile_id, [{
+            "pair_id": "mdb-target",
+            "categories": [{
+                "category": "watchlist",
+                "errors": ["405 for https://api.mdblist.com/watchlist?apikey=secret-key"],
+            }],
+        }])
+
+        public = self.store.get_profile_by_id(profile_id, include_credentials=False)
+        reloaded = ProfileStore(Path(self.tmpdir.name) / "profiles.json")
+        private = reloaded.get_private_profile_by_id(profile_id)
+
+        self.assertNotIn("secret-key", str(public["last_pair_results"]))
+        self.assertNotIn("secret-key", str(private["last_pair_results"]))
+        self.assertIn("apikey=[redacted]", str(private["last_pair_results"]))
+
     def test_connection_health_is_sanitized_and_persists(self) -> None:
         created = self.store.create_profile("pw", self.credentials, self.options)
         profile_id = created["profile_id"]
