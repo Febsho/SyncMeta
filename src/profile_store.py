@@ -2227,6 +2227,16 @@ class ProfileStore:
             del self._profiles[normalized_id]
             self._save_locked()
 
+    def delete_all_profiles(self) -> list[str]:
+        """Delete every profile atomically, unless any profile is syncing."""
+        with self._lock:
+            if any(profile.get("sync_running") for profile in self._profiles.values()):
+                raise RuntimeError("Cannot delete profiles while a sync is in progress")
+            deleted_ids = list(self._profiles)
+            self._profiles.clear()
+            self._save_locked()
+            return deleted_ids
+
     def reset_history_import_state_by_id(self, profile_id: str) -> dict:
         with self._lock:
             normalized_id = self._normalize_profile_id(profile_id)

@@ -4,6 +4,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SyncMeta Admin</title>
+  <script>
+    (function () {
+      const key = 'syncmeta_theme';
+      window.setSyncMetaTheme = function (theme) {
+        const selected = theme === 'counterlock' ? 'counterlock' : 'classic';
+        if (selected === 'counterlock') document.documentElement.dataset.theme = selected;
+        else delete document.documentElement.dataset.theme;
+        try { localStorage.setItem(key, selected); } catch (_) {}
+        document.querySelectorAll('[data-theme-select]').forEach(node => { node.value = selected; });
+      };
+      let saved = 'classic';
+      try { saved = localStorage.getItem(key) || 'classic'; } catch (_) {}
+      setSyncMetaTheme(saved);
+      document.addEventListener('DOMContentLoaded', () => setSyncMetaTheme(saved));
+    })();
+  </script>
   <style>
     :root{
       --black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;
@@ -165,6 +181,21 @@
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
     .empty{color:var(--z600);font-size:13px;padding:8px 0}
     .divider{height:1px;background:var(--z800);margin:12px 0}
+    .theme-select{width:auto;min-width:118px;background:var(--z900);border:1px solid var(--z800);border-radius:7px;padding:7px 10px;color:var(--z100);font-size:12px;font-family:inherit}
+    .instance-danger{border-color:rgba(248,113,113,.3)}
+    .danger-copy{max-width:760px;font-size:12px;color:var(--z500);line-height:1.6}
+    .danger-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .danger-status{font-size:12px;color:var(--z500)}
+
+    html[data-theme="counterlock"]{color-scheme:light;--black:#eee9dc;--z950:#f6f2e8;--z900:#e7e1d4;--z800:#c8c0b3;--z700:#9d968b;--z600:#777168;--z500:#625e57;--z400:#4e4b45;--z300:#292824;--z100:#191917;--white:#191917;--accent:#d33f35;--accent2:#191917;--green:#328044;--red:#c72f27;--orange:#9a7600;--blue:#2770cb;--acid:#d9ff43}
+    html[data-theme="counterlock"] body{background-color:var(--black);background-image:linear-gradient(90deg,transparent 49.8%,rgba(25,25,23,.035) 50%,transparent 50.2%);font-family:Arial,Helvetica,sans-serif}
+    html[data-theme="counterlock"] nav{background:rgba(238,233,220,.94);border-bottom:2px solid #191917}
+    html[data-theme="counterlock"] .section,html[data-theme="counterlock"] .login-card,html[data-theme="counterlock"] .btn,html[data-theme="counterlock"] input,html[data-theme="counterlock"] select,html[data-theme="counterlock"] .badge,html[data-theme="counterlock"] .counter-pill{border-radius:0}
+    html[data-theme="counterlock"] .section{border:1px solid #191917;box-shadow:4px 4px 0 rgba(25,25,23,.2)}
+    html[data-theme="counterlock"] .section-title,html[data-theme="counterlock"] .set-group-title{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.1em;text-transform:uppercase}
+    html[data-theme="counterlock"] .btn-primary{background:var(--acid);color:#191917;border:1px solid #191917;box-shadow:3px 3px 0 #191917}
+    html[data-theme="counterlock"] .btn-ghost{background:#f6f2e8;border:1px solid #191917;color:#191917}
+    html[data-theme="counterlock"] .btn-danger{background:#ff493d;color:#191917;border:1px solid #191917}
   </style>
 </head>
 <body>
@@ -175,6 +206,11 @@
       SyncMeta <span class="nav-badge">Admin</span>
     </a>
     <div class="nav-right">
+      <label for="admin-theme-select" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Theme</label>
+      <select class="theme-select" id="admin-theme-select" data-theme-select onchange="setSyncMetaTheme(this.value)" aria-label="Theme">
+        <option value="classic">SyncMeta Dark</option>
+        <option value="counterlock">Counterlock</option>
+      </select>
       {% if view == "dashboard" %}
       <span class="auto-badge"><span class="dot"></span> Auto-refresh 30s</span>
       <button class="btn btn-ghost" onclick="location.reload()">Refresh</button>
@@ -486,6 +522,20 @@
     </div>
   </div>
 
+  <!-- INSTANCE DANGER ZONE -->
+  <div class="section instance-danger">
+    <div class="section-head">
+      <span class="section-title">Instance Danger Zone</span>
+    </div>
+    <div class="section-body">
+      <div class="danger-copy">Remove every linked profile/account from this instance, including encrypted provider credentials, sync history, pending authorization state, profile sessions, logs, and local Library files. Instance settings and the admin login are preserved. This cannot be undone.</div>
+      <div class="danger-actions" style="margin-top:14px">
+        <button class="btn btn-danger" type="button" id="delete-all-profiles-btn" onclick="deleteAllProfiles()">Remove all linked profiles</button>
+        <span class="danger-status" id="delete-all-profiles-status" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </div>
+
   <!-- PROFILES TABLE -->
   <div class="section">
     <div class="section-head">
@@ -701,6 +751,50 @@
     }
   }
 
+  async function deleteAllProfiles() {
+    const phrase = 'DELETE ALL PROFILES';
+    const confirmation = prompt(
+      `This permanently removes every linked profile/account on this instance.\n\nType ${phrase} to continue.`
+    );
+    if (confirmation === null) return;
+    const status = document.getElementById('delete-all-profiles-status');
+    const btn = document.getElementById('delete-all-profiles-btn');
+    if (confirmation !== phrase) {
+      status.textContent = `Confirmation did not match ${phrase}. Nothing was removed.`;
+      status.style.color = 'var(--red)';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Removing…';
+    status.textContent = 'Removing linked profiles…';
+    status.style.color = 'var(--orange)';
+    try {
+      const resp = await fetch('/admin/api/profiles/delete-all', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({confirm_text: confirmation}),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        status.textContent = data.error || 'Could not remove profiles.';
+        status.style.color = 'var(--red)';
+        btn.disabled = false;
+        btn.textContent = 'Remove all linked profiles';
+        return;
+      }
+      status.textContent = `${data.deleted} profile${data.deleted === 1 ? '' : 's'} removed.`;
+      status.style.color = 'var(--green)';
+      btn.textContent = 'Profiles removed';
+      setTimeout(() => location.reload(), 1200);
+    } catch (err) {
+      status.textContent = 'Network error while removing profiles.';
+      status.style.color = 'var(--red)';
+      btn.disabled = false;
+      btn.textContent = 'Remove all linked profiles';
+      console.error(err);
+    }
+  }
+
   // Live uptime counter
   (function(){
     const el = document.getElementById('uptime-val');
@@ -806,5 +900,10 @@
   }
 </script>
 {% endif %}
+<script>
+  document.querySelectorAll('[data-theme-select]').forEach(node => {
+    node.value = document.documentElement.dataset.theme || 'classic';
+  });
+</script>
 </body>
 </html>

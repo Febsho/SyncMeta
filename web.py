@@ -332,6 +332,14 @@ class PendingPkceStore:
         verifier, redirect_uri, _expires = entry
         return verifier, redirect_uri
 
+    def clear(self, profile_id: str) -> None:
+        """Discard an unfinished authorization flow for a deleted profile."""
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return
+        with self._lock:
+            self._pending.pop(profile_id, None)
+
     def _prune_locked(self) -> None:
         now = time.time()
         for key in [k for k, (_v, _r, exp) in self._pending.items() if exp <= now]:
@@ -1013,6 +1021,27 @@ def _library_store_for(profile_id: str) -> LibraryStore:
             store = LibraryStore(PROFILE_STORE_FILE.parent / "library" / f"{key}.json")
             _library_stores[key] = store
         return store
+
+
+def _purge_profile_runtime_data(profile_ids: list[str]) -> None:
+    """Remove runtime state and local Library files for deleted profiles."""
+    for profile_id in profile_ids:
+        _session_store.destroy_profile_sessions(profile_id)
+        _profile_log_store.clear(profile_id)
+        _mdblist_pkce_store.clear(profile_id)
+        with _library_stores_lock:
+            store = _library_stores.pop(profile_id, None)
+        library_path = (
+            store.path if store is not None
+            else _profile_store._path.parent / "library" / f"{profile_id}.json"
+        )
+        try:
+            library_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error(
+                "Profile %s was deleted but its Library file could not be removed: %s",
+                profile_id[:8], exc,
+            )
 
 
 def _build_provider_adapters(
@@ -1912,6 +1941,7 @@ def api_profile_delete():
     except RuntimeError as exc:
         return _json_error(str(exc), 409)
 
+    _purge_profile_runtime_data([profile_id])
     _session_store.destroy(_session_token())
     return _clear_session_cookie(make_response(jsonify({"status": "deleted"})))
 
@@ -3912,6 +3942,29 @@ def admin_api_stats():
     if not _is_admin():
         return _json_error("Not authorized", 401)
     return jsonify(_admin_stats())
+
+
+@app.route("/admin/api/profiles/delete-all", methods=["POST"])
+def admin_api_delete_all_profiles():
+    if not ADMIN_PASSWORD:
+        return _json_error("Admin panel not configured", 404)
+    if not _is_admin():
+        return _json_error("Not authorized", 401)
+
+    confirmation = str(
+        (request.get_json(silent=True) or {}).get("confirm_text") or ""
+    ).strip()
+    if confirmation != "DELETE ALL PROFILES":
+        return _json_error("Type DELETE ALL PROFILES to confirm", 400)
+
+    try:
+        deleted_ids = _profile_store.delete_all_profiles()
+    except RuntimeError as exc:
+        return _json_error(str(exc), 409)
+
+    _purge_profile_runtime_data(deleted_ids)
+    logger.warning("Admin deleted all %d profiles from this instance", len(deleted_ids))
+    return jsonify({"ok": True, "deleted": len(deleted_ids)})
 
 
 def _live_apply_setting(key: str, value: str) -> bool:

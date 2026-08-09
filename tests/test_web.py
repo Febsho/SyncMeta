@@ -73,6 +73,14 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="anilist-access-token"', html)
         self.assertIn('id="anilist-client-id"', html)
         self.assertIn('id="anilist-client-secret"', html)
+
+    def test_index_offers_persistent_counterlock_theme(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="snav-appearance"', html)
+        self.assertIn('<option value="counterlock">Counterlock</option>', html)
+        self.assertIn("localStorage.setItem(THEME_KEY, selected)", html)
+        self.assertIn('html[data-theme="counterlock"]', html)
         # AniList's redirect URL is a fixed AniList endpoint, not this site's
         # address, and it is what makes the connect flow work at all.
         self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)
@@ -2003,6 +2011,82 @@ class WebTests(unittest.TestCase):
         self.assertIn("Fribb checked", html)
         self.assertIn("XML checked", html)
         self.assertIn("Refresh interval", html)
+
+    def test_admin_dashboard_offers_theme_and_instance_purge(self) -> None:
+        web.ADMIN_PASSWORD = "secret"
+        self.client.post("/admin/login", data={"password": "secret"})
+
+        html = self.client.get("/admin").get_data(as_text=True)
+
+        self.assertIn('id="admin-theme-select"', html)
+        self.assertIn("Instance Danger Zone", html)
+        self.assertIn("Remove all linked profiles", html)
+
+    def test_delete_all_profiles_requires_admin_and_confirmation(self) -> None:
+        web.ADMIN_PASSWORD = "secret"
+        profile = web._profile_store.create_profile("pw", _blank_credentials(), {})
+
+        unauthorized = self.client.post(
+            "/admin/api/profiles/delete-all",
+            json={"confirm_text": "DELETE ALL PROFILES"},
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        self.client.post("/admin/login", data={"password": "secret"})
+        rejected = self.client.post(
+            "/admin/api/profiles/delete-all", json={"confirm_text": "DELETE"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIsNotNone(
+            web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        )
+
+    def test_admin_can_delete_all_profiles_and_linked_runtime_data(self) -> None:
+        from src.library_store import LibraryStore
+
+        first = web._profile_store.create_profile("pw", _blank_credentials(), {})
+        second = web._profile_store.create_profile("pw", _blank_credentials(), {})
+        first_id = first["profile_id"]
+        second_id = second["profile_id"]
+        token = web._session_store.create(first_id)
+        web._mdblist_pkce_store.put(first_id, "verifier", "http://localhost/callback")
+
+        library_path = Path(self.tmpdir.name) / "library" / f"{first_id}.json"
+        library = LibraryStore(library_path)
+        library.save()
+        web._library_stores[first_id] = library
+        self.addCleanup(web._library_stores.pop, first_id, None)
+
+        self._admin_login()
+        response = self.client.post(
+            "/admin/api/profiles/delete-all",
+            json={"confirm_text": "DELETE ALL PROFILES"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["deleted"], 2)
+        self.assertEqual(web._profile_store._profiles, {})
+        self.assertFalse(library_path.exists())
+        self.assertIsNone(web._session_store.get_profile_id(token))
+        self.assertIsNone(web._mdblist_pkce_store.take(first_id))
+        self.assertNotIn(first_id, web._library_stores)
+        self.assertNotIn(second_id, web._profile_store._profiles)
+
+    def test_delete_all_profiles_is_all_or_nothing_during_a_sync(self) -> None:
+        first = web._profile_store.create_profile("pw", _blank_credentials(), {})
+        second = web._profile_store.create_profile("pw", _blank_credentials(), {})
+        web._profile_store._profiles[first["profile_id"]]["sync_running"] = True
+        self._admin_login()
+
+        response = self.client.post(
+            "/admin/api/profiles/delete-all",
+            json={"confirm_text": "DELETE ALL PROFILES"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(web._profile_store._profiles), 2)
+        self.assertIn(first["profile_id"], web._profile_store._profiles)
+        self.assertIn(second["profile_id"], web._profile_store._profiles)
 
     # ── admin settings ────────────────────────────────────────────────────
     def _admin_login(self) -> None:

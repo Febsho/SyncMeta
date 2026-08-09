@@ -4,6 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SyncMeta</title>
+  <script>
+    try {
+      if (localStorage.getItem('syncmeta_theme') === 'counterlock') {
+        document.documentElement.dataset.theme = 'counterlock';
+      }
+    } catch (_) {}
+  </script>
   <style>
     :root{color-scheme:dark;--black:#000;--z950:#0a0a0b;--z900:#18181b;--z800:#27272a;--z700:#3f3f46;--z600:#52525b;--z500:#71717a;--z400:#a1a1aa;--z300:#d4d4d8;--z100:#f4f4f5;--white:#fff;--accent:#7c6df7;--accent2:#6c5ce7;--green:#34d399;--red:#f87171;--orange:#fbbf24;
       /* Surface + hairline + monospace overline. Numbers are set at weight 500
@@ -679,6 +686,23 @@
       .catalog-title{font-size:13px}
       .status-groups{grid-template-columns:1fr}
     }
+
+    /* Optional Counterlock theme: warm paper, hard rules, acid highlights and
+       square controls, adapted from deadlock-counterlock's visual language. */
+    html[data-theme="counterlock"]{color-scheme:light;--black:#eee9dc;--z950:#f6f2e8;--z900:#e7e1d4;--z800:#c8c0b3;--z700:#9d968b;--z600:#777168;--z500:#625e57;--z400:#4e4b45;--z300:#292824;--z100:#191917;--white:#191917;--accent:#d33f35;--accent2:#191917;--green:#328044;--red:#c72f27;--orange:#9a7600;--surface:#f6f2e8;--line:#b7afa3;--label:#6d685f;--acid:#d9ff43}
+    html[data-theme="counterlock"] body{background-color:var(--black);background-image:linear-gradient(90deg,transparent 49.8%,rgba(25,25,23,.035) 50%,transparent 50.2%);font-family:Arial,Helvetica,sans-serif}
+    html[data-theme="counterlock"] nav{background:rgba(238,233,220,.94);border-bottom:2px solid #191917}
+    html[data-theme="counterlock"] .hero:before{background:radial-gradient(circle at 75% 30%,rgba(217,255,67,.48),transparent 28%)}
+    html[data-theme="counterlock"] .hero-card{background:rgba(246,242,232,.9);border:2px solid #191917;border-radius:0;box-shadow:8px 8px 0 #191917}
+    html[data-theme="counterlock"] .hero-badge,html[data-theme="counterlock"] .overline{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em}
+    html[data-theme="counterlock"] .card,html[data-theme="counterlock"] .panel,html[data-theme="counterlock"] .form-section,html[data-theme="counterlock"] .service-pill,html[data-theme="counterlock"] .btn,html[data-theme="counterlock"] input,html[data-theme="counterlock"] select,html[data-theme="counterlock"] .toast{border-radius:0}
+    html[data-theme="counterlock"] .btn-primary{background:var(--acid);border-color:#191917;color:#191917;box-shadow:3px 3px 0 #191917}
+    html[data-theme="counterlock"] .btn-primary:hover{background:#c9f02d}
+    html[data-theme="counterlock"] .panel-header,html[data-theme="counterlock"] .settings-group-title,html[data-theme="counterlock"] .nav-link{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase}
+    html[data-theme="counterlock"] .log-console{background:#191917;color:#eee9dc}
+    html[data-theme="counterlock"] .toast{background:rgba(246,242,232,.96);border:2px solid #191917}
+    .theme-preview{display:grid;grid-template-columns:repeat(5,1fr);height:44px;margin-top:12px;border:1px solid var(--line)}
+    .theme-preview span:nth-child(1){background:#191917}.theme-preview span:nth-child(2){background:#eee9dc}.theme-preview span:nth-child(3){background:#d9ff43}.theme-preview span:nth-child(4){background:#ff493d}.theme-preview span:nth-child(5){background:#63b96f}
   </style>
 </head>
 <body>
@@ -1204,6 +1228,11 @@
                 Profile
               </button>
               <div class="settings-nav-sep"></div>
+              <button class="settings-nav-item" id="snav-appearance" onclick="showSettingsTab('appearance')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18V3z"/></svg>
+                Appearance
+              </button>
+              <div class="settings-nav-sep"></div>
               <button class="settings-nav-item" id="snav-connections" onclick="showSettingsTab('connections')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
                 Connections
@@ -1260,6 +1289,24 @@
                   <button class="btn" onclick="resetProfilePassword()">Change Password</button>
                   <button class="btn btn-ghost btn-sm" onclick="logoutProfile()">Log Out</button>
                   <span class="save-flash" id="save-flash">Saved</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- APPEARANCE TAB -->
+            <div class="settings-tab" id="stab-appearance">
+              <div class="settings-page-title">Appearance</div>
+              <div class="settings-page-desc">Choose how SyncMeta looks in this browser. The selection also applies to the admin panel.</div>
+              <div class="settings-group form-section">
+                <div class="settings-group-title">Theme</div>
+                <div class="form-row">
+                  <label for="app-theme-select">Interface theme</label>
+                  <select id="app-theme-select" data-theme-select onchange="setSyncMetaTheme(this.value)">
+                    <option value="classic">SyncMeta Dark</option>
+                    <option value="counterlock">Counterlock</option>
+                  </select>
+                  <div class="hint">Counterlock uses warm paper, hard black rules, acid highlights, and red accents.</div>
+                  <div class="theme-preview" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
                 </div>
               </div>
             </div>
@@ -1476,6 +1523,19 @@
   </div>
 
   <script>
+    const THEME_KEY = 'syncmeta_theme';
+    function setSyncMetaTheme(theme) {
+      const selected = theme === 'counterlock' ? 'counterlock' : 'classic';
+      if (selected === 'counterlock') document.documentElement.dataset.theme = selected;
+      else delete document.documentElement.dataset.theme;
+      try { localStorage.setItem(THEME_KEY, selected); } catch (_) {}
+      document.querySelectorAll('[data-theme-select]').forEach(node => { node.value = selected; });
+    }
+    function syncThemeControls() {
+      setSyncMetaTheme(document.documentElement.dataset.theme || 'classic');
+    }
+    syncThemeControls();
+
     const CREDS_KEY = 'sync_credentials';
     const OPTIONS_KEY = 'sync_options';
     const PROFILE_KEY = 'sync_profile_id';
@@ -7040,7 +7100,7 @@
       input.addEventListener('input', scheduleAutoSave);
       input.addEventListener('change', scheduleAutoSave);
     });
-    document.querySelectorAll('#view-settings select, #sync-settings select').forEach(select => {
+    document.querySelectorAll('#view-settings select:not([data-theme-select]), #sync-settings select').forEach(select => {
       select.addEventListener('change', scheduleAutoSave);
     });
 
