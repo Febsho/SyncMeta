@@ -638,6 +638,14 @@ class SimklAdapter(ProviderAdapter):
         return out
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        # Watch history is a fixed account-level source on SIMKL. Status chips
+        # scope list/collection reads only; older pairs commonly contain those
+        # chips alongside the History category, and treating them as a history
+        # filter made the adapter return an empty list without ever calling the
+        # history endpoint.
+        if category == CATEGORY_HISTORY:
+            return list(self._client.get_watched_history() or [])
+
         selected = self._selected_statuses(category, source_lists)
         if selected:
             items: list[dict] = []
@@ -662,8 +670,6 @@ class SimklAdapter(ProviderAdapter):
             return self._fetch_status("plantowatch")
         if category == CATEGORY_COLLECTION:
             return self._fetch_status("completed")
-        if category == CATEGORY_HISTORY:
-            return list(self._client.get_watched_history() or [])
         return self._unsupported(category, "read")
 
     def _selected_statuses(self, category: str, source_lists: list[str] | None) -> list[tuple[str, str]]:
@@ -1211,9 +1217,14 @@ class MdbListAdapter(ProviderAdapter):
         With nothing selected the account-level category is the sensible default.
         """
         selected = [str(key) for key in (source_lists or []) if str(key).strip()]
+        if category == CATEGORY_HISTORY:
+            # Like SIMKL, Trakt and PMDB, MDBList history is one fixed account
+            # feed. Curated-list selections cannot scope it and must not turn a
+            # checked History category into a silent no-op.
+            return True
         if not selected:
             return True
-        return any(not key.startswith("list:") for key in selected)
+        return category in selected
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
         if category not in self.reads:

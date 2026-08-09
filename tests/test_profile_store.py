@@ -95,6 +95,35 @@ class ProfileStoreTests(unittest.TestCase):
             datetime.now(timezone.utc),
         )
 
+    def test_legacy_pmdb_pipeline_is_migrated_to_normal_pairs_once(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, {
+            **self.options,
+            "activity_history_source": "simkl",
+            "auto_history_sync": True,
+        })
+        path = Path(self.tmpdir.name) / "profiles.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        stored = payload["profiles"][created["profile_id"]]
+        stored.pop("pair_model_version", None)
+        # Emulate a profile written before pairs replaced the built-in pipeline.
+        stored["options"]["sync_pairs"] = []
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        migrated_store = ProfileStore(path)
+        migrated = migrated_store.get_private_profile_by_id(created["profile_id"])
+        pairs = {pair["source"]: pair for pair in migrated["options"]["sync_pairs"]}
+
+        self.assertEqual(pairs["simkl"]["target"], "pmdb")
+        self.assertEqual(pairs["simkl"]["categories"], ["watchlist", "history", "collection"])
+        self.assertIn("status:completed:shows", pairs["simkl"]["source_lists"])
+        self.assertEqual(pairs["mdblist"]["source_lists"], ["list:11"])
+        self.assertFalse(migrated["options"]["auto_sync"])
+        self.assertEqual(migrated["options"]["activity_history_source"], "off")
+
+        persisted = json.loads(path.read_text(encoding="utf-8"))["profiles"][created["profile_id"]]
+        self.assertEqual(persisted["pair_model_version"], 1)
+        self.assertEqual(len(ProfileStore(path).get_private_profile_by_id(created["profile_id"])["options"]["sync_pairs"]), len(pairs))
+
     def test_create_profile_does_not_become_due_immediately(self) -> None:
         created = self.store.create_profile("secret", self.credentials, self.options)
 

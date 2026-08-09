@@ -747,6 +747,29 @@ class BatchReadCacheTests(unittest.TestCase):
         self.assertEqual(results[1].to_dict()["cached_reads"], 1)
 
 
+class NativeHistorySourceTests(unittest.TestCase):
+    def test_simkl_status_selections_do_not_suppress_history(self) -> None:
+        from src.providers import SimklAdapter
+
+        class Client:
+            def __init__(self):
+                self.history_calls = 0
+
+            def get_watched_history(self):
+                self.history_calls += 1
+                return [_movie("7")]
+
+        client = Client()
+        adapter = SimklAdapter(client)
+
+        items = adapter.fetch(CATEGORY_HISTORY, [
+            "status:plantowatch:movies", "status:completed:shows",
+        ])
+
+        self.assertEqual([item["tmdb_id"] for item in items], ["7"])
+        self.assertEqual(client.history_calls, 1)
+
+
 class TargetListTests(unittest.TestCase):
     def test_target_list_is_passed_to_the_target(self) -> None:
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
@@ -999,6 +1022,17 @@ class MdbListProviderTests(unittest.TestCase):
         client = self.FakeMdbClient({10: [_movie("1")]}, sync_items={CATEGORY_HISTORY: []})
         adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
         self.assertEqual(adapter.fetch(CATEGORY_HISTORY), [])
+        self.assertEqual(client.calls, [])
+
+    def test_history_is_not_suppressed_by_curated_list_selections(self) -> None:
+        client = self.FakeMdbClient(
+            {10: [_movie("1")]}, sync_items={CATEGORY_HISTORY: [_movie("7")]},
+        )
+        adapter = self._adapter(client=client, selected_lists=[{"id": 10, "name": "A"}])
+
+        items = adapter.fetch(CATEGORY_HISTORY, ["list:10"])
+
+        self.assertEqual([i["tmdb_id"] for i in items], ["7"])
         self.assertEqual(client.calls, [])
 
     def test_a_list_selection_does_not_also_read_the_whole_account(self) -> None:

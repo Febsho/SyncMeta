@@ -1199,27 +1199,22 @@ def _connection_readiness(config: AppConfig, checks: list[dict], profile_id: str
     by_provider = {row.get("provider"): row for row in checks if isinstance(row, dict)}
     blockers: list[str] = []
     warnings: list[str] = []
-    pmdb = by_provider.get("pmdb") or {}
-    if pmdb.get("status") != "healthy":
-        blockers.append("Connect and verify PublicMetaDB.")
-
-    source_keys = ("simkl", "trakt", "anilist", "mdblist")
-    readable_sources = [
-        key for key in source_keys
-        if (by_provider.get(key) or {}).get("status") == "healthy"
-        and ((by_provider.get(key) or {}).get("capabilities") or {}).get("readable")
-    ]
-    if not readable_sources:
-        blockers.append("Connect and verify at least one sync source.")
-
     adapters = _build_provider_adapters(config, profile_id=profile_id)
     pair_service = CrossSyncService(adapters)
-    for pair in _sync_pairs_from_config(config):
-        if not pair.enabled:
-            continue
+    enabled_pairs = [pair for pair in _sync_pairs_from_config(config) if pair.enabled]
+    if not enabled_pairs:
+        blockers.append("Create and enable at least one sync pair.")
+    for pair in enabled_pairs:
         problem = pair_service.validate_pair(pair)
         if problem:
             blockers.append(f"{pair.name or pair.pair_id}: {problem}")
+            continue
+        source_health = by_provider.get(pair.source)
+        target_health = by_provider.get(pair.target)
+        if pair.source != "library" and source_health and source_health.get("status") not in {"healthy", "degraded"}:
+            blockers.append(f"{pair.display_name()}: verify the source connection.")
+        if pair.target != "library" and target_health and target_health.get("status") not in {"healthy", "degraded"}:
+            blockers.append(f"{pair.display_name()}: verify the target connection.")
 
     for key, row in by_provider.items():
         if row.get("status") == "degraded":
@@ -3233,19 +3228,27 @@ def api_profile_sync():
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
 
     try:
-        profile = _profile_store.claim_profile_for_sync_by_id(profile_id, sync_modes={
-            "lists": True,
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+        pairs = [pair for pair in _sync_pairs_from_config(_config_from_profile(private_profile)) if pair.enabled]
+        if not pairs:
+            return _json_error("Create and enable at least one sync pair first", 409)
+        sync_modes = {
+            "lists": False,
             "history": False,
             "resume": False,
+            "pairs": True,
+            "pair_ids": [pair.pair_id for pair in pairs],
+        }
+        profile = _profile_store.claim_profile_for_sync_by_id(profile_id, sync_modes={
+            **sync_modes,
         })
     except KeyError:
         return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
     except RuntimeError:
         return _json_error("Sync already in progress", 409)
 
-    sync_modes = {"lists": True, "history": False, "resume": False}
     _sync_runner.enqueue(profile, dry_run, sync_modes)
-    logger.info("Queued %slist sync", "dry-run " if dry_run else "")
+    logger.info("Queued %spair sync", "dry-run " if dry_run else "")
     return jsonify({"status": "started", "dry_run": dry_run, "queued_jobs": _sync_runner.queue_size()})
 
 

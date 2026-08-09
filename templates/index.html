@@ -747,7 +747,7 @@
         SyncMeta
       </div>
       <h1>Sync Your Lists.<br>Keep Them Fresh.</h1>
-      <p>Connect SIMKL, AniList, Trakt, and MDBList, then sync the catalogs you choose into PublicMetaDB with secure profiles and background updates.</p>
+      <p>Connect your media services, then keep watchlists, collections, and history in sync with secure profiles and independent provider pairs.</p>
       <div class="hero-services">
         <div class="service-pill"><svg viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>SIMKL</div>
         <div class="service-pill"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>AniList</div>
@@ -769,7 +769,7 @@
             <span class="actions-meta" id="sync-hint">Save a profile in Settings to enable background sync.</span>
           </div>
           <div class="dash-topbar-right">
-            <button class="btn btn-primary" id="btn-sync" onclick="triggerSync(false)"><span id="sync-label">Sync Lists</span></button>
+            <button class="btn btn-primary" id="btn-sync" onclick="triggerSync(false)"><span id="sync-label">Sync All Pairs</span></button>
             <button class="btn" id="btn-dry" onclick="triggerSync(true)">Dry Run</button>
             <button class="btn btn-danger hidden" id="btn-stop" onclick="stopSync()">Stop</button>
           </div>
@@ -793,7 +793,7 @@
         <!-- Cross-service pairs (any service to any other), hidden until one exists -->
         <div class="panel hidden" id="pairs-dash-panel">
           <div class="panel-header">
-            <span>Cross-Service Pairs</span>
+            <span>Sync Pairs</span>
             <div class="actions-bar" style="margin-top:0">
               <span class="history-time" id="pairs-dash-meta"></span>
               <button class="btn btn-sm" type="button" id="btn-dash-pairs-dry" onclick="runPairsFromDashboard('', true)">Dry Run All</button>
@@ -804,14 +804,14 @@
         </div>
 
         <!-- Per-pipeline status (one row per service feeding PublicMetaDB) -->
-        <div class="panel hidden" id="pipelines-panel">
-          <div class="panel-header"><span>PublicMetaDB Pipeline</span><span class="history-time" id="pipelines-meta"></span></div>
+        <div class="panel hidden" id="pipelines-panel" style="display:none!important" aria-hidden="true">
+          <div class="panel-header"><span>Legacy sync status</span><span class="history-time" id="pipelines-meta"></span></div>
           <div id="pipelines-body"></div>
         </div>
 
 
         <!-- Activity sync (hidden until configured) -->
-        <div class="panel hidden" id="activity-panel">
+        <div class="panel hidden" id="activity-panel" style="display:none!important" aria-hidden="true">
           <div class="panel-header">
             <span>Activity Sync</span>
             <div class="actions-bar" style="margin-top:0">
@@ -876,7 +876,7 @@
         <div class="topbar">
           <div>
             <h1 class="page-title">Sync</h1>
-            <div class="page-sub" id="sync-pairs-sub">Sync pairs move items between any two services. The built-in PublicMetaDB pipeline is below.</div>
+            <div class="page-sub" id="sync-pairs-sub">Sync pairs move watchlists, collections, and history directly between any two compatible services.</div>
           </div>
         </div>
         <div class="cards activity-cards" id="sync-cards" style="margin-bottom:20px"></div>
@@ -914,11 +914,11 @@
           </div>
         </div>
 
-        <div id="sync-settings">
+        <div id="sync-settings" class="hidden" style="display:none!important" aria-hidden="true">
           <div class="panel">
             <div class="panel-header">
-              <span>PublicMetaDB Pipeline</span>
-              <span class="catalog-note">The original built-in sync: every connected service sends into PublicMetaDB. Still running, unchanged — but a pair can do the same thing and more.</span>
+              <span>Legacy compatibility controls</span>
+              <span class="catalog-note">Retained only so older profile payloads can still be read and converted into pairs.</span>
             </div>
             <div class="pipeline-list">
 
@@ -1089,7 +1089,7 @@
                   <div class="settings-group form-section">
                     <div class="settings-group-title">List Sync</div>
                     <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
-                    <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync" checked><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
+                    <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync"><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
                     <div class="form-row" style="margin-top:12px">
                       <label for="opt-interval-seconds">Update Every (Seconds)</label>
                       <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
@@ -1276,8 +1276,8 @@
                   <div class="settings-group-title">Quick Setup</div>
                   <div class="guide-list" style="margin-bottom:20px">
                     <div class="guide-step"><div class="guide-step-num">1</div><div>Enter a profile password. Leave UUID blank for a new profile. Click <strong>Save Profile</strong>.</div></div>
-                    <div class="guide-step"><div class="guide-step-num">2</div><div>Add your PublicMetaDB API key in <strong>Connections</strong>. Connect SIMKL, Trakt, AniList, or MDBList.</div></div>
-                    <div class="guide-step"><div class="guide-step-num">3</div><div>Pick lists and behavior in <strong>Sync</strong>. Return to Dashboard and click <strong>Sync Lists</strong>.</div></div>
+                    <div class="guide-step"><div class="guide-step-num">2</div><div>Connect at least one remote service in <strong>Connections</strong>. PublicMetaDB is optional, just like the other providers.</div></div>
+                    <div class="guide-step"><div class="guide-step-num">3</div><div>Create a pair in <strong>Sync</strong>, choose its lists and behavior, then click <strong>Sync All Pairs</strong>.</div></div>
                   </div>
                 </div>
                 <div class="form-row">
@@ -1334,7 +1334,7 @@
             <!-- CONNECTIONS TAB -->
             <div class="settings-tab" id="stab-connections">
               <div class="settings-page-title">Connections</div>
-              <div class="settings-page-desc">Connect your accounts. PublicMetaDB is required; all others are optional.</div>
+              <div class="settings-page-desc">Connect the accounts you want to use in sync pairs. Library is always available locally.</div>
               <div class="connection-readiness" id="connection-readiness" role="status">
                 <div><div class="connection-readiness-title">Connection readiness not checked</div><div class="connection-readiness-detail">Save or sign into a profile, then test your connections.</div></div>
                 <button class="btn btn-sm" type="button" id="btn-test-all-connections" onclick="testConnections()">Test all</button>
@@ -1343,7 +1343,7 @@
                 <div class="conn-card-pmdb">
                   <div class="conn-card-pmdb-meta">
                     <div class="conn-card-title" style="margin-bottom:4px"><span class="dot" id="dot-pmdb"></span> PublicMetaDB</div>
-                    <div class="conn-card-desc" style="margin-bottom:0">Destination. All synced lists and activity go here.</div>
+                    <div class="conn-card-desc" style="margin-bottom:0">Lists, watchlist, collection, and history. Use it as a source or target in any compatible pair.</div>
                   </div>
                   <div class="conn-card-pmdb-field">
                     <div class="form-row" style="margin-bottom:0"><label for="pmdb-api-key">API Key</label><input type="password" id="pmdb-api-key" placeholder="pm-..." autocomplete="off"><div class="hint"><a href="https://publicmetadb.com/api-docs" target="_blank" rel="noopener">Get your API key from PublicMetaDB</a></div></div>
@@ -1398,7 +1398,7 @@
                 </div>
                 <div class="conn-card form-section" id="connection-card-trakt">
                   <div class="conn-card-title"><span class="dot" id="dot-trakt"></span> Trakt <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
-                  <div class="conn-card-desc">Watchlist, watch history, resume progress, and device auth. Custom Trakt lists are legacy imports.</div>
+                  <div class="conn-card-desc">Watchlist, watch history, collections, custom lists, resume progress, and device auth.</div>
                   <input type="checkbox" id="trakt-watchlist-movies-toggle" checked class="hidden">
                   <input type="checkbox" id="trakt-watchlist-shows-toggle" checked class="hidden">
                   <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>, then paste the credentials below. Use the redirect URI if asked.</div>
@@ -2570,7 +2570,7 @@
       const warnings = readiness.warnings || [];
       const ready = !!readiness.ready;
       const title = ready ? 'Connections ready' : 'Connections need attention';
-      const details = blockers.length ? blockers.join(' ') : (warnings.length ? warnings.join(' ') : 'PublicMetaDB and at least one source are verified.');
+      const details = blockers.length ? blockers.join(' ') : (warnings.length ? warnings.join(' ') : 'Every enabled sync pair has usable connections.');
       if (settingsNode) {
         settingsNode.className = `connection-readiness ${ready ? 'ready' : 'blocked'}`;
         settingsNode.innerHTML = `<div><div class="connection-readiness-title">${esc(title)}</div><div class="connection-readiness-detail">${esc(details)}</div></div><button class="btn btn-sm" type="button" id="btn-test-all-connections" onclick="testConnections()" ${connectionCheckRunning ? 'disabled' : ''}>${connectionCheckRunning ? 'Checking…' : 'Test all'}</button>`;
@@ -5178,7 +5178,7 @@
       el('btn-stop').disabled = true;
       el('btn-stop').classList.add('hidden');
       el('btn-stop').textContent = 'Stop';
-      el('sync-label').textContent = 'Sync Lists';
+      el('sync-label').textContent = 'Sync All Pairs';
       el('btn-sync-history').disabled = true;
       el('btn-sync-resume').disabled = true;
       updateClearHistoryButtons(false, false);
@@ -5833,7 +5833,7 @@
       el('btn-stop').disabled = !profile.sync_running || stopping;
       el('btn-stop').classList.toggle('hidden', !profile.sync_running);
       el('btn-stop').textContent = stopping ? 'Stopping...' : 'Stop';
-      el('sync-label').textContent = profile.sync_running ? (stopping ? 'Stopping...' : 'Syncing...') : 'Sync Lists';
+      el('sync-label').textContent = profile.sync_running ? (stopping ? 'Stopping...' : 'Syncing...') : 'Sync All Pairs';
       refreshPollingForProfile(profile);
       const nowRunning = !!profile.sync_running;
       if (lastSyncRunning === true && !nowRunning) fetchUnresolved();
@@ -6742,7 +6742,7 @@
       if (!savedProfile) {
         if (syncBtn) syncBtn.disabled = false;
         if (dryBtn) dryBtn.disabled = false;
-        if (syncLabel) syncLabel.textContent = 'Sync Lists';
+        if (syncLabel) syncLabel.textContent = 'Sync All Pairs';
         return;
       }
 
@@ -6752,8 +6752,8 @@
         if (!result.ok) {
           if (syncBtn) syncBtn.disabled = false;
           if (dryBtn) dryBtn.disabled = false;
-          if (syncLabel) syncLabel.textContent = 'Sync Lists';
-          if (result.status === 409) {
+          if (syncLabel) syncLabel.textContent = 'Sync All Pairs';
+          if (result.status === 409 && /already in progress/i.test(String(result.data && result.data.error || ''))) {
             showToast('A sync is already in progress — opening dashboard.', false, true);
             switchView('dashboard');
             holdFastPolling();
@@ -6764,14 +6764,14 @@
           return;
         }
 
-        showToast(dryRun ? 'List dry run started.' : 'List sync started.', false, true);
+        showToast(dryRun ? 'Pair dry run started.' : 'Pair sync started.', false, true);
         switchView('dashboard');
         holdFastPolling();
         _forceStatusRefresh();
       } catch {
         if (syncBtn) syncBtn.disabled = false;
         if (dryBtn) dryBtn.disabled = false;
-        if (syncLabel) syncLabel.textContent = 'Sync Lists';
+        if (syncLabel) syncLabel.textContent = 'Sync All Pairs';
         showToast('Network error while starting sync.', true, false);
       }
     }
@@ -6933,7 +6933,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: true, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Signed out. Your server-side profile still exists.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7021,7 +7021,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: true, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Profile deleted. Create or load another profile to continue.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7079,7 +7079,7 @@
       trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
       mdblist: { selected_lists: [] },
     });
-      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: true, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
+      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
     populateForm(draftCreds, draftOptions, {});
     const storedProfileId = localStorage.getItem(PROFILE_KEY);
     if (storedProfileId && !el('profile-id').value.trim()) {

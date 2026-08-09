@@ -166,8 +166,8 @@ class SyncPair:
     #: list because a pair happened to write to it. Providers that have no
     #: notion of list privacy ignore it.
     visibility: str = "private"
-    # Pair automation is independent from the main PMDB catalog schedule.  It
-    # is opt-in for existing profiles and can never run more often than 12h.
+    # Every pair owns its schedule independently and can never run more often
+    # than every 12 hours.
     auto_sync: bool = False
     interval_seconds: int = 43200
 

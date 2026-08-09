@@ -59,7 +59,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Sync Your Lists.<br>Keep Them Fresh.", html)
-        self.assertIn("Connect SIMKL, AniList, Trakt, and MDBList", html)
+        self.assertIn("keep watchlists, collections, and history in sync", html)
         self.assertIn(">Trakt</div>", html)
         self.assertIn(">MDBList</div>", html)
         self.assertIn("SIMKL Lists", html)
@@ -100,7 +100,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Delete User Records", html)
         self.assertIn("Danger Zone", html)
         self.assertIn("Stored securely for this profile. Leave blank to keep it.", html)
-        self.assertIn("Watchlist, watch history, resume progress, and device auth.", html)
+        self.assertIn("Watchlist, watch history, collections, custom lists, resume progress, and device auth.", html)
         self.assertIn("Native MDBList watchlist/history writes are not exposed by this app", html)
         self.assertNotIn("data-nav=\"mapping\"", html)
         self.assertIn("Activity Sync", html)
@@ -182,7 +182,8 @@ class WebTests(unittest.TestCase):
         check_connections_mock.side_effect = fake_checks
         saved = self.client.post("/api/profile/connections/check", json={"providers": ["pmdb", "simkl"]})
         self.assertEqual(saved.status_code, 200)
-        self.assertTrue(saved.get_json()["readiness"]["ready"])
+        self.assertFalse(saved.get_json()["readiness"]["ready"])
+        self.assertIn("Create and enable at least one sync pair.", saved.get_json()["readiness"]["blockers"])
         stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])["connection_health"]
         self.assertEqual(stored["pmdb"]["status"], "healthy")
 
@@ -214,15 +215,14 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.get_json()["checks"][0]["message"], "cached")
         check_connections_mock.assert_not_called()
 
-    def test_connection_readiness_reports_required_services_and_bad_pairs(self) -> None:
+    def test_connection_readiness_reports_missing_and_bad_pairs(self) -> None:
         profile = {
             "credentials": _blank_credentials(),
             "options": {"auto_sync": False, "media_types": ["movies"]},
         }
         empty = web._connection_readiness(web._config_from_profile(profile), [])
         self.assertFalse(empty["ready"])
-        self.assertIn("Connect and verify PublicMetaDB.", empty["blockers"])
-        self.assertIn("Connect and verify at least one sync source.", empty["blockers"])
+        self.assertEqual(empty["blockers"], ["Create and enable at least one sync pair."])
 
         profile["credentials"]["pmdb"]["api_key"] = "pm-key"
         profile["credentials"]["simkl"]["client_id"] = "simkl-client"
@@ -1899,6 +1899,10 @@ class WebTests(unittest.TestCase):
             "remove_missing": False,
             "delete_disabled_lists": False,
             "media_types": ["shows", "movies", "anime"],
+            "sync_pairs": [{
+                "pair_id": "simkl-pmdb", "source": "simkl", "target": "pmdb",
+                "categories": ["collection"], "enabled": True,
+            }],
         })
 
         login_response = self.client.post("/api/profile/login", json={
@@ -1917,7 +1921,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["queued_jobs"], 3)
         enqueue_args = mock_enqueue.call_args.args
         self.assertEqual(enqueue_args[1], False)
-        self.assertEqual(enqueue_args[2], {"lists": True, "history": False, "resume": False})
+        self.assertEqual(enqueue_args[2], {
+            "lists": False, "history": False, "resume": False,
+            "pairs": True, "pair_ids": ["simkl-pmdb"],
+        })
 
     def test_sync_run_endpoints_return_summaries_and_details(self) -> None:
         profile = web._profile_store.create_profile("secret", {
@@ -2920,21 +2927,19 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="live-activity-panel"', html)
         self.assertIn("Live Sync Activity", html)
 
-    def test_index_moves_sync_settings_into_pipeline_cards(self) -> None:
+    def test_index_retires_legacy_pipeline_in_favour_of_pairs(self) -> None:
         response = self.client.get("/")
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        # Per-service pipeline cards in the Sync view carry the old
-        # Lists/Behavior settings; the Settings tabs themselves are gone.
-        self.assertIn('id="sync-settings"', html)
+        # Compatibility inputs remain in the DOM for old profile payloads, but
+        # the PMDB-first pipeline is no longer a user-facing settings surface.
+        self.assertIn('id="sync-settings" class="hidden" style="display:none!important"', html)
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
-        # Pairs are the headline now, so the built-in pipeline is titled for
-        # what it is and sits below them.
-        self.assertIn("PublicMetaDB Pipeline", html)
+        self.assertIn("Sync All Pairs", html)
         self.assertLess(html.index(">Sync Pairs<"), html.index('id="sync-settings"'),
-                        "the pairs panel must come before the PublicMetaDB pipeline")
+                        "the pair editor must remain the primary sync UI")
         self.assertNotIn('id="stab-lists"', html)
         self.assertNotIn('id="stab-behavior"', html)
         self.assertNotIn('id="snav-lists"', html)
@@ -2945,6 +2950,7 @@ class WebTests(unittest.TestCase):
                            'id="trakt-catalog-list"', 'id="mdblist-list"', 'id="opt-activity-history-source"'):
             self.assertEqual(html.count(element_id), 1, element_id)
         self.assertIn('id="pipelines-panel"', html)
+        self.assertIn('id="pipelines-panel" style="display:none!important"', html)
         self.assertLess(html.index('id="pairs-dash-panel"'), html.index('id="pipelines-panel"'),
                         "the dashboard must lead with pairs too")
 

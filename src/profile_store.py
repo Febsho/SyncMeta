@@ -30,6 +30,7 @@ MIN_WATCHED_HISTORY_INTERVAL_SECONDS = 86400
 MAX_HISTORY_ITEMS = 20
 MAX_DETAILED_RUNS = 25
 OPTIONS_SCHEMA_VERSION = 2
+PAIR_MODEL_VERSION = 1
 SCHEDULE_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_SCHEDULE_JITTER_SECONDS", "900") or "900"))
 LIST_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_LIST_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
 HISTORY_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_HISTORY_SYNC_JITTER_SECONDS", str(SCHEDULE_JITTER_SECONDS)) or str(SCHEDULE_JITTER_SECONDS)))
@@ -687,6 +688,97 @@ def _normalize_sync_pairs(raw: object) -> list[dict]:
     return out
 
 
+def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
+    """Fold the former built-in PublicMetaDB pipeline into ordinary pairs.
+
+    This runs once for stored profiles.  The old pipeline and pair runner used
+    to execute independently, so merging its selections into an existing
+    source -> PMDB pair preserves that combined intent without creating two
+    jobs that race each other.
+    """
+    migrated = copy.deepcopy(options)
+    pairs = list(migrated.get("sync_pairs") or [])
+    interval = max(43200, int(migrated.get("interval_seconds") or 43200))
+    removal_mode = "mirror" if migrated.get("remove_missing") else "additive"
+
+    def add_or_merge(source: str, categories: list[str], source_lists: list[str], visibility: str) -> None:
+        if not categories:
+            return
+        existing = next(
+            (pair for pair in pairs if pair.get("source") == source and pair.get("target") == "pmdb"),
+            None,
+        )
+        if existing is not None:
+            existing["categories"] = list(dict.fromkeys([*(existing.get("categories") or []), *categories]))
+            existing["source_lists"] = list(dict.fromkeys([*(existing.get("source_lists") or []), *source_lists]))
+            return
+        pairs.append({
+            "pair_id": f"legacy-{source}-pmdb",
+            "name": f"{source.upper() if source != 'anilist' else 'AniList'} → PublicMetaDB",
+            "source": source,
+            "target": "pmdb",
+            "categories": categories,
+            "source_lists": source_lists,
+            "target_list": "",
+            "removal_mode": removal_mode,
+            "mode": "one_way",
+            "enabled": True,
+            "visibility": visibility,
+            "auto_sync": bool(migrated.get("auto_sync", True)),
+            "interval_seconds": interval,
+        })
+
+    simkl_lists: list[str] = []
+    simkl_categories: list[str] = []
+    for media_type, statuses in credentials["simkl"]["selected_statuses"].items():
+        for status in statuses:
+            simkl_lists.append(f"status:{status}:{media_type}")
+            category = "watchlist" if status == "plantowatch" else "collection"
+            if category not in simkl_categories:
+                simkl_categories.append(category)
+    if migrated.get("activity_history_source") == "simkl":
+        simkl_categories.append("history")
+    if credentials["simkl"]["client_id"] and credentials["simkl"]["access_token"]:
+        add_or_merge("simkl", simkl_categories, simkl_lists, migrated.get("simkl_visibility", "private"))
+
+    anilist_lists = [f"status:{status}" for status in credentials["anilist"]["selected_statuses"]]
+    anilist_categories: list[str] = []
+    for status in credentials["anilist"]["selected_statuses"]:
+        category = "watchlist" if status == "PLANNING" else "collection"
+        if category not in anilist_categories:
+            anilist_categories.append(category)
+    if credentials["anilist"]["username"]:
+        add_or_merge("anilist", anilist_categories, anilist_lists, migrated.get("anilist_visibility", "private"))
+
+    trakt_lists = [
+        f"list:{entry['user']}/{entry['slug']}"
+        for entry in credentials["trakt"]["selected_lists"]
+    ]
+    trakt_categories: list[str] = []
+    if credentials["trakt"].get("sync_watchlist_movies") or credentials["trakt"].get("sync_watchlist_shows"):
+        trakt_lists.insert(0, "watchlist")
+        trakt_categories.append("watchlist")
+    if trakt_lists and "watchlist" not in trakt_categories:
+        trakt_categories.append("watchlist")
+    if migrated.get("activity_history_source") == "trakt":
+        trakt_categories.append("history")
+    if credentials["trakt"]["client_id"] and credentials["trakt"]["access_token"]:
+        add_or_merge("trakt", trakt_categories, trakt_lists, migrated.get("trakt_personal_visibility", "private"))
+
+    mdblist_lists = [f"list:{entry['id']}" for entry in credentials["mdblist"]["selected_lists"]]
+    if credentials["mdblist"].get("api_key") or credentials["mdblist"].get("access_token"):
+        add_or_merge("mdblist", ["watchlist"] if mdblist_lists else [], mdblist_lists, migrated.get("mdblist_visibility", "public"))
+
+    migrated["sync_pairs"] = _normalize_sync_pairs(pairs)
+    # Prevent the retired schedulers from running the same work a second time.
+    migrated["auto_sync"] = False
+    migrated["auto_history_sync"] = False
+    migrated["activity_history_source"] = "off"
+    migrated["simkl_sync_watched_history"] = False
+    migrated["trakt_sync_watched_history"] = False
+    return migrated
+
+
 def normalize_profile_options(options: dict | None) -> dict:
     raw = options or {}
     interval_raw = raw.get("interval_seconds", DEFAULT_SYNC_INTERVAL_SECONDS)
@@ -805,6 +897,8 @@ class ProfileStore:
                     changed = True
                 if int(raw_profile.get("options_version") or 0) != OPTIONS_SCHEMA_VERSION:
                     changed = True
+                if int(raw_profile.get("pair_model_version") or 0) != PAIR_MODEL_VERSION:
+                    changed = True
                 if hydrated.get("options") != normalize_profile_options(raw_profile.get("options")):
                     changed = True
                 # Persist rescheduled next_sync_at so restarts don't re-trigger immediately
@@ -821,13 +915,16 @@ class ProfileStore:
 
     def _hydrate_profile(self, profile_id: str, raw_profile: dict) -> dict:
         created_at = raw_profile.get("created_at") or utc_now_iso()
+        credentials = self._load_credentials(raw_profile)
         options = normalize_profile_options(raw_profile.get("options"))
-        if int(raw_profile.get("options_version") or 0) < OPTIONS_SCHEMA_VERSION:
+        if int(raw_profile.get("options_version") or 0) < 2:
             options["auto_history_sync"] = False
             options["auto_resume_sync"] = False
             options["activity_resume_source"] = "off"
             options["trakt_sync_resume_progress"] = False
             options["simkl_sync_resume_progress"] = False
+        if int(raw_profile.get("pair_model_version") or 0) < PAIR_MODEL_VERSION:
+            options = _migrate_legacy_pipeline_pairs(credentials, options)
         next_sync_at = raw_profile.get("next_sync_at")
         if not options["auto_sync"]:
             next_sync_at = None
@@ -867,7 +964,7 @@ class ProfileStore:
         return {
             "profile_id": profile_id,
             "password_hash": raw_profile["password_hash"],
-            "credentials": self._load_credentials(raw_profile),
+            "credentials": credentials,
             "options": options,
             "created_at": created_at,
             "updated_at": raw_profile.get("updated_at") or created_at,
@@ -922,6 +1019,7 @@ class ProfileStore:
             "password_hash": profile["password_hash"],
             "credentials_encrypted": self._cipher.encrypt(profile["credentials"]),
             "options_version": OPTIONS_SCHEMA_VERSION,
+            "pair_model_version": PAIR_MODEL_VERSION,
             "options": copy.deepcopy(profile["options"]),
             "created_at": profile.get("created_at"),
             "updated_at": profile.get("updated_at"),
