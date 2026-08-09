@@ -79,8 +79,10 @@ class WebTests(unittest.TestCase):
 
         self.assertIn('id="snav-appearance"', html)
         self.assertIn('<option value="counterlock">Counterlock</option>', html)
-        self.assertIn("localStorage.setItem(THEME_KEY, selected)", html)
+        self.assertIn("localStorage.setItem(THEME_STYLE_KEY, selected)", html)
+        self.assertIn("localStorage.setItem(THEME_MODE_KEY, selected)", html)
         self.assertIn('html[data-theme="counterlock"]', html)
+        self.assertIn('data-mode-toggle', html)
         # AniList's redirect URL is a fixed AniList endpoint, not this site's
         # address, and it is what makes the connect flow work at all.
         self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)
@@ -2019,8 +2021,10 @@ class WebTests(unittest.TestCase):
         html = self.client.get("/admin").get_data(as_text=True)
 
         self.assertIn('id="admin-theme-select"', html)
+        self.assertIn('data-mode-toggle', html)
         self.assertIn("Instance Danger Zone", html)
         self.assertIn("Remove all linked profiles", html)
+        self.assertIn('id="delete-all-profiles-confirm"', html)
 
     def test_delete_all_profiles_requires_admin_and_confirmation(self) -> None:
         web.ADMIN_PASSWORD = "secret"
@@ -2065,6 +2069,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["deleted"], 2)
+        self.assertEqual(response.get_json()["remaining"], 0)
         self.assertEqual(web._profile_store._profiles, {})
         self.assertFalse(library_path.exists())
         self.assertIsNone(web._session_store.get_profile_id(token))

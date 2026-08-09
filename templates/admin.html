@@ -6,18 +6,38 @@
   <title>SyncMeta Admin</title>
   <script>
     (function () {
-      const key = 'syncmeta_theme';
+      const styleKey = 'syncmeta_theme_style';
+      const modeKey = 'syncmeta_theme_mode';
+      function syncControls() {
+        const style = document.documentElement.dataset.theme || 'syncmeta';
+        const mode = document.documentElement.dataset.mode || 'dark';
+        document.querySelectorAll('[data-theme-select]').forEach(node => { node.value = style; });
+        document.querySelectorAll('[data-mode-toggle]').forEach(node => {
+          node.textContent = mode === 'dark' ? '☾ Dark' : '☀ Light';
+          node.setAttribute('aria-pressed', mode === 'dark' ? 'true' : 'false');
+        });
+      }
       window.setSyncMetaTheme = function (theme) {
-        const selected = theme === 'counterlock' ? 'counterlock' : 'classic';
-        if (selected === 'counterlock') document.documentElement.dataset.theme = selected;
-        else delete document.documentElement.dataset.theme;
-        try { localStorage.setItem(key, selected); } catch (_) {}
-        document.querySelectorAll('[data-theme-select]').forEach(node => { node.value = selected; });
+        const selected = theme === 'counterlock' ? 'counterlock' : 'syncmeta';
+        document.documentElement.dataset.theme = selected;
+        try { localStorage.setItem(styleKey, selected); } catch (_) {}
+        syncControls();
       };
-      let saved = 'classic';
-      try { saved = localStorage.getItem(key) || 'classic'; } catch (_) {}
-      setSyncMetaTheme(saved);
-      document.addEventListener('DOMContentLoaded', () => setSyncMetaTheme(saved));
+      window.toggleSyncMetaMode = function () {
+        const selected = document.documentElement.dataset.mode === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.mode = selected;
+        try { localStorage.setItem(modeKey, selected); } catch (_) {}
+        syncControls();
+      };
+      let style = 'syncmeta', mode = 'dark';
+      try {
+        style = localStorage.getItem(styleKey) ||
+          (localStorage.getItem('syncmeta_theme') === 'counterlock' ? 'counterlock' : 'syncmeta');
+        mode = localStorage.getItem(modeKey) || (style === 'counterlock' ? 'light' : 'dark');
+      } catch (_) {}
+      document.documentElement.dataset.theme = style;
+      document.documentElement.dataset.mode = mode;
+      document.addEventListener('DOMContentLoaded', syncControls);
     })();
   </script>
   <style>
@@ -182,19 +202,26 @@
     .empty{color:var(--z600);font-size:13px;padding:8px 0}
     .divider{height:1px;background:var(--z800);margin:12px 0}
     .theme-select{width:auto;min-width:118px;background:var(--z900);border:1px solid var(--z800);border-radius:7px;padding:7px 10px;color:var(--z100);font-size:12px;font-family:inherit}
+    .mode-button{min-width:78px}
     .instance-danger{border-color:rgba(248,113,113,.3)}
     .danger-copy{max-width:760px;font-size:12px;color:var(--z500);line-height:1.6}
     .danger-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
     .danger-status{font-size:12px;color:var(--z500)}
 
-    html[data-theme="counterlock"]{color-scheme:light;--black:#eee9dc;--z950:#f6f2e8;--z900:#e7e1d4;--z800:#c8c0b3;--z700:#9d968b;--z600:#777168;--z500:#625e57;--z400:#4e4b45;--z300:#292824;--z100:#191917;--white:#191917;--accent:#d33f35;--accent2:#191917;--green:#328044;--red:#c72f27;--orange:#9a7600;--blue:#2770cb;--acid:#d9ff43}
+    html[data-theme="syncmeta"][data-mode="light"]{color-scheme:light;--black:#f4f4f5;--z950:#fff;--z900:#e4e4e7;--z800:#d4d4d8;--z700:#a1a1aa;--z600:#71717a;--z500:#52525b;--z400:#3f3f46;--z300:#27272a;--z100:#18181b;--white:#18181b;--accent:#6c5ce7;--accent2:#5b4bd6;--green:#16835f;--red:#c73535;--orange:#9a6700;--blue:#2563a8}
+    html[data-theme="syncmeta"][data-mode="light"] nav{background:rgba(244,244,245,.94);border-bottom-color:#d4d4d8}
+    html[data-theme="counterlock"][data-mode="light"]{color-scheme:light;--black:#eee9dc;--z950:#f6f2e8;--z900:#e7e1d4;--z800:#c8c0b3;--z700:#9d968b;--z600:#777168;--z500:#625e57;--z400:#4e4b45;--z300:#292824;--z100:#191917;--white:#191917;--accent:#d33f35;--accent2:#191917;--green:#328044;--red:#c72f27;--orange:#9a7600;--blue:#2770cb;--acid:#d9ff43}
+    html[data-theme="counterlock"][data-mode="dark"]{color-scheme:dark;--black:#11110f;--z950:#191917;--z900:#242420;--z800:#3c3b35;--z700:#5c5950;--z600:#777269;--z500:#999389;--z400:#bbb4a8;--z300:#ded7ca;--z100:#f4efe4;--white:#f4efe4;--accent:#ff6257;--accent2:#d9ff43;--green:#63b96f;--red:#ff6257;--orange:#df9a35;--blue:#78aef2;--acid:#d9ff43}
     html[data-theme="counterlock"] body{background-color:var(--black);background-image:linear-gradient(90deg,transparent 49.8%,rgba(25,25,23,.035) 50%,transparent 50.2%);font-family:Arial,Helvetica,sans-serif}
-    html[data-theme="counterlock"] nav{background:rgba(238,233,220,.94);border-bottom:2px solid #191917}
+    html[data-theme="counterlock"][data-mode="light"] nav{background:rgba(238,233,220,.94);border-bottom:2px solid #191917}
+    html[data-theme="counterlock"][data-mode="dark"] nav{background:rgba(17,17,15,.94);border-bottom:2px solid #d9ff43}
     html[data-theme="counterlock"] .section,html[data-theme="counterlock"] .login-card,html[data-theme="counterlock"] .btn,html[data-theme="counterlock"] input,html[data-theme="counterlock"] select,html[data-theme="counterlock"] .badge,html[data-theme="counterlock"] .counter-pill{border-radius:0}
-    html[data-theme="counterlock"] .section{border:1px solid #191917;box-shadow:4px 4px 0 rgba(25,25,23,.2)}
+    html[data-theme="counterlock"][data-mode="light"] .section{border:1px solid #191917;box-shadow:4px 4px 0 rgba(25,25,23,.2)}
+    html[data-theme="counterlock"][data-mode="dark"] .section{border:1px solid #777269;box-shadow:4px 4px 0 #000}
     html[data-theme="counterlock"] .section-title,html[data-theme="counterlock"] .set-group-title{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.1em;text-transform:uppercase}
     html[data-theme="counterlock"] .btn-primary{background:var(--acid);color:#191917;border:1px solid #191917;box-shadow:3px 3px 0 #191917}
-    html[data-theme="counterlock"] .btn-ghost{background:#f6f2e8;border:1px solid #191917;color:#191917}
+    html[data-theme="counterlock"][data-mode="light"] .btn-ghost{background:#f6f2e8;border:1px solid #191917;color:#191917}
+    html[data-theme="counterlock"][data-mode="dark"] .btn-ghost{background:#242420;border:1px solid #777269;color:#f4efe4}
     html[data-theme="counterlock"] .btn-danger{background:#ff493d;color:#191917;border:1px solid #191917}
   </style>
 </head>
@@ -208,9 +235,10 @@
     <div class="nav-right">
       <label for="admin-theme-select" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Theme</label>
       <select class="theme-select" id="admin-theme-select" data-theme-select onchange="setSyncMetaTheme(this.value)" aria-label="Theme">
-        <option value="classic">SyncMeta Dark</option>
+        <option value="syncmeta">SyncMeta</option>
         <option value="counterlock">Counterlock</option>
       </select>
+      <button class="btn btn-ghost mode-button" type="button" data-mode-toggle onclick="toggleSyncMetaMode()" aria-label="Toggle light or dark mode">☾ Dark</button>
       {% if view == "dashboard" %}
       <span class="auto-badge"><span class="dot"></span> Auto-refresh 30s</span>
       <button class="btn btn-ghost" onclick="location.reload()">Refresh</button>
@@ -530,14 +558,16 @@
     <div class="section-body">
       <div class="danger-copy">Remove every linked profile/account from this instance, including encrypted provider credentials, sync history, pending authorization state, profile sessions, logs, and local Library files. Instance settings and the admin login are preserved. This cannot be undone.</div>
       <div class="danger-actions" style="margin-top:14px">
-        <button class="btn btn-danger" type="button" id="delete-all-profiles-btn" onclick="deleteAllProfiles()">Remove all linked profiles</button>
+        <label for="delete-all-profiles-confirm" class="danger-copy">Type <b>DELETE ALL PROFILES</b></label>
+        <input class="theme-select" style="min-width:240px" id="delete-all-profiles-confirm" type="text" autocomplete="off" oninput="refreshDeleteAllProfilesButton()" placeholder="DELETE ALL PROFILES">
+        <button class="btn btn-danger" type="button" id="delete-all-profiles-btn" onclick="deleteAllProfiles()" disabled>Remove all linked profiles</button>
         <span class="danger-status" id="delete-all-profiles-status" role="status" aria-live="polite"></span>
       </div>
     </div>
   </div>
 
   <!-- PROFILES TABLE -->
-  <div class="section">
+  <div class="section" id="admin-profiles-section">
     <div class="section-head">
       <span class="section-title">
         Profiles
@@ -753,10 +783,8 @@
 
   async function deleteAllProfiles() {
     const phrase = 'DELETE ALL PROFILES';
-    const confirmation = prompt(
-      `This permanently removes every linked profile/account on this instance.\n\nType ${phrase} to continue.`
-    );
-    if (confirmation === null) return;
+    const input = document.getElementById('delete-all-profiles-confirm');
+    const confirmation = input.value.trim();
     const status = document.getElementById('delete-all-profiles-status');
     const btn = document.getElementById('delete-all-profiles-btn');
     if (confirmation !== phrase) {
@@ -775,7 +803,7 @@
         body: JSON.stringify({confirm_text: confirmation}),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.ok) {
+      if (!resp.ok || !data.ok || data.remaining !== 0) {
         status.textContent = data.error || 'Could not remove profiles.';
         status.style.color = 'var(--red)';
         btn.disabled = false;
@@ -785,7 +813,9 @@
       status.textContent = `${data.deleted} profile${data.deleted === 1 ? '' : 's'} removed.`;
       status.style.color = 'var(--green)';
       btn.textContent = 'Profiles removed';
-      setTimeout(() => location.reload(), 1200);
+      input.value = '';
+      const profileSection = document.getElementById('admin-profiles-section');
+      if (profileSection) profileSection.innerHTML = '<div class="section-head"><span class="section-title">Profiles <span class="section-count">0</span></span></div><div class="section-body empty">No profiles found.</div>';
     } catch (err) {
       status.textContent = 'Network error while removing profiles.';
       status.style.color = 'var(--red)';
@@ -793,6 +823,12 @@
       btn.textContent = 'Remove all linked profiles';
       console.error(err);
     }
+  }
+
+  function refreshDeleteAllProfilesButton() {
+    const input = document.getElementById('delete-all-profiles-confirm');
+    const btn = document.getElementById('delete-all-profiles-btn');
+    if (input && btn) btn.disabled = input.value.trim() !== 'DELETE ALL PROFILES';
   }
 
   // Live uptime counter
@@ -901,9 +937,7 @@
 </script>
 {% endif %}
 <script>
-  document.querySelectorAll('[data-theme-select]').forEach(node => {
-    node.value = document.documentElement.dataset.theme || 'classic';
-  });
+  setSyncMetaTheme(document.documentElement.dataset.theme || 'syncmeta');
 </script>
 </body>
 </html>

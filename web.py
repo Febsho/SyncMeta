@@ -3964,7 +3964,11 @@ def admin_api_delete_all_profiles():
 
     _purge_profile_runtime_data(deleted_ids)
     logger.warning("Admin deleted all %d profiles from this instance", len(deleted_ids))
-    return jsonify({"ok": True, "deleted": len(deleted_ids)})
+    return jsonify({
+        "ok": True,
+        "deleted": len(deleted_ids),
+        "remaining": len(_profile_store._profiles),
+    })
 
 
 def _live_apply_setting(key: str, value: str) -> bool:
