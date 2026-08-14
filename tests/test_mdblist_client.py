@@ -226,6 +226,50 @@ class MdbListSyncWriteTests(unittest.TestCase):
             client.add_sync_items("watchlist", [{"media_type": "movie", "tmdb_id": "1"}])
         self.assertEqual(post.call_args.args[0], "/watchlist/items/add")
 
+    def test_trakt_shaped_counts_are_flattened_into_flat_totals(self) -> None:
+        # MDBList's sync API is Trakt-shaped: the buckets are dicts per media
+        # type, not the scalars their names suggest. Returning them raw made
+        # cross_sync do int({"movies": 2}) *after* the write had landed, so a
+        # successful sync was reported as an error and its managed keys were
+        # never recorded — every run then re-added the whole list.
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        response = {
+            "added": {"movies": 2, "shows": 1},
+            "existing": {"movies": 1, "shows": 0},
+            "not_found": {"movies": ["tt999"], "shows": []},
+        }
+        with patch.object(client, "_post", return_value=response):
+            totals = client.add_sync_items("watchlist", [
+                {"media_type": "movie", "tmdb_id": "1"},
+                {"media_type": "tv", "tmdb_id": "2"},
+            ])
+        self.assertEqual(totals["added"], 4)
+        self.assertEqual(totals["not_found"], 1)
+        self.assertIsInstance(totals["added"], int)
+
+    def test_removals_report_a_flat_deleted_count(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        with patch.object(client, "_post", return_value={"deleted": {"movies": 3, "shows": 2}}):
+            totals = client.remove_sync_items("watchlist", [{"media_type": "movie", "tmdb_id": "1"}])
+        self.assertEqual(totals["deleted"], 5)
+
+    def test_an_unrecognised_success_body_counts_what_was_sent(self) -> None:
+        # A 200 that carries no bucket we know still means the items went, so
+        # reporting 0 added would understate a write that actually happened.
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        with patch.object(client, "_post", return_value={"success": True}):
+            totals = client.add_sync_items("watchlist", [
+                {"media_type": "movie", "tmdb_id": "1"},
+                {"media_type": "tv", "tmdb_id": "2"},
+            ])
+        self.assertEqual(totals["added"], 2)
+
+    def test_named_list_writes_are_flattened_too(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        with patch.object(client, "_post", return_value={"added": {"movies": 1}}):
+            totals = client.change_list_items(10, [{"media_type": "movie", "tmdb_id": "630"}], "add")
+        self.assertEqual(totals["added"], 1)
+
     def test_http_errors_do_not_echo_the_api_key(self) -> None:
         client = MdbListClient(MdbListConfig(api_key="top-secret"))
         response = Mock(status_code=405)

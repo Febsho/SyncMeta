@@ -74,6 +74,20 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="anilist-client-id"', html)
         self.assertIn('id="anilist-client-secret"', html)
 
+    def test_pin_and_device_flows_advertise_the_oob_redirect(self) -> None:
+        # SIMKL connects by PIN and Trakt by device code: neither client ever
+        # sends a redirect_uri, so the field in their developer console is only
+        # there to be satisfied, and the out-of-band URN is what it is for.
+        # MDBList is a real authorization-code flow that redirects back here and
+        # replays the same value at token exchange, so it must stay the site
+        # root — pointing it at the URN would break connecting entirely.
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("const OOB_REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob'", html)
+        self.assertIn("if (simklInput) simklInput.value = OOB_REDIRECT_URI;", html)
+        self.assertIn("if (traktInput) traktInput.value = OOB_REDIRECT_URI;", html)
+        self.assertIn("if (mdblistInput) mdblistInput.value = currentSiteRoot();", html)
+
     def test_index_offers_persistent_counterlock_theme(self) -> None:
         html = self.client.get("/").get_data(as_text=True)
 

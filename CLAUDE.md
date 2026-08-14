@@ -277,6 +277,23 @@ watchlist/collection/history plus `list:<user>/<slug>`, PMDB `watchlist` and
 An adapter must not fall back to a whole category when the selection names only
 other categories — that would silently sync far more than asked.
 
+**PMDB's native lists are matched by type, never by name.**
+`publicmetadb_client.NATIVE_LIST_TYPES` is `{"watchlist", "picks"}` — singletons
+the account owns, as opposed to the custom lists SyncMeta names and creates.
+`get_or_create_list` resolves those through `find_list_by_type`, because the user
+may well have renamed theirs and matching on our label would create a second one
+beside it. `PmdbAdapter` offers each under its own key (`watchlist`, `picks`) and
+skips that type in the generic list loop, so a renamed Picks is not also offered
+as `list:<id>` — two entries for one list means half the pairs write to a list
+that merely looks right. Picks feeds `CATEGORY_WATCHLIST`, the same category the
+generic custom lists use.
+
+Two things this has to keep right: picks is read **only when explicitly
+selected** (folding it into the default would make every plain watchlist pair
+quietly sync a second list), and a read never creates it — only a write does,
+since conjuring a Picks list on an account that never had one, just to report it
+empty, is the kind of side effect a source is not allowed to have.
+
 **A destination list is only offered where the service supports one.**
 `supports_target_lists` is true for Trakt (`/users/{user}/lists/{slug}/items`) and
 PMDB, false for SIMKL and AniList (no writable custom lists) and MDBList (no

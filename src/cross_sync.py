@@ -42,6 +42,30 @@ from .providers import (
 logger = logging.getLogger(__name__)
 
 
+def _total(totals: dict, key: str) -> int:
+    """Read one count out of an adapter's write result.
+
+    Adapters are contracted to return flat integers, but a provider's raw
+    response nests counts per media type, and `int()` on that dict raises
+    *after* the write has already landed — which reports a successful sync as
+    an error and, worse, skips recording the managed keys for what was written,
+    so the next run re-adds it all. A shape we did not expect must degrade to a
+    count, never to an exception.
+    """
+    def count(value) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            return sum(count(inner) for inner in value.values())
+        return 0
+
+    return count((totals or {}).get(key))
+
+
 def _add_kwargs(adapter, pair) -> dict:
     """Visibility is only passed to adapters that declare they can use it.
 
@@ -517,8 +541,8 @@ class CrossSyncService:
                     totals = target.add(
                         category, to_add, target_list, **_add_kwargs(target, pair),
                     ) or {}
-                    result.added = int(totals.get("added") or 0)
-                    result.unmapped += int(totals.get("not_found") or 0)
+                    result.added = _total(totals, "added")
+                    result.unmapped += _total(totals, "not_found")
                     wrote_added = to_add
                 except Exception as exc:
                     message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
@@ -535,7 +559,7 @@ class CrossSyncService:
             else:
                 try:
                     totals = target.remove(category, to_remove, target_list) or {}
-                    result.removed = int(totals.get("deleted") or 0)
+                    result.removed = _total(totals, "deleted")
                     wrote_removed = to_remove
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
@@ -676,9 +700,9 @@ class CrossSyncService:
                         if verb == "add"
                         else adapter.remove(category, items, dest)
                     ) or {}
-                    count = int(totals.get("added" if verb == "add" else "deleted") or 0)
+                    count = _total(totals, "added" if verb == "add" else "deleted")
                     if verb == "add":
-                        result.unmapped += int(totals.get("not_found") or 0)
+                        result.unmapped += _total(totals, "not_found")
                     if cache is not None:
                         cache.apply_write(
                             adapter.key, category,

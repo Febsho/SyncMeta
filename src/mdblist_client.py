@@ -607,33 +607,81 @@ class MdbListClient:
         logger.info("MDBList: fetched %d %s item(s)", len(items), category)
         return items
 
+    @staticmethod
+    def _count_bucket(value: object) -> int:
+        """Flatten one bucket of a sync response into a plain count.
+
+        MDBList's sync API is Trakt-shaped, so a bucket is a dict per media
+        type — ``{"movies": 2, "shows": 1}`` for counts and
+        ``{"movies": [...], "shows": [...]}`` for not-found — not the scalar the
+        name suggests. Callers want one integer.
+        """
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            return sum(MdbListClient._count_bucket(inner) for inner in value.values())
+        return 0
+
+    _WRITE_BUCKETS = ("added", "existing", "updated", "deleted", "removed", "not_found")
+
+    @classmethod
+    def _write_totals(cls, response: object, verb: str, sent: int) -> dict:
+        """Normalize a sync write response into flat integer totals.
+
+        Every adapter is contracted to return flat counts — Trakt's client
+        flattens the identical shape in `_sync_write`. MDBList returned the raw
+        JSON instead, so `int(totals["added"])` upstream hit a dict and raised,
+        which turned a write that had *already landed* into a reported failure
+        and skipped recording its managed keys.
+
+        A 200 carrying no bucket we recognise still means the items went, so the
+        count falls back to how many were sent rather than reporting 0, which
+        would be a lie in the other direction.
+        """
+        payload = response if isinstance(response, dict) else {}
+        totals = {
+            "added": sum(cls._count_bucket(payload.get(k)) for k in ("added", "existing", "updated")),
+            "deleted": sum(cls._count_bucket(payload.get(k)) for k in ("deleted", "removed")),
+            "not_found": cls._count_bucket(payload.get("not_found")),
+        }
+        if not any(bucket in payload for bucket in cls._WRITE_BUCKETS):
+            totals[verb] = int(sent)
+        return totals
+
     def add_sync_items(self, category: str, items: list[dict]) -> dict:
         payload = self._to_sync_payload(items)
-        if not payload["movies"] and not payload["shows"]:
-            return {"added": 0}
+        sent = len(payload["movies"]) + len(payload["shows"])
+        if not sent:
+            return {"added": 0, "deleted": 0, "not_found": 0}
         paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
         if not paths:
             raise ValueError(f"MDBList has no sync endpoint for {category!r}")
-        result = self._post(paths[0], payload)
+        totals = self._write_totals(self._post(paths[0], payload), "added", sent)
         logger.info(
-            "MDBList: added %d movie(s) and %d show(s) to %s",
+            "MDBList: added %d movie(s) and %d show(s) to %s (%d accepted, %d not found)",
             len(payload["movies"]), len(payload["shows"]), category,
+            totals["added"], totals["not_found"],
         )
-        return result
+        return totals
 
     def remove_sync_items(self, category: str, items: list[dict]) -> dict:
         payload = self._to_sync_payload(items)
-        if not payload["movies"] and not payload["shows"]:
-            return {"removed": 0}
+        sent = len(payload["movies"]) + len(payload["shows"])
+        if not sent:
+            return {"added": 0, "deleted": 0, "not_found": 0}
         paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
         if not paths:
             raise ValueError(f"MDBList has no sync endpoint for {category!r}")
-        result = self._post(paths[1], payload)
+        totals = self._write_totals(self._post(paths[1], payload), "deleted", sent)
         logger.info(
-            "MDBList: removed %d movie(s) and %d show(s) from %s",
-            len(payload["movies"]), len(payload["shows"]), category,
+            "MDBList: removed %d movie(s) and %d show(s) from %s (%d accepted)",
+            len(payload["movies"]), len(payload["shows"]), category, totals["deleted"],
         )
-        return result
+        return totals
 
     # ── static lists ───────────────────────────────────────────────────────
 
@@ -659,5 +707,9 @@ class MdbListClient:
                 continue
             (movies if item.get("media_type") == "movie" else shows).append(entry)
         if not movies and not shows:
-            return {"changed": 0}
-        return self._post(f"/lists/{list_id}/items/{action}", {"movies": movies, "shows": shows})
+            return {"added": 0, "deleted": 0, "not_found": 0}
+        return self._write_totals(
+            self._post(f"/lists/{list_id}/items/{action}", {"movies": movies, "shows": shows}),
+            "added" if action == "add" else "deleted",
+            len(movies) + len(shows),
+        )

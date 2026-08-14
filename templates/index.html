@@ -1780,14 +1780,22 @@
       setPollingInterval(POLL_IDLE_MS);
     }
 
+    // SIMKL and Trakt are connected by PIN and device code respectively: the
+    // browser never comes back to this app, and neither client ever sends a
+    // redirect_uri, so the site root was a value that only had to be typed into
+    // their developer console to satisfy a required field. The out-of-band URN
+    // is what that field is actually for. MDBList is deliberately NOT included —
+    // it is a real authorization-code flow that redirects here and the same
+    // value is replayed at token exchange, so it must stay the site root.
+    const OOB_REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob';
+
     function refreshRedirectUrlHints() {
-      const value = currentSiteRoot();
       const simklInput = el('simkl-redirect-url');
       const traktInput = el('trakt-redirect-url');
       const mdblistInput = el('mdblist-redirect-url');
-      if (simklInput) simklInput.value = value;
-      if (traktInput) traktInput.value = value;
-      if (mdblistInput) mdblistInput.value = value;
+      if (simklInput) simklInput.value = OOB_REDIRECT_URI;
+      if (traktInput) traktInput.value = OOB_REDIRECT_URI;
+      if (mdblistInput) mdblistInput.value = currentSiteRoot();
     }
 
     // ── AniList connect flow ───────────────────────────────────────────────

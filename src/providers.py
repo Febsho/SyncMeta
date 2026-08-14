@@ -899,6 +899,10 @@ class PmdbAdapter(ProviderAdapter):
     target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
 
     _COLLECTION_LIST_NAME = "SyncMeta · Collection"
+    _PICKS_LIST_TYPE = "picks"
+    #: Typed singletons offered by their own key, so the generic list loop must
+    #: not offer them a second time under their current name.
+    _NATIVE_LIST_TYPES = ("watchlist", "picks")
 
     def __init__(self, client):
         self._client = client
@@ -918,6 +922,30 @@ class PmdbAdapter(ProviderAdapter):
         created = self._client.get_or_create_list(
             "Watchlist", "SyncMeta cross-service watchlist",
             visibility == VISIBILITY_PUBLIC, "watchlist",
+        )
+        if isinstance(created, dict) and created.get("id"):
+            return str(created["id"])
+        return None
+
+    def _picks_id(
+        self, *, create: bool = False, visibility: str = VISIBILITY_PRIVATE,
+    ) -> str | None:
+        """Return PMDB's native Picks list, creating it only for a write.
+
+        Picks is a typed singleton like the watchlist, so it is found by type —
+        the user may have renamed it, and matching on our label would create a
+        second Picks beside theirs. Reads must not create: a pair that only
+        *reads* picks should report an empty source, not conjure a list on an
+        account that never had one.
+        """
+        existing = self._client.find_list_by_type(self._PICKS_LIST_TYPE)
+        if isinstance(existing, dict) and existing.get("id"):
+            return str(existing["id"])
+        if not create:
+            return None
+        created = self._client.get_or_create_list(
+            "Picks", "Picks managed by SyncMeta",
+            visibility == VISIBILITY_PUBLIC, self._PICKS_LIST_TYPE,
         )
         if isinstance(created, dict) and created.get("id"):
             return str(created["id"])
@@ -965,6 +993,11 @@ class PmdbAdapter(ProviderAdapter):
             "category": CATEGORY_WATCHLIST,
             "kind": "status",
         }, {
+            "key": "picks",
+            "label": "Picks",
+            "category": CATEGORY_WATCHLIST,
+            "kind": "status",
+        }, {
             "key": "collection",
             "label": "SyncMeta Collection",
             "category": CATEGORY_COLLECTION,
@@ -974,8 +1007,8 @@ class PmdbAdapter(ProviderAdapter):
             list_id = entry.get("id")
             if not list_id:
                 continue
-            if str(entry.get("list_type") or "").strip().lower() == "watchlist":
-                continue  # already offered above
+            if str(entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
+                continue  # already offered above by type
             if str(entry.get("name") or "").strip() == self._COLLECTION_LIST_NAME:
                 continue  # offered above as the default collection
             out.append({
@@ -993,6 +1026,13 @@ class PmdbAdapter(ProviderAdapter):
             native = self._watchlist_id()
             if native:
                 list_ids.append(native)
+        # Picks is only read when it was actually asked for. Folding it into the
+        # default would make every plain watchlist pair quietly sync a second
+        # list the user never selected.
+        if "picks" in selected:
+            picks = self._picks_id()
+            if picks:
+                list_ids.append(picks)
         for key in selected:
             if key.startswith("list:"):
                 list_ids.append(key.split(":", 1)[1])
@@ -1056,12 +1096,12 @@ class PmdbAdapter(ProviderAdapter):
         return self._unsupported(category, "read")
 
     def target_lists(self) -> list[dict]:
-        out = [{"key": "watchlist", "label": "Watchlist"}]
+        out = [{"key": "watchlist", "label": "Watchlist"}, {"key": "picks", "label": "Picks"}]
         for entry in self._client.get_lists() or []:
             list_id = entry.get("id")
             if not list_id:
                 continue
-            if str(entry.get("list_type") or "").strip().lower() == "watchlist":
+            if str(entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
                 continue
             out.append({"key": f"list:{list_id}", "label": str(entry.get("name") or f"List {list_id}")})
         return out
@@ -1072,8 +1112,14 @@ class PmdbAdapter(ProviderAdapter):
     ) -> dict:
         totals = {"added": 0, "not_found": 0, "batches": 1 if items else 0}
         destination = str(target_list or "").strip()
-        if destination.startswith("list:"):
-            list_id = destination.split(":", 1)[1]
+        if destination.startswith("list:") or destination == "picks":
+            if destination == "picks":
+                list_id = self._picks_id(create=True, visibility=visibility)
+                if not list_id:
+                    totals["not_found"] = len(items)
+                    return totals
+            else:
+                list_id = destination.split(":", 1)[1]
             payload = []
             for item in items:
                 tmdb_id = str(item.get("tmdb_id") or "").strip()
@@ -1137,8 +1183,13 @@ class PmdbAdapter(ProviderAdapter):
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
         totals = {"deleted": 0, "not_found": 0, "batches": 1 if items else 0}
         destination = str(target_list or "").strip()
-        if destination.startswith("list:"):
-            list_id = destination.split(":", 1)[1]
+        if destination.startswith("list:") or destination == "picks":
+            # Never create on a remove: nothing can be deleted from a list that
+            # does not exist, and conjuring one to empty it is pure noise.
+            list_id = self._picks_id() if destination == "picks" else destination.split(":", 1)[1]
+            if not list_id:
+                totals["not_found"] = len(items)
+                return totals
             for item in items:
                 pmdb_item_id = item.get("pmdb_item_id")
                 if not pmdb_item_id:

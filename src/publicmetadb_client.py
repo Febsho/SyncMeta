@@ -23,6 +23,11 @@ _CANCEL_POLL_INTERVAL = 0.25
 RATE_LIMIT_MAX = 280  # Leave some headroom
 RATE_LIMIT_WINDOW = 10.0
 
+#: PMDB list types that are singletons owned by the account rather than lists
+#: SyncMeta names and creates. They are looked up by ``type``, never by name,
+#: so a renamed one is still found instead of being duplicated.
+NATIVE_LIST_TYPES = frozenset({"watchlist", "picks"})
+
 
 def _coerce_tmdb_id(value: object, media_type: str = "") -> int | None:
     """Normalize PMDB mapping IDs that may be returned as int or media dict."""
@@ -520,12 +525,16 @@ class PublicMetaDBClient:
             return self._lists_by_type.get(lookup)
 
     def get_or_create_list(self, name: str, description: str = "", is_public: bool = False, list_type: str = "custom") -> dict:
-        """Find a list by name (or by type for 'watchlist'), or create it if missing."""
-        # For watchlist type, prefer finding by type since PMDB may already have one
-        if list_type == "watchlist":
-            existing = self.find_list_by_type("watchlist")
+        """Find a list by name (or by type for a native list), or create it.
+
+        A native list is a singleton PMDB owns by type rather than by name, so
+        it must be matched on type: the user may well have renamed it, and
+        matching on our name would create a second one alongside theirs.
+        """
+        if list_type in NATIVE_LIST_TYPES:
+            existing = self.find_list_by_type(list_type)
             if existing:
-                logger.debug("Found existing watchlist '%s' (id=%s)", existing.get("name"), existing["id"])
+                logger.debug("Found existing %s '%s' (id=%s)", list_type, existing.get("name"), existing["id"])
                 return existing
         else:
             existing = self.find_list_by_name(name)
