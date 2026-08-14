@@ -223,7 +223,8 @@ class AniListWriteTests(unittest.TestCase):
         self.assertEqual(calls, [25])
 
     @patch("src.fribb_client.lookup_by_tmdb")
-    def test_non_anilist_items_are_mapped_through_the_anime_data(self, lookup_by_tmdb) -> None:
+    @patch("src.fribb_client.lookup_all_by_tmdb", return_value=[])
+    def test_non_anilist_items_are_mapped_through_the_anime_data(self, _lookup_all, lookup_by_tmdb) -> None:
         # A Trakt or PMDB item has no AniList id; it has to be mapped from TMDB.
         lookup_by_tmdb.return_value = {"anilist_id": 164, "mal_id": 164}
         client = AniListClient(AniListConfig(username="u", access_token="t"))
@@ -235,9 +236,36 @@ class AniListWriteTests(unittest.TestCase):
         self.assertEqual(calls, [164])
         self.assertEqual(totals["added"], 1)
 
+    @patch("src.fribb_client.lookup_all_by_tmdb")
+    def test_tmdb_season_selects_the_matching_anilist_entry(self, lookup_all) -> None:
+        lookup_all.return_value = [
+            {"anilist_id": 100, "season": {"tmdb": 1}},
+            {"anilist_id": 200, "season": {"tmdb": 2}},
+        ]
+        client = AniListClient(AniListConfig(username="u", access_token="t"))
+        calls: list[int] = []
+        client.save_entry = lambda media_id, status, progress=None: (  # type: ignore[method-assign]
+            calls.append(media_id) or {"id": 1}
+        )
+        client.add_to_list([{"media_type": "tv", "tmdb_id": "9000", "season": 2}], "watchlist")
+        self.assertEqual(calls, [200])
+
+    @patch("src.fribb_client.lookup_all_by_tmdb")
+    def test_tmdb_episode_selects_the_matching_split_cour(self, lookup_all) -> None:
+        lookup_all.return_value = [
+            {"anilist_id": 100, "season": {"tmdb": 1}, "episode_offset": {"tmdb": 0}},
+            {"anilist_id": 101, "season": {"tmdb": 1}, "episode_offset": {"tmdb": 12}},
+        ]
+        client = AniListClient(AniListConfig(username="u", access_token="t"))
+        self.assertEqual(
+            client._resolve_media_id({"media_type": "tv", "tmdb_id": "9000", "season": 1, "episode": 15}),
+            101,
+        )
+
     @patch("src.fribb_client.lookup_by_imdb")
     @patch("src.fribb_client.lookup_by_tmdb")
-    def test_unmappable_items_are_reported_not_written(self, lookup_by_tmdb, lookup_by_imdb) -> None:
+    @patch("src.fribb_client.lookup_all_by_tmdb", return_value=[])
+    def test_unmappable_items_are_reported_not_written(self, _lookup_all, lookup_by_tmdb, lookup_by_imdb) -> None:
         lookup_by_tmdb.return_value = None
         lookup_by_imdb.return_value = None
         client = AniListClient(AniListConfig(username="u", access_token="t"))

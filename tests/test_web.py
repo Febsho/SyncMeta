@@ -914,6 +914,27 @@ class WebTests(unittest.TestCase):
         stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])
         self.assertEqual(set(stored["activity_state"]["pair_managed_keys"]), {"p1", "p2"})
 
+    def test_status_does_not_ship_managed_keys(self) -> None:
+        # Ownership bookkeeping is server-side only and grows with one key per
+        # item per pair per category, so it must never ride the 2s status poll.
+        # The cursors do stay — the clear-cursors endpoint reports them back.
+        profile = self._make_bare_profile()
+        web._profile_store.update_pair_managed_keys(
+            profile["profile_id"], {"p1": {"watchlist": [f"movie:tmdb:{i}" for i in range(50)]}},
+        )
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/status", json={})
+        activity_state = response.get_json()["profile"]["activity_state"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("pair_managed_keys", activity_state)
+        self.assertNotIn("pmdb_watchlist_managed_keys", activity_state)
+        self.assertIn("simkl_history_cursor", activity_state)
+        # The private profile still has them — this trims the response only.
+        stored = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        self.assertEqual(len(stored["activity_state"]["pair_managed_keys"]["p1"]["watchlist"]), 50)
+
     def _make_anilist_profile(self, access_token: str) -> dict:
         return web._profile_store.create_profile("secret", {
             "simkl": {"client_id": "", "client_secret": "", "access_token": "", "selected_statuses": {"shows": [], "movies": [], "anime": []}},
@@ -3046,8 +3067,12 @@ class WebTests(unittest.TestCase):
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
         self.assertIn("Sync All Pairs", html)
-        self.assertLess(html.index(">Sync Pairs<"), html.index('id="sync-settings"'),
-                        "the pair editor must remain the primary sync UI")
+        self.assertLess(html.index(">Sync Setup<"), html.index('id="sync-settings"'),
+                        "the destination-first setup must remain the primary sync UI")
+        self.assertIn('id="multi-sync-target"', html)
+        self.assertIn('id="multi-sync-sources"', html)
+        self.assertIn('id="btn-multi-sync-add"', html)
+        self.assertIn("Send several services to one place", html)
         self.assertNotIn('id="stab-lists"', html)
         self.assertNotIn('id="stab-behavior"', html)
         self.assertNotIn('id="snav-lists"', html)

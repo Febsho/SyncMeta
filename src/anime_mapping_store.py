@@ -174,6 +174,17 @@ class AnimeMappingStore:
                 return entries[0]
         return None
 
+    def lookup_fribb_entries_by_tmdb(self, tmdb_id: int) -> list[dict]:
+        """Return every anime entry belonging to a TMDB title.
+
+        A TMDB TV title can represent several AniList/SIMKL titles (one per
+        season or cour).  ``lookup_fribb(tmdb_id=...)`` deliberately only
+        returns unambiguous identities, but writers need the complete set so
+        they can select the entry matching a canonical TMDB season.
+        """
+        self._ensure_fribb_loaded()
+        return list(self._fribb_by_tmdb.get(int(tmdb_id)) or [])
+
     def validate_tmdb(self, entry: dict | None, tmdb_id: int | None) -> bool:
         if not entry or not tmdb_id:
             return False
@@ -732,6 +743,10 @@ def resolve_tvdb_episode_from_anidb_episode(
     anidb_season: int = 1,
 ) -> dict | None:
     return _STORE.resolve_tvdb_episode_from_anidb_episode(anidb_id, anidb_episode, anidb_season)
+
+
+def lookup_fribb_entries_by_tmdb(tmdb_id: int) -> list[dict]:
+    return _STORE.lookup_fribb_entries_by_tmdb(int(tmdb_id))
 
 
 def get_xml_entries_by_tmdb(tmdb_id: int) -> list[ET.Element]:

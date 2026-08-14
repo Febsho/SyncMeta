@@ -905,7 +905,11 @@ class AniListClient:
         try:
             tmdb_id, _media_type = fribb_client.extract_tmdb(item.get("tmdb_id"))
             if tmdb_id:
-                entry = fribb_client.lookup_by_tmdb(int(tmdb_id))
+                item_media_type = str(item.get("media_type") or "").strip().lower()
+                entries = fribb_client.lookup_all_by_tmdb(int(tmdb_id)) if item_media_type == "tv" else []
+                entry = self._select_tmdb_season_entry(entries, item)
+                if entry is None:
+                    entry = fribb_client.lookup_by_tmdb(int(tmdb_id))
             if entry is None:
                 imdb_id = fribb_client.single_imdb_id(item.get("imdb_id") or ids.get("imdb"))
                 if imdb_id:
@@ -937,6 +941,62 @@ class AniListClient:
             except (TypeError, ValueError):
                 return None
         return None
+
+    @staticmethod
+    def _select_tmdb_season_entry(entries: list[dict], item: dict) -> dict | None:
+        """Select AniList's season entry for canonical TMDB coordinates.
+
+        TMDB/TVDB keep episodes beneath one show while AniList has a separate
+        media id for many seasons and cours.  Prefer the entry whose Fribb TMDB
+        season contains the canonical item.  For a show-level list item with no
+        season, choose the earliest mapped season instead of rejecting the
+        otherwise valid multi-entry mapping.
+        """
+        candidates = [entry for entry in entries if isinstance(entry, dict)]
+        if not candidates:
+            return None
+        try:
+            wanted_season = int(item.get("season")) if item.get("season") is not None else None
+        except (TypeError, ValueError):
+            wanted_season = None
+
+        def tmdb_season(entry: dict) -> int | None:
+            raw = entry.get("season")
+            value = raw.get("tmdb") if isinstance(raw, dict) else None
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        if wanted_season is not None:
+            exact = [entry for entry in candidates if tmdb_season(entry) == wanted_season]
+            if len(exact) == 1:
+                return exact[0]
+            if exact:
+                # Split cours can share a TMDB season. Use episode offsets to
+                # pick the last cour that starts no later than this episode.
+                try:
+                    episode = int(item.get("episode"))
+                except (TypeError, ValueError):
+                    episode = None
+                if episode is not None:
+                    def offset(entry: dict) -> int:
+                        raw = entry.get("episode_offset")
+                        value = raw.get("tmdb", 0) if isinstance(raw, dict) else 0
+                        try:
+                            return int(value or 0)
+                        except (TypeError, ValueError):
+                            return 0
+                    eligible = [entry for entry in exact if offset(entry) < episode]
+                    if eligible:
+                        return max(eligible, key=offset)
+                return exact[0]
+
+        ordered = sorted(
+            enumerate(candidates),
+            key=lambda pair: (tmdb_season(pair[1]) is None, tmdb_season(pair[1]) or 0, pair[0]),
+        )
+        return ordered[0][1]
 
     def save_entry(self, media_id: int, status: str, progress: int | None = None) -> dict | None:
         variables: dict = {"mediaId": int(media_id), "status": status}

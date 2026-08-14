@@ -25,6 +25,11 @@ def lookup_by_tmdb(tmdb_id: int) -> dict | None:
     return _store.lookup_fribb(tmdb_id=int(tmdb_id))
 
 
+def lookup_all_by_tmdb(tmdb_id: int) -> list[dict]:
+    """Return all season/cour entries mapped to one canonical TMDB title."""
+    return _store.lookup_fribb_entries_by_tmdb(int(tmdb_id))
+
+
 def lookup_by_imdb(imdb_id: str) -> dict | None:
     return _store.lookup_fribb(imdb_id=str(imdb_id))
 

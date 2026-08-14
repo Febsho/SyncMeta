@@ -169,6 +169,30 @@ def _normalize_activity_state(raw_state: dict | None) -> dict:
     }
 
 
+def _public_activity_state(raw_state: dict | None) -> dict:
+    """Return only the cursors, never the managed-key sets.
+
+    `pmdb_watchlist_managed_keys` and `pair_managed_keys` are ownership
+    bookkeeping — which items SyncMeta itself wrote, so "managed" removal can
+    tell them from manual additions. They are read exclusively server-side off
+    the *private* profile and no client has ever used them, but they grow with
+    one key per item per pair per category (history down to episode
+    granularity), so a real profile carried ~200KB of them into every response.
+    `/status` polls every 2s during a sync, and this whole dict was deep-copied
+    under the store lock each time.
+
+    The cursors stay: they are four short strings and the clear-cursors
+    endpoint reports them back to confirm the reset.
+    """
+    state = raw_state if isinstance(raw_state, dict) else {}
+    return {
+        "simkl_history_cursor": str(state.get("simkl_history_cursor", "") or ""),
+        "trakt_history_cursor": str(state.get("trakt_history_cursor", "") or ""),
+        "simkl_activities_ts": str(state.get("simkl_activities_ts", "") or ""),
+        "trakt_activities_ts": str(state.get("trakt_activities_ts", "") or ""),
+    }
+
+
 def _normalize_list_state(raw_state: dict | None) -> dict:
     if not isinstance(raw_state, dict):
         return {}
@@ -1357,7 +1381,11 @@ class ProfileStore:
         profile["activity_state"] = state
 
     def _public_profile(self, profile: dict, include_credentials: bool = False) -> dict:
-        unresolved_items = copy.deepcopy(profile.get("unresolved_items", []))
+        # Read-only: this is only counted and aggregated below, never returned
+        # (the UI fetches the items themselves from /unresolved). The list is
+        # unbounded — one entry per unresolvable item — and this runs on every
+        # status poll under the store lock, so copying it is pure overhead.
+        unresolved_items = profile.get("unresolved_items", []) or []
         result = {
             "profile_id": profile["profile_id"],
             "created_at": profile.get("created_at"),
@@ -1381,7 +1409,7 @@ class ProfileStore:
             "last_resume_sync": profile.get("last_resume_sync"),
             "next_resume_sync_at": profile.get("next_resume_sync_at"),
             "activity_results": copy.deepcopy(profile.get("activity_results", {})),
-            "activity_state": copy.deepcopy(profile.get("activity_state", {})),
+            "activity_state": _public_activity_state(profile.get("activity_state")),
             "options": copy.deepcopy(profile.get("options", {})),
             "last_pair_results": _redact_secret_urls(copy.deepcopy(profile.get("last_pair_results", {}))),
             "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
@@ -2221,7 +2249,11 @@ class ProfileStore:
             profile["activity_state"] = state
             self._save_locked()
 
-    def update_sync_status(self, profile_id: str, status: str) -> dict:
+    def update_sync_status(self, profile_id: str, status: str) -> None:
+        # Returns nothing on purpose: this fires from the pipeline's status
+        # callback many times per run and every caller discards the result, so
+        # building a whole public profile here was work no one ever read.
+        # Pollers read the state back from memory via /status.
         with self._lock:
             normalized_id = self._normalize_profile_id(profile_id)
             profile = self._profiles[normalized_id]
@@ -2248,9 +2280,9 @@ class ProfileStore:
             snapshot["provider"] = provider
             profile["last_sync_job_snapshot"] = snapshot
             # No disk save — status is in-memory only; polls read from memory.
-            return self._public_profile(profile, include_credentials=True)
 
-    def update_sync_progress(self, profile_id: str, results: list[dict]) -> dict:
+    def update_sync_progress(self, profile_id: str, results: list[dict]) -> None:
+        # See update_sync_status: fire-and-forget, no public profile built.
         with self._lock:
             normalized_id = self._normalize_profile_id(profile_id)
             profile = self._profiles[normalized_id]
@@ -2268,7 +2300,6 @@ class ProfileStore:
             snapshot["totals"] = _result_totals(results or [])
             profile["last_sync_job_snapshot"] = snapshot
             # No disk save — progress is in-memory only.
-            return self._public_profile(profile, include_credentials=True)
 
     def get_sync_runs(self, profile_id: str, page: int = 1, page_size: int = 25) -> dict:
         with self._lock:

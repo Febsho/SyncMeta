@@ -116,6 +116,26 @@ wedge a profile as permanently running; there is a test pinning that.
 
 **PMDB Watchlist managed-keys filter:** `_remove_stale` in `sync_service.py` accepts `managed_keys: frozenset[str] | None`. If `managed_keys` is truthy (non-empty), only items whose key is in `managed_keys` are eligible for removal — this preserves manually-added PMDB entries. An empty frozenset (bootstrap/first-sync) is falsy and falls back to full-removal behavior. Keys are persisted in `activity_state.pmdb_watchlist_managed_keys` by `_merge_activity_results` in `profile_store.py` after each sync.
 
+**Managed keys never ride the status poll.** `_public_profile` returns
+`activity_state` through `_public_activity_state`, which ships the four cursors
+and deliberately drops `pmdb_watchlist_managed_keys` and `pair_managed_keys`.
+Those are server-side ownership bookkeeping — every reader
+(`_config_from_profile`, both `CrossSyncService` call sites) works off the
+*private* profile and no client has ever read them — but they grow with one key
+per item per pair per category, history down to episode granularity, so a real
+profile carried ~200KB into every response. `/status` polls every 2s during a
+sync and the whole dict was deep-copied under the store lock each time. The
+cursors stay because the clear-cursors endpoint reports them back to confirm the
+reset. There is a regression test asserting the keys are absent from `/status`
+and still present on the private profile.
+
+For the same reason `_public_profile` does **not** copy `unresolved_items`: it is
+only counted and aggregated there, never returned (the UI fetches it from
+`/unresolved`), and it is unbounded. And `update_sync_status` /
+`update_sync_progress` return `None` — they fire many times per run from the
+pipeline's callbacks and every caller discards the result, so building a public
+profile in them was work no one read.
+
 **Two-way is one pass, never two one-way runs.** `SyncPair.mode` is `one_way`
 (default) or `two_way`. Running two one-way passes back to back would let the
 *order* decide the outcome: whichever direction goes first re-adds an item the

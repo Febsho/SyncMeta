@@ -245,7 +245,7 @@ class ProfileStoreTests(unittest.TestCase):
         created = self.store.create_profile("secret", self.credentials, self.options)
         self.store.claim_profile_for_sync(created["profile_id"], "secret")
 
-        updated = self.store.update_sync_progress(created["profile_id"], [{
+        self.store.update_sync_progress(created["profile_id"], [{
             "list_name": "Watching - Series",
             "display_name": "Watching - Series",
             "source_name": "SIMKL",
@@ -258,6 +258,9 @@ class ProfileStoreTests(unittest.TestCase):
             "error_count": 0,
         }])
 
+        # update_sync_progress is fire-and-forget; the live results are read
+        # back off the profile, which is what /status does.
+        updated = self.store.get_profile_by_id(created["profile_id"], include_credentials=False)
         self.assertEqual(len(updated["sync_live_results"]), 1)
         self.assertEqual(updated["sync_live_results"][0]["items_fetched"], 20)
 
