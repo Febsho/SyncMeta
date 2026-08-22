@@ -810,6 +810,12 @@ class AniListAdapter(ProviderAdapter):
     # AniList tracks progress per series, not individual episode plays, so there
     # is no honest mapping for watch history. Advertising one would silently
     # write wrong data, so history is left unsupported at both ends.
+    #
+    # The main pipeline *can* import AniList progress as watched episodes (see
+    # _sync_anilist_watched_history), but that path is opt-in, writes presence
+    # only, and labels its rows derived. A pair is different: it would copy
+    # those approximate dates onward to another service as if they were real
+    # plays. Do not add history here on the strength of that path existing.
     writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = False

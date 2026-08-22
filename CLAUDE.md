@@ -304,9 +304,43 @@ count without a bar. Drawing a coverage bar against a guessed episode count is
 worse than drawing none, since the whole point of the view is to show which
 episodes of a multi-season show are *missing*.
 
-**AniList has no watch-history mapping.** It tracks progress per series, not
-individual episode plays, so `AniListAdapter` advertises no history support at
-either end. Do not add one — it would silently write wrong data.
+**SIMKL reconciliation is the window, not the endpoint.** SIMKL needs no second
+endpoint — `/sync/all-items` already reports per-episode watched state. What its
+cursor costs is the *window*: `date_from` hides everything older, so an episode
+missed on an earlier run is never offered again. `simkl_reconcile_watched_history`
+therefore drops the filter and reads the whole state, letting the existing
+per-key dedupe skip what PMDB already holds; it also re-enables the
+completed-anime fallback fetch, which is otherwise skipped on cursor runs and is
+exactly the context a reconciling run needs. `items_reconciled` counts adds
+older than the cursor and is clamped to `items_added`, since the writer reports
+successes in aggregate — it is a bound, not a separately verified count.
+
+**A cursor_exempt row never advances a history cursor.** `_latest_history_cursor`
+skips them. These rows carry a *state* timestamp — a series-level
+`last_watched_at`, or one synthesized from an aggregate count — not the moment
+of a play, so letting one set the cursor would skip every real play recorded
+between the old cursor and that date. SIMKL's synthesized rows and every Trakt
+and AniList watched-state row carry the flag.
+
+**AniList history is derived, and says so.** AniList records no watch history:
+no play log, no per-episode record, no per-episode timestamp. `progress: 12` is
+all that exists. `AniListClient.get_watched_history()` turns that into episodes
+1-12 of the entry, stamped with the entry's own `completedAt` (falling back to
+`updatedAt`), and `_sync_anilist_watched_history` places them via the same
+anime remapper SIMKL's aggregate counts use. This is opt-in as the `anilist`
+choice in `activity_history_source`, and the UI states the trade-off.
+
+Rules it must keep: rows are `cursor_exempt` **and** `anilist_derived`, and the
+pass writes **presence only** — an episode PMDB already has is never written
+again, so a rewatch is not representable and a second run writes nothing (there
+is a regression test). An entry with no `completedAt` *and* no `updatedAt` is
+**skipped, not written**: stamping today's date onto a years-old watch is worse
+than omitting it. Progress is clamped to the entry's own episode count (AniList
+disagreeing with itself) and to `_MAX_DERIVED_EPISODES`. PLANNING is excluded.
+Prefer Trakt or SIMKL for anything they track — those are reported plays; this
+is an approximation, and the pair adapter (`AniListAdapter`) still advertises no
+history support at either end, because a *pair* would propagate the derived
+dates onward to another service as if they were real.
 
 **Pair sources are the service's own lists, not generic categories.** Each
 adapter's `list_sources()` returns what that service calls its lists (SIMKL

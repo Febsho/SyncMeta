@@ -43,6 +43,10 @@ OAUTH_AUTHORIZE_URL = "https://anilist.co/api/v2/oauth/authorize"
 OAUTH_PIN_REDIRECT_URI = "https://anilist.co/api/v2/oauth/pin"
 REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_ANILIST_READ_TIMEOUT", 20))
 _CANCEL_POLL_INTERVAL = 0.25
+# Safety cap on episodes derived from one AniList progress count. A long-runner
+# legitimately passes 1000 (One Piece), but a number far past that is bad data,
+# and each derived episode becomes its own PublicMetaDB write.
+_MAX_DERIVED_EPISODES = 2000
 
 # AniList statuses we care about
 ANILIST_STATUS_WATCHING = "CURRENT"
@@ -65,6 +69,13 @@ query ($userName: String, $status: MediaListStatus) {
     lists {
       entries {
         id
+        progress
+        completedAt {
+          year
+          month
+          day
+        }
+        updatedAt
         media {
           id
           idMal
@@ -354,6 +365,44 @@ def _reset_persistent_root_cache_state() -> None:
 atexit.register(_save_persistent_root_cache, True)
 
 
+def _safe_progress(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _entry_watched_at(entry: dict) -> str:
+    """Best available date for an AniList entry, as an ISO-8601 UTC stamp.
+
+    AniList records no per-episode timestamps at all — `completedAt` is the day
+    the user marked the whole entry finished, and `updatedAt` is the last time
+    they touched it. Every episode derived from one entry therefore shares this
+    single date; it is the entry's date, not a play time, and callers must mark
+    the rows cursor_exempt so it can never be mistaken for one.
+    """
+    completed = entry.get("completedAt") if isinstance(entry, dict) else None
+    if isinstance(completed, dict):
+        try:
+            year = int(completed.get("year") or 0)
+            month = int(completed.get("month") or 0)
+            day = int(completed.get("day") or 0)
+        except (TypeError, ValueError):
+            year = month = day = 0
+        if year > 0:
+            # A partial AniList date (year only, or year+month) is real data;
+            # clamp the missing parts rather than dropping the whole date.
+            return "%04d-%02d-%02dT00:00:00Z" % (year, max(1, month), max(1, day))
+    updated = entry.get("updatedAt") if isinstance(entry, dict) else None
+    try:
+        updated = int(updated or 0)
+    except (TypeError, ValueError):
+        updated = 0
+    if updated > 0:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(updated))
+    return ""
+
+
 class AniListClient:
     """Client for the AniList GraphQL API (public, no auth required for public lists)."""
 
@@ -472,6 +521,113 @@ class AniListClient:
         """
         return self.get_statuses([status]).get(status, [])
 
+    # Statuses that imply the user actually watched something. PLANNING is
+    # excluded: a plan-to-watch entry has no progress to derive from, and one
+    # that somehow carries progress is a list the user re-shelved, not history.
+    HISTORY_STATUSES = (
+        ANILIST_STATUS_COMPLETED,
+        ANILIST_STATUS_WATCHING,
+        ANILIST_STATUS_PAUSED,
+        ANILIST_STATUS_DROPPED,
+    )
+
+    def get_watched_history(self) -> list[dict]:
+        """Derive episode rows from AniList progress counts.
+
+        AniList stores no watch history: there is no play log, no per-episode
+        record, and no per-episode timestamp. All it knows is `progress` — how
+        many episodes of a cour the user has watched — plus the date the entry
+        itself was completed or last touched.
+
+        So these rows are *derived*, not reported. `progress: 12` becomes
+        episodes 1-12 of that entry, every one stamped with the entry's single
+        date, and the anime remapper places them onto the root series using the
+        same offset machinery SIMKL's aggregate counts already use. They are
+        marked `cursor_exempt` and `anilist_derived` so no caller can mistake
+        them for plays: they say "this episode has been watched", nothing more,
+        and rewatches are not representable at all.
+        """
+        rows: list[dict] = []
+        undated = 0
+        for status in self.HISTORY_STATUSES:
+            self._check_cancelled()
+            try:
+                items = self.get_status(status)
+            except Exception as exc:
+                logger.warning("AniList history: could not fetch status '%s': %s", status, exc)
+                continue
+            for item in items:
+                derived, skipped_undated = self._derive_history_rows(item, status)
+                undated += skipped_undated
+                rows.extend(derived)
+        if undated:
+            logger.info(
+                "AniList history: skipped %d entr%s with no completion or update date — "
+                "writing them would have stamped today's date on an old watch",
+                undated, "y" if undated == 1 else "ies",
+            )
+        logger.info("AniList history: derived %d episode row(s) from progress counts", len(rows))
+        return rows
+
+    def _derive_history_rows(self, item: dict, status: str) -> tuple[list[dict], int]:
+        progress = _safe_progress(item.get("anilist_progress"))
+        watched_at = str(item.get("anilist_watched_at") or "").strip()
+        media_type = str(item.get("media_type") or "").strip().lower()
+
+        if media_type == "movie":
+            # A film has no episode count to walk; completion is the signal.
+            if progress <= 0 and status != ANILIST_STATUS_COMPLETED:
+                return [], 0
+            if not watched_at:
+                return [], 1
+            return [self._history_row(item, watched_at, season=None, episode=None)], 0
+
+        if progress <= 0:
+            return [], 0
+        if not watched_at:
+            return [], 1
+
+        # A progress number above the entry's own episode count is AniList data
+        # that disagrees with itself; trust the smaller of the two rather than
+        # claiming episodes the season does not have.
+        try:
+            total_episodes = int(item.get("anilist_episode_count") or 0)
+        except (TypeError, ValueError):
+            total_episodes = 0
+        if total_episodes > 0:
+            progress = min(progress, total_episodes)
+        if progress > _MAX_DERIVED_EPISODES:
+            logger.info(
+                "AniList history: '%s' reports %d episodes of progress — above the safety cap, skipping",
+                item.get("title", "Unknown"), progress,
+            )
+            return [], 0
+
+        return [
+            self._history_row(item, watched_at, season=1, episode=number)
+            for number in range(1, progress + 1)
+        ], 0
+
+    @staticmethod
+    def _history_row(item: dict, watched_at: str, season: int | None, episode: int | None) -> dict:
+        identity = item.get("anime_identity") or {}
+        row = {
+            **item,
+            "watched_at": watched_at,
+            # Derived from a count, never observed as a play. Both flags matter:
+            # cursor_exempt keeps this date out of any history cursor, and
+            # anilist_derived lets the pipeline treat the row as presence only.
+            "cursor_exempt": True,
+            "anilist_derived": True,
+            "root_episode_offset": int(identity.get("root_episode_offset") or 0),
+            "anime_resolve_mode": "history_identity",
+        }
+        if season is not None:
+            row["season"] = season
+        if episode is not None:
+            row["episode"] = episode
+        return row
+
     def get_statuses(self, statuses: list[str]) -> dict[str, list[dict]]:
         """Fetch multiple AniList statuses while reusing base-status responses.
 
@@ -576,6 +732,11 @@ class AniListClient:
                     # entry, not by media, so removal is impossible without it.
                     if entry.get("id"):
                         normalized["anilist_entry_id"] = entry["id"]
+                    # AniList tracks progress per entry, not per episode, so
+                    # these two are all the watch data that exists here.
+                    normalized["anilist_progress"] = _safe_progress(entry.get("progress"))
+                    normalized["anilist_episode_count"] = _safe_progress(media.get("episodes"))
+                    normalized["anilist_watched_at"] = _entry_watched_at(entry)
                     items.append(normalized)
 
         self._status_cache[status] = list(items)

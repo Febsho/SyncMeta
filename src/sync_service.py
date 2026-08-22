@@ -669,6 +669,10 @@ class SyncService:
                 # Trakt history uses its own cursor; skip flag still applies to
                 # resume progress (no cursor there).
                 activity_rows.extend(self._sync_trakt_activity(trakt_unchanged=trakt_unchanged))
+            if self._config.sync.anilist_sync_watched_history and self._config.anilist.enabled:
+                # AniList has no activities timestamp to skip on, and no cursor
+                # — it is a full derive-and-gap-fill every run by nature.
+                activity_rows.append(self._sync_anilist_watched_history())
             # Stamp freshness timestamps before merging so profile_store saves them.
             for row in activity_rows:
                 if not row.activities_ts:
@@ -905,6 +909,96 @@ class SyncService:
 
         return stats
 
+    def _sync_anilist_watched_history(self) -> SyncStats:
+        """Import AniList progress counts as watched episodes.
+
+        AniList is not a history provider: it records how far through a cour a
+        user is, not what they played or when. Every row here is *derived* from
+        that count and carries the entry's own date, so this pass writes
+        presence only — an episode is written when PublicMetaDB has no record of
+        it, and never a second time. Rewatches are not representable, and the
+        rows are cursor_exempt so their shared date can never act as a play
+        time. Enabling this is a deliberate trade: coverage of anime no play-log
+        service tracks, in exchange for one approximate date per entry.
+        """
+        stats = SyncStats(
+            list_name="",
+            display_name="AniList Watch History",
+            source_name="AniList",
+            row_key=self._make_row_key("anilist", "watch_history", "history", {"mode": "history"}),
+            row_type="history",
+        )
+        self._set_status("Deriving AniList watch history from progress")
+
+        _executor = ThreadPoolExecutor(max_workers=min(_ACTIVITY_SOURCE_WORKERS, 2))
+        # The shared root client already carries the profile's AniList config
+        # and the prequel-chain cache the remapper needs.
+        f_anilist = _executor.submit(self._anilist_root_client.get_watched_history)
+        f_pmdb = _executor.submit(self._pmdb.get_watched_history)
+        _executor.shutdown(wait=False)
+
+        try:
+            rows = f_anilist.result()
+        except Exception as exc:
+            self._record_error(stats, "fetch", f"Failed to read AniList progress: {exc}")
+            return stats
+
+        stats.items_fetched = len(rows)
+        if not rows:
+            return stats
+
+        try:
+            existing_items = f_pmdb.result()
+        except Exception as exc:
+            self._record_error(stats, "pmdb_read", f"Failed to load PublicMetaDB watched history: {exc}")
+            return stats
+
+        existing_counts: dict[str, int] = {}
+        for existing_item in existing_items:
+            key = self._watched_identity_key(existing_item)
+            if key:
+                existing_counts[key] = existing_counts.get(key, 0) + 1
+
+        pending_items: list[dict] = []
+        queued_keys: set[str] = set()
+        total = len(rows)
+        for index, row in enumerate(rows):
+            self._check_cancelled()
+            if index % 50 == 0:
+                self._set_status(f"Resolving AniList history ({index}/{total})")
+            item = self._remap_simkl_anime_history_item(self._resolve_activity_item(row))
+            key = self._watched_identity_key(item)
+            if not key:
+                stats.items_skipped_unresolved += 1
+                continue
+            stats.items_resolved += 1
+            # Presence only: a key PMDB already holds, or one this pass already
+            # queued (the remapper can fold two cours onto one root episode),
+            # is a duplicate rather than a second play.
+            if int(existing_counts.get(key, 0) or 0) > 0 or key in queued_keys:
+                stats.items_skipped_duplicate += 1
+                continue
+            queued_keys.add(key)
+            if self._config.sync.dry_run:
+                existing_counts[key] = 1
+                stats.items_added += 1
+                continue
+            pending_items.append(item)
+
+        added_before = stats.items_added
+        self._write_watched_history_items(
+            pending_items,
+            existing_counts,
+            stats,
+            status_message="Writing AniList progress to PublicMetaDB",
+            total_source=total,
+        )
+        # Everything AniList contributes is derived backfill, never new activity.
+        stats.items_reconciled = stats.items_added if self._config.sync.dry_run else max(
+            0, stats.items_added - added_before
+        )
+        return stats
+
     def _sync_trakt_activity(self, trakt_unchanged: bool = False) -> list[SyncStats]:
         stats: list[SyncStats] = []
 
@@ -938,7 +1032,14 @@ class SyncService:
         self._set_status("Fetching SIMKL watched history")
         full_sync = self._config.sync.full_history_sync
         cursor = str(self._config.sync.simkl_history_cursor or "").strip()
-        since = None if full_sync or not cursor else cursor
+        # SIMKL has no second endpoint to reconcile against — /sync/all-items
+        # already reports per-episode watched state. What the cursor costs here
+        # is the *window*: date_from hides everything older, so an episode
+        # missed on an earlier run is never offered again. Reconciling therefore
+        # means dropping the filter and reading the whole state, letting the
+        # existing per-key dedupe skip everything PMDB already holds.
+        reconcile = bool(self._config.sync.simkl_reconcile_watched_history or full_sync)
+        since = None if reconcile or not cursor else cursor
         # Overlap three independent fetches: SIMKL history, PMDB history, and
         # the SIMKL completed-anime list (used as episode-level fallback later).
         # The fallback scans a whole status list, so skip it for cursor-based
@@ -946,9 +1047,12 @@ class SyncService:
         with ThreadPoolExecutor(max_workers=min(_ACTIVITY_SOURCE_WORKERS, 3)) as pool:
             f_simkl = pool.submit(self._simkl.get_watched_history, since=since)
             f_pmdb = pool.submit(self._pmdb.get_watched_history)
+            # The completed-anime fallback scans a whole status list; it is
+            # skipped for incremental runs, but a reconciling run is exactly
+            # when the episode-level fallback context is needed.
             f_completed = (
                 pool.submit(self._fetch_simkl_completed_anime)
-                if full_sync or not cursor
+                if reconcile or not cursor
                 else pool.submit(lambda: [])
             )
             items = f_simkl.result()
@@ -979,6 +1083,9 @@ class SyncService:
         # Count how many times each key appears in source (multi-watch support).
         source_seen: dict[str, int] = {}
         pending_items: list[dict] = []
+        # Adds that predate the cursor: episodes the incremental window could
+        # never have offered, so they are gap-fills rather than new activity.
+        queued_backfills = 0
         total = len(items)
         for idx, item in enumerate(items):
             self._check_cancelled()
@@ -1008,6 +1115,8 @@ class SyncService:
             if existing_counts.get(key, 0) >= source_seen[key]:
                 stats.items_skipped_duplicate += 1
                 continue
+            if reconcile and cursor and str(item.get("watched_at") or "").strip() <= cursor:
+                queued_backfills += 1
             if self._config.sync.dry_run:
                 existing_counts[key] = existing_counts.get(key, 0) + 1
                 stats.items_added += 1
@@ -1027,6 +1136,15 @@ class SyncService:
         # episode in SIMKL).  Shows that already have episode records are
         # skipped to prevent PMDB double-counting.
         self._sync_completed_anime_seasons(stats, existing_counts, completed_anime, shows_with_episode_records)
+        # Clamped to what actually landed: the writer reports successes in
+        # aggregate, so this is "of the adds that succeeded, at most this many
+        # were older than the cursor" rather than a separately verified count.
+        stats.items_reconciled = min(queued_backfills, stats.items_added)
+        if stats.items_reconciled:
+            logger.info(
+                "SIMKL watched-state reconciliation: backfilled %d episode(s) older than the sync cursor",
+                stats.items_reconciled,
+            )
         return stats
 
     def _fetch_simkl_completed_anime(self) -> list[dict]:
@@ -3668,6 +3786,12 @@ class SyncService:
     def _latest_history_cursor(items: list[dict], existing_cursor: str = "") -> str:
         latest = str(existing_cursor).strip()
         for item in items or []:
+            # A cursor_exempt row carries a state timestamp (a series-level
+            # last_watched_at, or one synthesized from an aggregate count), not
+            # the moment of a play. Letting one move the cursor would skip every
+            # real play recorded between the old cursor and that timestamp.
+            if item.get("cursor_exempt"):
+                continue
             watched_at = str(item.get("watched_at", "") or "").strip()
             if watched_at and watched_at > latest:
                 latest = watched_at
@@ -3678,7 +3802,11 @@ class SyncService:
         if sync_modes is None:
             raw = {
                 "lists": True,
-                "history": bool((config.sync.simkl_sync_watched_history or config.sync.trakt_sync_watched_history)) if config else False,
+                "history": bool(
+                    config.sync.simkl_sync_watched_history
+                    or config.sync.trakt_sync_watched_history
+                    or config.sync.anilist_sync_watched_history
+                ) if config else False,
                 "resume": bool(config.sync.trakt_sync_resume_progress) if config else False,
             }
         else:

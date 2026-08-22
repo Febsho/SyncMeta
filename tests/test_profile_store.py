@@ -670,6 +670,23 @@ class ProfileStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded["options"]["activity_resume_source"], "off")
 
+    def test_simkl_watched_state_reconciliation_round_trips(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, {
+            **self.options,
+            "simkl_reconcile_watched_history": True,
+        })
+
+        loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+
+        self.assertTrue(loaded["options"]["simkl_reconcile_watched_history"])
+        # Defaults off — it is a whole-account read per history run.
+        self.assertFalse(
+            self.store.get_profile(
+                self.store.create_profile("secret2", self.credentials, self.options)["profile_id"],
+                "secret2", include_credentials=True,
+            )["options"]["simkl_reconcile_watched_history"]
+        )
+
     def test_trakt_watched_state_reconciliation_round_trips(self) -> None:
         """It was declared in SyncConfig but pinned to False everywhere, so the
         toggle had no way to reach the pipeline."""

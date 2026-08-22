@@ -174,6 +174,102 @@ class AniListClientTests(unittest.TestCase):
         self.assertEqual(len(results["COMPLETED_ONA"]), 1)
         self.assertEqual(results["COMPLETED_ONA"][0]["anilist_format"], "ONA")
 
+    def _progress_client(self, entries: list[dict]) -> AniListClient:
+        """A client whose list query returns `entries` for COMPLETED only."""
+        client = AniListClient(AniListConfig(username="tester"))
+
+        def fake_query(query, variables):
+            if str(variables.get("status")) != "COMPLETED":
+                return {"MediaListCollection": {"lists": []}}
+            return {"MediaListCollection": {"lists": [{"entries": entries}]}}
+
+        client._query = fake_query
+        return client
+
+    def test_progress_becomes_one_row_per_episode(self) -> None:
+        """AniList stores no plays — `progress: 3` is the only watch data there
+        is, so it is derived into three episode rows sharing the entry date."""
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 3,
+            "completedAt": {"year": 2025, "month": 7, "day": 14},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Some Anime"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+
+        rows = client.get_watched_history()
+
+        self.assertEqual([(row["season"], row["episode"]) for row in rows], [(1, 1), (1, 2), (1, 3)])
+        self.assertTrue(all(row["watched_at"] == "2025-07-14T00:00:00Z" for row in rows))
+        # Both flags must ride along: the shared date is not a play time.
+        self.assertTrue(all(row["cursor_exempt"] for row in rows))
+        self.assertTrue(all(row["anilist_derived"] for row in rows))
+
+    def test_progress_is_clamped_to_the_entrys_own_episode_count(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 99,
+            "updatedAt": 1767225600,
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Short Anime"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 4},
+        }])
+
+        rows = client.get_watched_history()
+
+        self.assertEqual(len(rows), 4)
+        # updatedAt is the fallback when the entry was never marked completed.
+        self.assertEqual(rows[0]["watched_at"], "2026-01-01T00:00:00Z")
+
+    def test_zero_progress_writes_nothing(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 0,
+            "completedAt": {"year": 2025, "month": 1, "day": 1},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Untouched"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+
+        self.assertEqual(client.get_watched_history(), [])
+
+    def test_an_entry_with_no_date_at_all_is_skipped(self) -> None:
+        """Writing it would stamp today onto a watch from years ago."""
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 2,
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Undated"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+
+        self.assertEqual(client.get_watched_history(), [])
+
+    def test_a_film_becomes_a_single_row_with_no_episode(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 1,
+            "completedAt": {"year": 2025, "month": 3, "day": 2},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Anime Film"},
+                      "seasonYear": 2024, "format": "MOVIE", "episodes": 1},
+        }])
+
+        rows = client.get_watched_history()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["media_type"], "movie")
+        self.assertNotIn("episode", rows[0])
+
+    def test_a_partial_anilist_date_is_kept_rather_than_dropped(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 1,
+            "completedAt": {"year": 2023, "month": None, "day": None},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Year Only"},
+                      "seasonYear": 2023, "format": "TV", "episodes": 12},
+        }])
+
+        rows = client.get_watched_history()
+
+        self.assertEqual(rows[0]["watched_at"], "2023-01-01T00:00:00Z")
+
     def test_query_returns_none_on_http_error(self) -> None:
         client = AniListClient(AniListConfig(username="tester"))
 

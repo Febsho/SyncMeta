@@ -40,7 +40,7 @@ PAIR_SYNC_JITTER_SECONDS = max(0, int(os.getenv("SYNCMETA_PAIR_SYNC_JITTER_SECON
 SIMKL_ALLOWED_STATUSES = {"watching", "plantowatch", "completed", "hold", "dropped"}
 ANILIST_ALLOWED_STATUSES = {"CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED", "COMPLETED_ONA", "COMPLETED_OVA", "COMPLETED_MOVIE"}
 ALLOWED_VISIBILITIES = {"private", "public"}
-ALLOWED_ACTIVITY_SOURCES = {"off", "simkl", "trakt"}
+ALLOWED_ACTIVITY_SOURCES = {"off", "simkl", "trakt", "anilist"}
 CONNECTION_HEALTH_PROVIDERS = {"pmdb", "tmdb", "simkl", "trakt", "anilist", "mdblist"}
 DEFAULT_KEY_FILE_NAME = "profiles.key"
 
@@ -303,7 +303,10 @@ def _configured_sources_for_profile(profile: dict) -> list[str]:
     ):
         sources.append("simkl")
 
-    if credentials["anilist"]["username"] and credentials["anilist"]["selected_statuses"]:
+    if credentials["anilist"]["username"] and (
+        credentials["anilist"]["selected_statuses"]
+        or options["activity_history_source"] == "anilist"
+    ):
         sources.append("anilist")
 
     if (
@@ -883,9 +886,13 @@ def normalize_profile_options(options: dict | None) -> dict:
         "auto_resume_sync": bool(raw.get("auto_resume_sync", False)),
         "simkl_sync_watched_history": history_source == "simkl",
         "simkl_history_anime_only": bool(raw.get("simkl_history_anime_only", False)),
+        # Re-read SIMKL's full watched state instead of only the date_from
+        # window the cursor opens. Off by default: it is a whole-account read.
+        "simkl_reconcile_watched_history": bool(raw.get("simkl_reconcile_watched_history", False)),
         "simkl_sync_resume_progress": resume_source == "simkl",
         "simkl_resume_use_next_up_fallback": bool(raw.get("simkl_resume_use_next_up_fallback", False)),
         "trakt_sync_watched_history": history_source == "trakt",
+        "anilist_sync_watched_history": history_source == "anilist",
         "trakt_watched_history_interval_seconds": watched_history_interval_seconds,
         "trakt_sync_full_watch_counts": False,
         # Reconcile against Trakt's full /sync/watched state, not just the

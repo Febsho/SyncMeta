@@ -104,6 +104,8 @@ class SyncConfig:
     media_types: list[str] = field(default_factory=lambda: ["shows", "movies", "anime"])
     simkl_sync_watched_history: bool = False
     simkl_history_anime_only: bool = False
+    simkl_reconcile_watched_history: bool = False
+    anilist_sync_watched_history: bool = False
     simkl_sync_resume_progress: bool = False
     simkl_resume_use_next_up_fallback: bool = False
     trakt_sync_watched_history: bool = False

@@ -2396,6 +2396,235 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(watched_stats.items_reconciled, 0)
         self.assertTrue(any("reconciliation failed" in error for error in watched_stats.errors))
 
+    @staticmethod
+    def _anilist_history_config() -> AppConfig:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="",
+                access_token="",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["anime"],
+                anilist_sync_watched_history=True,
+            ),
+        )
+        # No list selections: this exercises the history pass alone, so the
+        # list sync must not also reach for AniList.
+        config.anilist = AniListConfig(username="tester", enabled=True, selected_statuses=[])
+        return config
+
+    class _StubAniListHistoryClient:
+        def __init__(self, rows: list[dict] | None = None) -> None:
+            self.calls = 0
+            self._rows = rows if rows is not None else [
+                {"tmdb_id": "910", "media_type": "tv", "simkl_type": "anime", "season": 1,
+                 "episode": number, "watched_at": "2025-05-05T00:00:00Z", "title": "Derived Anime",
+                 "cursor_exempt": True, "anilist_derived": True, "root_episode_offset": 0}
+                for number in (1, 2)
+            ]
+
+        def get_watched_history(self) -> list[dict]:
+            self.calls += 1
+            return [dict(row) for row in self._rows]
+
+    def test_anilist_progress_is_written_as_watched_episodes(self) -> None:
+        service = SyncService(self._anilist_history_config())
+        anilist = self._StubAniListHistoryClient()
+        service._anilist_root_client = anilist
+        service._matcher = StubActivityMatcher()
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(anilist.calls, 1)
+        self.assertEqual(sorted((row["season"], row["episode"]) for row in pmdb.watched), [(1, 1), (1, 2)])
+        # Every AniList row is derived backfill, never new activity.
+        self.assertEqual(watched_stats.items_reconciled, 2)
+
+    def test_anilist_progress_writes_nothing_on_a_second_run(self) -> None:
+        """Presence only — progress counts cannot express a rewatch, so a
+        second run must not re-add every episode."""
+        config = self._anilist_history_config()
+        pmdb = StubPMDBClient()
+
+        for _ in range(2):
+            service = SyncService(config)
+            service._anilist_root_client = self._StubAniListHistoryClient()
+            service._matcher = StubActivityMatcher()
+            service._pmdb = pmdb
+            results = service.run()
+
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+        self.assertEqual(len(pmdb.watched), 2)
+        self.assertEqual(watched_stats.items_added, 0)
+
+    def test_anilist_history_never_sets_a_history_cursor(self) -> None:
+        """The rows share one entry-level date; persisting it as a cursor would
+        make it look like a play time."""
+        service = SyncService(self._anilist_history_config())
+        service._anilist_root_client = self._StubAniListHistoryClient()
+        service._matcher = StubActivityMatcher()
+        service._pmdb = StubPMDBClient()
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(watched_stats.history_cursor, "")
+
+    def test_anilist_history_is_not_read_when_the_source_is_another_service(self) -> None:
+        config = self._anilist_history_config()
+        config.sync.anilist_sync_watched_history = False
+        service = SyncService(config)
+        anilist = self._StubAniListHistoryClient()
+        service._anilist_root_client = anilist
+        service._matcher = StubActivityMatcher()
+        service._pmdb = StubPMDBClient()
+
+        service.run()
+
+        self.assertEqual(anilist.calls, 0)
+
+    def test_a_failed_anilist_read_is_recorded_not_raised(self) -> None:
+        class BrokenAniList:
+            def get_watched_history(self):
+                raise RuntimeError("AniList is down")
+
+        service = SyncService(self._anilist_history_config())
+        service._anilist_root_client = BrokenAniList()
+        service._matcher = StubActivityMatcher()
+        service._pmdb = StubPMDBClient()
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertTrue(any("AniList" in error for error in watched_stats.errors))
+
+    def test_simkl_reconciliation_drops_the_date_from_window(self) -> None:
+        """SIMKL has no second endpoint — what the cursor costs is the window.
+        Reconciling reads the whole watched state so an episode missed on an
+        earlier run is offered again."""
+        class CursorRecordingSimkl(StubSimklClient):
+            pass
+
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["shows", "movies"],
+                simkl_sync_watched_history=True,
+                simkl_history_cursor="2026-03-01T00:00:00Z",
+                simkl_reconcile_watched_history=True,
+            ),
+        )
+        service = SyncService(config)
+        simkl = CursorRecordingSimkl()
+        service._simkl = simkl
+        service._matcher = StubActivityMatcher()
+        service._pmdb = StubPMDBClient()
+
+        service.run()
+
+        self.assertIsNone(simkl.last_history_since)
+
+    def test_simkl_without_reconciliation_still_uses_the_cursor(self) -> None:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["shows", "movies"],
+                simkl_sync_watched_history=True,
+                simkl_history_cursor="2026-03-01T00:00:00Z",
+            ),
+        )
+        service = SyncService(config)
+        simkl = StubSimklClient()
+        service._simkl = simkl
+        service._matcher = StubActivityMatcher()
+        service._pmdb = StubPMDBClient()
+
+        service.run()
+
+        self.assertEqual(simkl.last_history_since, "2026-03-01T00:00:00Z")
+
+    def test_simkl_reconciliation_counts_pre_cursor_adds_as_backfill(self) -> None:
+        class OldHistorySimkl(StubSimklClient):
+            def get_watched_history(self, since: str | None = None) -> list[dict]:
+                self.last_history_since = since
+                return [
+                    # Older than the cursor: only a reconciling read sees it.
+                    {"tmdb_id": 801, "media_type": "tv", "simkl_type": "shows", "season": 1,
+                     "episode": 1, "watched_at": "2020-01-01T00:00:00Z", "title": "Old Episode"},
+                    # Newer than the cursor: ordinary incremental activity.
+                    {"tmdb_id": 801, "media_type": "tv", "simkl_type": "shows", "season": 5,
+                     "episode": 9, "watched_at": "2026-06-01T00:00:00Z", "title": "New Episode"},
+                ]
+
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["shows", "movies"],
+                simkl_sync_watched_history=True,
+                simkl_history_cursor="2026-03-01T00:00:00Z",
+                simkl_reconcile_watched_history=True,
+            ),
+        )
+        service = SyncService(config)
+        service._simkl = OldHistorySimkl()
+        service._matcher = StubActivityMatcher()
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(watched_stats.items_added, 2)
+        self.assertEqual(watched_stats.items_reconciled, 1)
+        # The cursor still tracks the newest real play, not the oldest row read.
+        self.assertEqual(watched_stats.history_cursor, "2026-06-01T00:00:00Z")
+
+    def test_a_cursor_exempt_row_never_advances_the_history_cursor(self) -> None:
+        """Synthesized rows carry a series-level timestamp, not a play time.
+        Letting one move the cursor skips every real play in between."""
+        self.assertEqual(
+            SyncService._latest_history_cursor(
+                [
+                    {"watched_at": "2099-01-01T00:00:00Z", "cursor_exempt": True},
+                    {"watched_at": "2026-02-02T00:00:00Z"},
+                ],
+                "2026-01-01T00:00:00Z",
+            ),
+            "2026-02-02T00:00:00Z",
+        )
+
     def test_simkl_anime_history_does_not_backfill_pmdb_external_ids(self) -> None:
         class DirectAnimeSimklClient(StubSimklClient):
             def get_watched_history(self, since: str | None = None) -> list[dict]:

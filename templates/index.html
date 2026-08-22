@@ -1157,8 +1157,10 @@
                         <option value="off">Off</option>
                         <option value="simkl">SIMKL</option>
                         <option value="trakt">Trakt</option>
+                        <option value="anilist">AniList (derived)</option>
                       </select>
                     </div>
+                    <div class="hint hidden" id="opt-anilist-history-hint">AniList records no watch history — no plays, no per-episode dates. SyncMeta derives episodes from each entry's progress count ("watched 12 of 24") and stamps them all with that entry's completion date, then places them on the right season using the same mapping SIMKL's episode counts use. It writes only episodes PublicMetaDB is missing and can never represent a rewatch. Pick Trakt or SIMKL instead if either tracks the same anime.</div>
                     <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
                     <div class="form-row" style="margin-top:12px">
                       <label for="opt-history-interval-seconds">Auto-Sync Every (Seconds)</label>
@@ -1166,6 +1168,11 @@
                       <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
                     </div>
                     <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
+                    <div class="toggle-row hidden" id="opt-simkl-reconcile-history-row" style="margin-bottom:0">
+                      <label for="opt-simkl-reconcile-history" class="toggle"><input type="checkbox" id="opt-simkl-reconcile-history"><span class="slider"></span></label>
+                      <label for="opt-simkl-reconcile-history">Re-read SIMKL's full watched state, not just what changed</label>
+                    </div>
+                    <div class="hint hidden" id="opt-simkl-reconcile-history-hint">A normal sync only asks SIMKL for history since the last run, so an episode missed by an interrupted run — or watched before you connected — is never offered again. This reads your whole watched state each time and writes only what PublicMetaDB is missing, which is what fills in the earlier seasons of a long-running show. Costs one extra full read per history sync.</div>
                     <div class="toggle-row hidden" id="opt-trakt-reconcile-history-row" style="margin-bottom:0">
                       <label for="opt-trakt-reconcile-history" class="toggle"><input type="checkbox" id="opt-trakt-reconcile-history"><span class="slider"></span></label>
                       <label for="opt-trakt-reconcile-history">Backfill missing episodes from Trakt's full watched state</label>
@@ -2326,6 +2333,7 @@
         activity_history_source: el('opt-activity-history-source').value,
         auto_history_sync: el('opt-auto-history-sync').checked,
         simkl_history_anime_only: el('opt-simkl-history-anime-only').checked,
+        simkl_reconcile_watched_history: el('opt-simkl-reconcile-history').checked,
         trakt_reconcile_watched_history: el('opt-trakt-reconcile-history').checked,
         activity_resume_source: el('opt-activity-resume-source').value,
         auto_resume_sync: el('opt-auto-resume-sync').checked,
@@ -2471,6 +2479,7 @@
       el('opt-auto-history-sync').checked = !!options.auto_history_sync;
       el('opt-history-interval-seconds').value = Math.max(86400, options.trakt_watched_history_interval_seconds || 86400);
       el('opt-simkl-history-anime-only').checked = !!options.simkl_history_anime_only;
+      el('opt-simkl-reconcile-history').checked = !!options.simkl_reconcile_watched_history;
       el('opt-trakt-reconcile-history').checked = !!options.trakt_reconcile_watched_history;
       el('opt-activity-resume-source').value = options.activity_resume_source || (options.trakt_sync_resume_progress ? 'trakt' : 'off');
       el('opt-auto-resume-sync').checked = !!options.auto_resume_sync;
@@ -2730,8 +2739,16 @@
       const showReconcile = historySource === 'trakt';
       const historyEnabled = historySource !== 'off';
       const resumeEnabled = resumeSource !== 'off';
+      const anilistHint = el('opt-anilist-history-hint');
+      anilistHint.classList.toggle('hidden', historySource !== 'anilist');
+      const simklReconcileRow = el('opt-simkl-reconcile-history-row');
+      const simklReconcileHint = el('opt-simkl-reconcile-history-hint');
+      const simklReconcileInput = el('opt-simkl-reconcile-history');
       animeOnlyRow.classList.toggle('hidden', !showAnimeOnly);
       if (!showAnimeOnly) animeOnlyInput.checked = false;
+      simklReconcileRow.classList.toggle('hidden', !showAnimeOnly);
+      simklReconcileHint.classList.toggle('hidden', !showAnimeOnly);
+      if (!showAnimeOnly) simklReconcileInput.checked = false;
       // Trakt-only: SIMKL already reports per-episode watched state, so it has
       // no equivalent gap for a second read to fill.
       reconcileRow.classList.toggle('hidden', !showReconcile);
@@ -6534,7 +6551,7 @@
       const reconciled = Number((watchRow && watchRow.items_reconciled) || 0);
       const watchSubtitleLive = isHistorySync
         ? `<span class="status-inline"><span class="spinner"></span><span>${esc(liveStatus)}</span></span>`
-        : `${esc(watchSubtitle)}${reconciled ? ` · ${reconciled} backfilled from Trakt's watched state` : ''}`;
+        : `${esc(watchSubtitle)}${reconciled ? ` · ${reconciled} backfilled from full watched state` : ''}`;
       el('activity-cards').innerHTML = [
           buildActivityCard('Watch History', watchSubtitleLive, watchRow, watchEnabled, 'Imported Unique', 'Fetched', 'Already in PMDB', 'Errors', activityResults.watch_history && activityResults.watch_history.timestamp),
           buildActivityCard('Resume Progress', esc(resumeSubtitle), resumeRow, resumeEnabled, 'Saved', 'Fetched', 'Completed', 'Errors', activityResults.resume_progress && activityResults.resume_progress.timestamp),
@@ -7114,7 +7131,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, simkl_reconcile_watched_history: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Signed out. Your server-side profile still exists.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7202,7 +7219,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, simkl_reconcile_watched_history: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Profile deleted. Create or load another profile to continue.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7260,7 +7277,7 @@
       trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
       mdblist: { selected_lists: [] },
     });
-      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
+      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, simkl_reconcile_watched_history: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
     populateForm(draftCreds, draftOptions, {});
     const storedProfileId = localStorage.getItem(PROFILE_KEY);
     if (storedProfileId && !el('profile-id').value.trim()) {
