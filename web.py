@@ -904,6 +904,9 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             manual_list_additions=profile.get("manual_list_additions", {}),
             list_state=profile.get("list_state", {}),
             trakt_token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_trakt_tokens(profile_id, at, rt, exp),
+            mdblist_token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_mdblist_auth(
+                profile_id, access_token=at, refresh_token=rt, access_token_expires_at=exp,
+            ),
             )
             results = service.run()
             run_id = str(profile.get("sync_job_id", "") or "")
@@ -1129,6 +1132,21 @@ def _purge_profile_runtime_data(profile_ids: list[str]) -> None:
             )
 
 
+def _mdblist_token_callback(profile_id: str):
+    """Persist a refreshed MDBList token, when we know whose profile it is.
+
+    MDBList access tokens last 30 days, so a long-lived connection depends on
+    the refreshed pair being written back — without this the client refreshes
+    in memory and the next process starts from the expired token again.
+    """
+    profile_id = str(profile_id or "").strip()
+    if not profile_id:
+        return None
+    return lambda at, rt, exp="": _profile_store.update_mdblist_auth(
+        profile_id, access_token=at, refresh_token=rt, access_token_expires_at=exp,
+    )
+
+
 def _build_provider_adapters(
     config: AppConfig, cancel_requested_callback=None, profile_id: str = "",
 ) -> dict:
@@ -1166,7 +1184,11 @@ def _build_provider_adapters(
         # with no explanation before any list had been picked — and an OAuth
         # connection is a working credential even with no API key pasted.
         adapters["mdblist"] = MdbListAdapter(
-            MdbListClient(config.mdblist),
+            MdbListClient(
+                config.mdblist,
+                cancel_requested_callback=cancel_requested_callback,
+                token_refreshed_callback=_mdblist_token_callback(profile_id),
+            ),
             selected_lists=list(config.mdblist.selected_lists or []),
         )
     if config.pmdb.api_key:
@@ -2448,14 +2470,24 @@ def api_mdblist_lists():
     private_profile = _current_private_profile()
     api_key = str(body.get("api_key", "")).strip()
     query = str(body.get("query", "")).strip()
-    if not api_key and private_profile:
-        api_key = private_profile["credentials"]["mdblist"]["api_key"]
+    # An OAuth connection is a complete credential — a profile that connected
+    # that way has no api key at all, and demanding one here left the list
+    # picker dead for exactly the users who finished the OAuth flow.
+    access_token = ""
+    if private_profile:
+        stored = private_profile["credentials"]["mdblist"]
+        api_key = api_key or stored.get("api_key", "")
+        access_token = str(stored.get("access_token", "") or "").strip()
 
-    if not api_key:
-        return _json_error("MDBList API key is required", 400)
+    if not api_key and not access_token:
+        return _json_error(
+            "Connect MDBList or paste an API key first", 400,
+            provider="MDBList",
+            hint="Either paste an API key from mdblist.com settings, or press Connect MDBList to authorize.",
+        )
 
     try:
-        client = MdbListClient(MdbListConfig(api_key=api_key))
+        client = MdbListClient(MdbListConfig(api_key=api_key, access_token=access_token))
         items = client.search_public_lists(query) if query else client.get_user_lists()
     except Exception as exc:
         logger.exception("Failed to load MDBList lists")

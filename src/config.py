@@ -538,8 +538,8 @@ def validate_config(cfg: AppConfig, sources: list[str] | None = None) -> list[st
             errors.append("Enable at least one Trakt source: watchlist movies, watchlist shows, liked lists, selected lists, watched history, or resume progress")
 
     if check_mdblist and cfg.mdblist.enabled:
-        if not cfg.mdblist.api_key:
-            errors.append("MDBLIST_API_KEY is required when MDBList is enabled")
+        if not cfg.mdblist.api_key and not cfg.mdblist.access_token:
+            errors.append("An MDBList API key or OAuth connection is required when MDBList is enabled")
         if not cfg.mdblist.selected_lists:
             errors.append("Select at least one MDBList list to sync")
 

@@ -304,3 +304,143 @@ class MdbListSyncWriteTests(unittest.TestCase):
         client = MdbListClient(MdbListConfig(api_key="key"))
         with self.assertRaises(ValueError):
             client.change_list_items(10, [{"media_type": "movie", "tmdb_id": "1"}], "delete")
+
+
+class _Resp:
+    def __init__(self, status_code: int, payload=None) -> None:
+        self.status_code = status_code
+        self._payload = payload if payload is not None else []
+        self.headers = {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error", response=self)
+
+    def json(self):
+        return self._payload
+
+
+class MdbListTokenRefreshTests(unittest.TestCase):
+    """MDBList access tokens last 30 days.
+
+    Without refresh the connection dies silently a month after it was made and
+    the only cure is redoing the whole OAuth flow, which is what made a working
+    MDBList login look broken.
+    """
+
+    @staticmethod
+    def _oauth_config(**overrides) -> MdbListConfig:
+        values = {
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "access_token": "old-token",
+            "refresh_token": "old-refresh",
+        }
+        values.update(overrides)
+        return MdbListConfig(**values)
+
+    def test_a_401_refreshes_the_token_and_retries_once(self) -> None:
+        saved: list[tuple] = []
+        client = MdbListClient(
+            self._oauth_config(),
+            token_refreshed_callback=lambda at, rt, exp="": saved.append((at, rt, exp)),
+        )
+        client.refresh_access_token = lambda: {
+            "access_token": "new-token", "refresh_token": "new-refresh", "expires_in": 2592000,
+        }
+        responses = [_Resp(401), _Resp(200, [{"id": 1, "name": "L", "slug": "l"}])]
+        sent: list[dict] = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            sent.append(dict(headers or {}))
+            return responses.pop(0)
+
+        client._session.get = fake_get
+        result = client._get("/lists/user/")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(sent), 2)
+        # The retry must carry the new bearer, not the stale one.
+        self.assertEqual(sent[0]["Authorization"], "Bearer old-token")
+        self.assertEqual(sent[1]["Authorization"], "Bearer new-token")
+        # And the refreshed pair has to be persisted, or the next process
+        # starts from the expired token all over again.
+        self.assertEqual(saved[0][0], "new-token")
+        self.assertEqual(saved[0][1], "new-refresh")
+        self.assertTrue(saved[0][2])
+
+    def test_an_api_key_401_is_not_retried(self) -> None:
+        """No bearer means a bad key, and no refresh can fix that."""
+        client = MdbListClient(MdbListConfig(api_key="bad-key"))
+        calls = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls.append(url)
+            return _Resp(401)
+
+        client._session.get = fake_get
+        with self.assertRaises(requests.HTTPError):
+            client._get("/lists/user/")
+        self.assertEqual(len(calls), 1)
+
+    def test_refresh_is_attempted_once_per_client(self) -> None:
+        """The refresh token rotates, so a second concurrent exchange would be
+        replaying an already-spent token."""
+        client = MdbListClient(self._oauth_config())
+        refreshes = []
+        client.refresh_access_token = lambda: (
+            refreshes.append(1) or {"access_token": "new-token", "expires_in": 60}
+        )
+        client._session.get = lambda url, params=None, headers=None, timeout=None: _Resp(401)
+
+        for _ in range(3):
+            with self.assertRaises(requests.HTTPError):
+                client._get("/lists/user/")
+
+        self.assertEqual(len(refreshes), 1)
+
+    def test_a_token_expiring_soon_is_refreshed_before_the_request(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        client = MdbListClient(self._oauth_config(access_token_expires_at=soon))
+        refreshes = []
+        client.refresh_access_token = lambda: (
+            refreshes.append(1) or {"access_token": "new-token", "expires_in": 2592000}
+        )
+        sent: list[dict] = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            sent.append(dict(headers or {}))
+            return _Resp(200, [])
+
+        client._session.get = fake_get
+        client._get("/lists/user/")
+
+        self.assertEqual(len(refreshes), 1)
+        self.assertEqual(sent[0]["Authorization"], "Bearer new-token")
+
+    def test_no_refresh_token_means_no_refresh_attempt(self) -> None:
+        client = MdbListClient(self._oauth_config(refresh_token=""))
+        client.refresh_access_token = lambda: self.fail("must not refresh without a refresh token")
+        client._session.get = lambda url, params=None, headers=None, timeout=None: _Resp(401)
+
+        with self.assertRaises(requests.HTTPError):
+            client._get("/lists/user/")
+
+    def test_a_write_401_also_refreshes_and_retries(self) -> None:
+        """Safe for a write too: a 401 is rejected before any work, so the
+        retry cannot duplicate a record."""
+        client = MdbListClient(self._oauth_config())
+        client.refresh_access_token = lambda: {"access_token": "new-token", "expires_in": 60}
+        responses = [_Resp(401), _Resp(200, {"added": 1})]
+        sent: list[dict] = []
+
+        def fake_post(url, params=None, json=None, headers=None, timeout=None):
+            sent.append(dict(headers or {}))
+            return responses.pop(0)
+
+        client._session.post = fake_post
+        payload = client._post("/watchlist/items/add", {"movies": []})
+
+        self.assertEqual(payload, {"added": 1})
+        self.assertEqual(sent[1]["Authorization"], "Bearer new-token")

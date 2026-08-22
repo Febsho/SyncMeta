@@ -687,6 +687,38 @@ class ProfileStoreTests(unittest.TestCase):
             )["options"]["simkl_reconcile_watched_history"]
         )
 
+    def test_mdblist_oauth_only_profile_counts_as_a_configured_source(self) -> None:
+        """An OAuth connection is a complete MDBList credential. Requiring an
+        api key here left OAuth-only profiles out of the source list, and out
+        of the config validation that goes with it."""
+        from src.profile_store import _configured_sources_for_profile
+
+        profile = {
+            "credentials": {
+                "mdblist": {
+                    "client_id": "cid",
+                    "access_token": "mdb-token",
+                    "refresh_token": "mdb-refresh",
+                    "selected_lists": [{"id": 4, "name": "Picks", "mediatype": "movie"}],
+                },
+            },
+            "options": self.options,
+        }
+
+        self.assertIn("mdblist", _configured_sources_for_profile(profile))
+
+    def test_mdblist_without_any_credential_is_not_a_source(self) -> None:
+        from src.profile_store import _configured_sources_for_profile
+
+        profile = {
+            "credentials": {"mdblist": {
+                "selected_lists": [{"id": 4, "name": "Picks", "mediatype": "movie"}],
+            }},
+            "options": self.options,
+        }
+
+        self.assertNotIn("mdblist", _configured_sources_for_profile(profile))
+
     def test_trakt_watched_state_reconciliation_round_trips(self) -> None:
         """It was declared in SyncConfig but pinned to False everywhere, so the
         toggle had no way to reach the pipeline."""

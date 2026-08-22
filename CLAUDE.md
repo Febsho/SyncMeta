@@ -574,6 +574,31 @@ resume is a main-pipeline feature rather than a pair category. Adding either
 means threading a new category through `config.py`, `providers.py`,
 `cross_sync.py` and the pair editor; do not add half-wired client methods.
 
+**Either MDBList credential is complete on its own — ask, never assume the key.**
+The client prefers the bearer and never sends both, so a profile that finished
+the OAuth flow has *no* api key at all. Every "is MDBList set up?" check must
+accept either, and each one that did not is a way a working login looked broken:
+`_configured_sources_for_profile`, `validate_config`, `connection_health`'s
+`_configured` and its probe, `/api/mdblist/lists`, and the UI's connection dots
+and list-refresh gates (`mdblistHasCredential()`). Note the source list and the
+validator are coupled — teaching only the former to accept OAuth makes
+`validate_config` demand an api key and blocks the save.
+
+**MDBList tokens expire, so the refresh must be wired, not merely written.**
+`refresh_access_token` existed with no callers, so an OAuth connection died
+silently 30 days after it was made and the only cure was redoing the whole flow.
+It now follows Trakt's shape: refresh ahead of expiry
+(`TOKEN_REFRESH_SKEW_SECONDS`) and once more on a 401, retry the request, and
+hand the rotated pair to `token_refreshed_callback` so it is persisted — an
+in-memory refresh is lost on the next process. `_attempt_token_refresh` adopts
+the new credential itself rather than trusting `refresh_access_token` to have
+done it, because that is what the retry path reads. Three rules: only refresh
+when a bearer is actually in use (an api-key 401 is a bad key, and retrying is
+pointless), only once per client instance (the refresh token rotates, so a
+second concurrent exchange replays a spent token), and a 401 *is* safe to repeat
+even for a write — like a 429 it is rejected before any work, unlike the 5xx and
+timeout cases `retry_on_rate_limit` deliberately refuses.
+
 **MDBList auth is two modes.** An `apikey` query parameter (read, and what
 existing profiles have) or an OAuth `Authorization: Bearer` token; the client
 prefers the bearer and never sends both. OAuth is **authorization code + PKCE**

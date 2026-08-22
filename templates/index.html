@@ -2099,6 +2099,15 @@
       return !!el(inputId).value.trim() || hasSavedSecret(section, key);
     }
 
+    // MDBList has two auth modes and either one is complete on its own: an api
+    // key, or an OAuth token (the client prefers the bearer and never sends
+    // both). Every "is MDBList set up?" check has to ask this, or a profile
+    // that finished the OAuth flow reads as unconfigured everywhere.
+    function mdblistHasCredential() {
+      return hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved')
+        || hasSavedSecret('mdblist', 'access_token_saved');
+    }
+
     function setSecretInputState(inputId, section, key, defaultPlaceholder) {
       const input = el(inputId);
       input.value = '';
@@ -2549,15 +2558,14 @@
       setDot('dot-simkl', !!(creds.simkl.client_id && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved')));
       setDot('dot-anilist', !!creds.anilist.username);
       setDot('dot-trakt', !!(creds.trakt.client_id && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved')));
-      setDot('dot-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved')
-        || !!(secretState.mdblist && secretState.mdblist.access_token_saved));
+      setDot('dot-mdblist', mdblistHasCredential());
       setDot('dot-pmdb', hasSecretInputOrSaved('pmdb-api-key', 'pmdb', 'api_key_saved'));
       setDot('dot-tmdb', hasSecretInputOrSaved('tmdb-api-key', 'tmdb', 'api_key_saved'));
       // Mirror connection state onto the Sync view's pipeline cards.
       setDot('dot-pipe-simkl', !!(creds.simkl.client_id && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved')));
       setDot('dot-pipe-anilist', !!creds.anilist.username);
       setDot('dot-pipe-trakt', !!(creds.trakt.client_id && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved')));
-      setDot('dot-pipe-mdblist', hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved'));
+      setDot('dot-pipe-mdblist', mdblistHasCredential());
       updatePipelineSummaries();
       renderQuickSetupVisibility();
       if (!profileDraftDirty && Object.keys(connectionHealth).length) {
@@ -4947,8 +4955,8 @@
       el('mdblist-discover-search').classList.toggle('hidden', mdblistCatalogTab !== 'discover');
       el('btn-mdblist-refresh').classList.toggle('hidden', mdblistCatalogTab !== 'my-lists');
 
-      if (!hasSecretInputOrSaved('mdblist-api-key', 'mdblist', 'api_key_saved')) {
-        setMdbListStatus('Enter your MDBList API key, then refresh your lists.', false);
+      if (!mdblistHasCredential()) {
+        setMdbListStatus('Connect MDBList or enter an API key, then refresh your lists.', false);
       } else if (mdblistSelectedLists.length) {
         setMdbListStatus(`${mdblistSelectedLists.length} MDBList list${mdblistSelectedLists.length === 1 ? '' : 's'} selected.`, false);
       } else if (mdblistCatalogTab === 'discover') {
@@ -5014,8 +5022,8 @@
 
     async function refreshMdbListLists(silent) {
       const apiKey = el('mdblist-api-key').value.trim();
-      if (!apiKey && !hasSavedSecret('mdblist', 'api_key_saved')) {
-        if (!silent) showToast('Enter your MDBList API key first.', true, false);
+      if (!apiKey && !mdblistHasCredential()) {
+        if (!silent) showToast('Connect MDBList or enter an API key first.', true, false);
         renderMdbListLists();
         return;
       }
@@ -5039,8 +5047,8 @@
 
     async function searchMdbListLists() {
       const apiKey = el('mdblist-api-key').value.trim();
-      if (!apiKey && !hasSavedSecret('mdblist', 'api_key_saved')) {
-        showToast('Enter your MDBList API key first.', true, false);
+      if (!apiKey && !mdblistHasCredential()) {
+        showToast('Connect MDBList or enter an API key first.', true, false);
         return;
       }
       const query = el('mdblist-discover-query').value.trim();

@@ -544,6 +544,33 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(data["items"]), 1)
         self.assertEqual(data["items"][0]["id"], 7)
 
+    @patch("web.MdbListClient.get_user_lists")
+    def test_mdblist_lists_work_for_an_oauth_only_profile(self, mock_get_user_lists) -> None:
+        """The list picker demanded an api key, so the users who completed the
+        OAuth flow were exactly the ones who could not load their lists."""
+        mock_get_user_lists.return_value = [{"id": 7, "name": "Favorites", "mediatype": "movie"}]
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        web._profile_store.update_mdblist_auth(
+            profile["profile_id"], client_id="cid", client_secret="csecret",
+            access_token="mdb-token", refresh_token="mdb-refresh",
+        )
+
+        response = self.client.post("/api/mdblist/lists", json={})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["items"][0]["id"], 7)
+
+    def test_mdblist_lists_without_any_credential_is_rejected(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/mdblist/lists", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Connect MDBList", response.get_json()["error"])
+
     @patch("web.MdbListClient.search_public_lists")
     def test_mdblist_lists_search(self, mock_search_public_lists) -> None:
         mock_search_public_lists.return_value = [{

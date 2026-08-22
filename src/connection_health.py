@@ -49,6 +49,10 @@ def _configured(provider: str, credentials: dict) -> bool:
         return bool(row.get("client_id") and row.get("access_token"))
     if provider == "anilist":
         return bool(row.get("username"))
+    if provider == "mdblist":
+        # Either auth mode is enough: an OAuth token is a working credential,
+        # and a profile that connected that way has no api key at all.
+        return bool(row.get("api_key") or row.get("access_token"))
     return bool(row.get("api_key"))
 
 
@@ -143,8 +147,13 @@ def check_provider(provider: str, credentials: dict, *, trakt_token_callback: Ca
                            identity=row.get("username", ""))
         if provider == "anilist":
             return _check_anilist(credentials)
-        MdbListClient(MdbListConfig(api_key=row["api_key"])).get_user_lists()
-        return _result(provider, "healthy", "ok", "MDBList is reachable.", readable=True)
+        mdblist_config = MdbListConfig(
+            api_key=row.get("api_key", ""),
+            access_token=row.get("access_token", ""),
+        )
+        MdbListClient(mdblist_config).get_user_lists()
+        return _result(provider, "healthy", "ok", "MDBList is reachable.", readable=True,
+                       writable=bool(row.get("access_token")))
     except Exception as exc:
         return _error(provider, exc)
 

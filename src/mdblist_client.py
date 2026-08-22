@@ -8,6 +8,8 @@ import html
 import logging
 import re
 import secrets
+import threading
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import requests
@@ -36,6 +38,11 @@ def _redact_secret_query(text: str) -> str:
     )
 
 
+# Refresh slightly ahead of expiry rather than discovering it as a 401
+# mid-sync. MDBList access tokens last 30 days.
+TOKEN_REFRESH_SKEW_SECONDS = 3600
+
+
 class MdbListClient:
     """Client for the MDBList REST API."""
 
@@ -48,11 +55,20 @@ class MdbListClient:
     _LIKES_RE = re.compile(r'<span class="related-list-meta__likes">\s*<span class="ui medium text">(?P<likes>\d+)</span>', re.S)
     _LIST_ID_RE = re.compile(r'href="/(?:movies|shows)/\?list=(?P<id>\d+)"')
 
-    def __init__(self, config: MdbListConfig, cancel_requested_callback=None):
+    def __init__(self, config: MdbListConfig, cancel_requested_callback=None,
+                 token_refreshed_callback=None):
         self._config = config
         self._session = self._build_session()
         self._limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
         self._cancel_requested_callback = cancel_requested_callback
+        # MDBList access tokens last 30 days. Without this the connection dies
+        # silently a month after it was made and the only cure is redoing the
+        # whole OAuth flow, so refresh follows the same shape as Trakt's:
+        # attempted once per client, persisted through the callback.
+        self._token_refreshed_callback = token_refreshed_callback
+        self._refresh_lock = threading.Lock()
+        self._refresh_attempted = False
+        self._refresh_succeeded = False
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -103,22 +119,122 @@ class MdbListClient:
             return {}
         return {"apikey": self._config.api_key}
 
+    @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return None
+        try:
+            if candidate.endswith("Z"):
+                candidate = candidate[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _access_token_expiring_soon(self) -> bool:
+        if not str(getattr(self._config, "refresh_token", "") or "").strip():
+            return False
+        expires_at = self._parse_datetime(getattr(self._config, "access_token_expires_at", ""))
+        if expires_at is None:
+            return False
+        return expires_at - timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS) <= datetime.now(timezone.utc)
+
+    def _attempt_token_refresh(self) -> bool:
+        """Refresh once per client instance, and tell the caller to persist it.
+
+        Guarded by a lock and a one-shot flag so a wide parallel fetch that all
+        gets 401 at once produces one refresh, not one per in-flight request —
+        the refresh token rotates, so a second concurrent exchange would be
+        replaying an already-spent token.
+        """
+        if not str(getattr(self._config, "refresh_token", "") or "").strip():
+            return False
+        with self._refresh_lock:
+            if self._refresh_attempted:
+                return self._refresh_succeeded
+            self._refresh_attempted = True
+            try:
+                payload = self.refresh_access_token()
+            except Exception as exc:
+                logger.warning("MDBList token refresh failed: %s", exc)
+                return False
+            access_token = str(payload.get("access_token", "") or "").strip()
+            if not access_token:
+                return False
+            expires_at = ""
+            try:
+                expires_in = int(payload.get("expires_in") or 0)
+                if expires_in > 0:
+                    expires_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+                    ).isoformat()
+            except (TypeError, ValueError):
+                expires_at = ""
+            # Adopt the new credential here rather than relying on
+            # refresh_access_token having done it: this function is what the
+            # retry path trusts, so a stale bearer on the retry would make the
+            # whole refresh pointless.
+            self._config.access_token = access_token
+            new_refresh = str(payload.get("refresh_token", "") or "").strip()
+            if new_refresh:
+                self._config.refresh_token = new_refresh
+            self._config.access_token_expires_at = expires_at
+            if self._token_refreshed_callback:
+                try:
+                    self._token_refreshed_callback(
+                        access_token, self._config.refresh_token, expires_at,
+                    )
+                except Exception as cb_exc:
+                    logger.warning("MDBList token refresh callback failed: %s", cb_exc)
+            self._refresh_succeeded = True
+            return True
+
     def has_write_auth(self) -> bool:
         return bool(
             str(getattr(self._config, "access_token", "") or "").strip()
             or str(self._config.api_key or "").strip()
         )
 
+    def _refresh_before_request(self) -> None:
+        if self._access_token_expiring_soon():
+            self._attempt_token_refresh()
+
+    def _should_retry_after_refresh(self, response: requests.Response) -> bool:
+        """Whether a rejected request is worth repeating with a fresh token.
+
+        Only when a bearer token is actually in use: an api-key profile getting
+        401 has a bad key, and no refresh will help. A 401 is safe to repeat
+        even for a write — like a 429 it is rejected before any work, so the
+        retry cannot duplicate a record.
+        """
+        if response.status_code != 401:
+            return False
+        if not self._auth_headers():
+            return False
+        return self._attempt_token_refresh()
+
     def _get(self, path: str, params: dict | None = None) -> requests.Response:
         request_params = dict(params or {})
-        request_params.update(self._auth_params())
         url = f"{self._config.base_url}{path}"
-        logger.debug("GET %s params=%s", url, request_params)
+        logger.debug("GET %s", url)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
-        response = self._session.get(
-            url, params=request_params, headers=self._auth_headers(), timeout=REQUEST_TIMEOUT,
-        )
+        self._refresh_before_request()
+
+        def _send() -> requests.Response:
+            return self._session.get(
+                url,
+                params={**request_params, **self._auth_params()},
+                headers=self._auth_headers(),
+                timeout=REQUEST_TIMEOUT,
+            )
+
+        response = _send()
+        if self._should_retry_after_refresh(response):
+            response = _send()
         self._check_cancelled()
         try:
             response.raise_for_status()
@@ -137,18 +253,24 @@ class MdbListClient:
 
     def _post_once(self, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
         request_params = dict(params or {})
-        request_params.update(self._auth_params())
         url = f"{self._config.base_url}{path}"
         logger.debug("POST %s", url)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
-        response = self._session.post(
-            url,
-            params=request_params,
-            json=payload if payload is not None else {},
-            headers=self._auth_headers(),
-            timeout=REQUEST_TIMEOUT,
-        )
+        self._refresh_before_request()
+
+        def _send() -> requests.Response:
+            return self._session.post(
+                url,
+                params={**request_params, **self._auth_params()},
+                json=payload if payload is not None else {},
+                headers=self._auth_headers(),
+                timeout=REQUEST_TIMEOUT,
+            )
+
+        response = _send()
+        if self._should_retry_after_refresh(response):
+            response = _send()
         self._check_cancelled()
         try:
             response.raise_for_status()

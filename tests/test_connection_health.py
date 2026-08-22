@@ -33,6 +33,30 @@ class ConnectionHealthTests(unittest.TestCase):
             self.assertTrue(row["capabilities"]["readable"])
             self.assertEqual(row["capabilities"]["writable"], writable)
 
+    @patch("src.connection_health.MdbListClient.get_user_lists", return_value=[])
+    def test_mdblist_oauth_only_is_configured_and_writable(self, _lists):
+        """A profile that connected through OAuth has no api key at all, and
+        used to be reported as 'not configured' — which is what made a working
+        MDBList login look broken."""
+        credentials = normalize_credentials({
+            "mdblist": {"client_id": "cid", "access_token": "mdb-token",
+                        "refresh_token": "mdb-refresh"},
+        })
+
+        row = check_provider("mdblist", credentials)
+
+        self.assertEqual(row["status"], "healthy")
+        self.assertTrue(row["capabilities"]["readable"])
+        # OAuth is the mode that carries the write scope.
+        self.assertTrue(row["capabilities"]["writable"])
+
+    def test_mdblist_with_neither_credential_is_unconfigured(self) -> None:
+        credentials = normalize_credentials({"mdblist": {}})
+
+        row = check_provider("mdblist", credentials)
+
+        self.assertEqual(row["status"], "unconfigured")
+
     @patch("src.connection_health.requests.post")
     def test_anilist_public_and_authenticated_capabilities(self, post):
         response = Mock(status_code=200)

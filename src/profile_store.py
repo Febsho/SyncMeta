@@ -323,7 +323,13 @@ def _configured_sources_for_profile(profile: dict) -> list[str]:
     ):
         sources.append("trakt")
 
-    if credentials["mdblist"]["api_key"] and credentials["mdblist"]["selected_lists"]:
+    # An OAuth access token is a complete MDBList credential on its own — the
+    # client prefers the bearer and never sends an api key beside it — so a
+    # profile that connected through OAuth and never pasted a key still counts.
+    if (
+        (credentials["mdblist"]["api_key"] or credentials["mdblist"].get("access_token"))
+        and credentials["mdblist"]["selected_lists"]
+    ):
         sources.append("mdblist")
 
     return sources
