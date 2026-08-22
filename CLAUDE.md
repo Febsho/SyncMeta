@@ -338,9 +338,27 @@ is a regression test). An entry with no `completedAt` *and* no `updatedAt` is
 than omitting it. Progress is clamped to the entry's own episode count (AniList
 disagreeing with itself) and to `_MAX_DERIVED_EPISODES`. PLANNING is excluded.
 Prefer Trakt or SIMKL for anything they track — those are reported plays; this
-is an approximation, and the pair adapter (`AniListAdapter`) still advertises no
-history support at either end, because a *pair* would propagate the derived
-dates onward to another service as if they were real.
+is an approximation.
+
+**In pairs, AniList history is readable and never writable.** `AniListAdapter`
+advertises `CATEGORY_HISTORY` under `reads` only, offered as one account-level
+`history` source (status chips scope list reads, not history — the same rule as
+SIMKL and Trakt). A pair carrying those rows onward is exporting derived dates,
+so the pair editor states that where the pair is built; the receiving service
+cannot tell them apart afterwards.
+
+Writing is the half that must stay closed: a history row arriving at AniList is
+TMDB-keyed season/episode, while AniList stores one absolute progress number per
+cour. Reversing that needs an inverse of the Fribb/offset mapping which does not
+exist here, and `save_entry` sets progress *absolutely* — so a wrong or stale
+answer does not add a spurious row, it rewrites the user's real progress,
+possibly backwards. Do not add history to `writes` without that reverse mapper
+and a guard that can only ever advance a count.
+
+Because a two-way pair writes both ends, `/pairs/save` now also checks the
+reverse direction (`target.reads` / `source.writes`) for two-way pairs.
+Validating only source-read/target-write accepted `AniList ↔ Trakt` on history,
+which saves fine and then fails halfway through its first run.
 
 **Pair sources are the service's own lists, not generic categories.** Each
 adapter's `list_sources()` returns what that service calls its lists (SIMKL

@@ -868,6 +868,48 @@ class WebTests(unittest.TestCase):
         self.assertEqual(saved["categories"], ["collection"])
         self.assertEqual(saved["mode"], "two_way")
 
+    def test_anilist_can_be_a_history_source_in_a_pair(self) -> None:
+        """Its rows are derived from progress counts, but they are readable."""
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "anilist", "target": "library", "categories": ["history"],
+        }]})
+
+        self.assertEqual(response.status_code, 200)
+        saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
+        self.assertEqual(saved["categories"], ["history"])
+
+    def test_anilist_is_rejected_as_a_history_target(self) -> None:
+        """AniList stores one absolute progress number per cour; a TMDB-keyed
+        episode row cannot be turned back into one without rewriting the user's
+        real progress, possibly backwards."""
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "trakt", "target": "anilist", "categories": ["history"],
+        }]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("history", response.get_json()["error"])
+
+    def test_a_two_way_pair_needs_the_category_writable_at_both_ends(self) -> None:
+        """One-way AniList → Trakt history is fine; the same pair two-way would
+        write history back into AniList, which it can never accept."""
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "source": "anilist", "target": "trakt", "mode": "two_way",
+            "categories": ["history"],
+        }]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("two-way", response.get_json()["error"])
+        self.assertEqual(response.get_json()["pair_index"], 0)
+
     def test_saving_an_invalid_pair_is_rejected_with_a_reason(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
@@ -967,7 +1009,9 @@ class WebTests(unittest.TestCase):
         providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
 
         self.assertTrue(providers["anilist"]["configured"])
-        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection"])
+        # History reads too — derived from progress counts. It is never
+        # writable, with or without a token.
+        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection", "history"])
         self.assertEqual(providers["anilist"]["writes"], [])
         self.assertIn("access token", providers["anilist"]["write_blocked_reason"])
 
@@ -977,7 +1021,10 @@ class WebTests(unittest.TestCase):
 
         providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
 
+        # A token unlocks list writes only: history stays read-only because
+        # AniList has no episode-level thing to write it to.
         self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+        self.assertIn("history", providers["anilist"]["reads"])
         self.assertEqual(providers["anilist"]["write_blocked_reason"], "")
 
     def test_a_blank_anilist_token_keeps_the_saved_one(self) -> None:

@@ -3694,6 +3694,22 @@ def api_profile_pairs_save():
                 f"Pair {index + 1}: {source_type.label} → {target_type.label} does not support "
                 f"{', '.join(unsupported)}", 400, pair_index=index,
             )
+        # A two-way pair writes both ends, so each category has to be readable
+        # *and* writable on both sides. Checking only source-read/target-write
+        # would accept a pair that fails halfway through its first run — AniList
+        # can read watch history but can never write it, so AniList ↔ Trakt on
+        # history is exactly that shape.
+        if pair.is_two_way():
+            unsupported_reverse = [
+                category for category in pair.categories
+                if category not in target_type.reads or category not in source_type.writes
+            ]
+            if unsupported_reverse:
+                return _json_error(
+                    f"Pair {index + 1}: a two-way pair writes both ends, and "
+                    f"{target_type.label} → {source_type.label} does not support "
+                    f"{', '.join(unsupported_reverse)}", 400, pair_index=index,
+                )
         if pair.target_list and not target_type.supports_target_lists:
             return _json_error(
                 f"Pair {index + 1}: {target_type.label} does not support writable custom lists",

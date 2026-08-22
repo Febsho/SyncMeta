@@ -806,16 +806,25 @@ class SimklAdapter(ProviderAdapter):
 class AniListAdapter(ProviderAdapter):
     key = "anilist"
     label = "AniList"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
-    # AniList tracks progress per series, not individual episode plays, so there
-    # is no honest mapping for watch history. Advertising one would silently
-    # write wrong data, so history is left unsupported at both ends.
+    # History is readable but never writable, and the asymmetry is the point.
     #
-    # The main pipeline *can* import AniList progress as watched episodes (see
-    # _sync_anilist_watched_history), but that path is opt-in, writes presence
-    # only, and labels its rows derived. A pair is different: it would copy
-    # those approximate dates onward to another service as if they were real
-    # plays. Do not add history here on the strength of that path existing.
+    # Reading: AniList records no plays, so `get_watched_history()` derives
+    # episodes from each entry's progress count and stamps them with the
+    # entry's own date (see its docstring). Those rows are an approximation and
+    # are labelled `anilist_derived`, so a pair carrying them to another service
+    # is exporting a derived watch date, not an observed one. That is a trade
+    # the user opts into by building the pair; prefer Trakt or SIMKL as the
+    # history source for anything they track.
+    #
+    # Writing: a history row arriving here is TMDB-keyed season/episode, while
+    # AniList stores one absolute progress number per cour. Turning the former
+    # back into the latter needs a reverse of the Fribb/offset mapping that does
+    # not exist in this codebase, and `save_entry` sets progress absolutely — so
+    # a wrong or stale answer does not merely add a spurious row, it rewrites
+    # the user's real AniList progress, possibly backwards. Do not add history
+    # to `writes` without that reverse mapper and a guard that can only ever
+    # advance a count.
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
     writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = False
@@ -836,7 +845,7 @@ class AniListAdapter(ProviderAdapter):
     )
 
     def list_sources(self) -> list[dict]:
-        return [
+        sources = [
             {
                 "key": f"status:{status}",
                 "label": label,
@@ -845,6 +854,15 @@ class AniListAdapter(ProviderAdapter):
             }
             for status, label, category in self._STATUSES
         ]
+        # Account-level, like SIMKL's and Trakt's history sources: it spans
+        # every status rather than scoping to one.
+        sources.append({
+            "key": "history",
+            "label": "Watch History (derived from progress)",
+            "category": CATEGORY_HISTORY,
+            "kind": "status",
+        })
+        return sources
 
     def __init__(self, client):
         self._client = client
@@ -856,6 +874,12 @@ class AniListAdapter(ProviderAdapter):
         return self._client.write_blocked_reason()
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
+        # Watch history is a fixed account-level source, as on SIMKL and Trakt:
+        # status chips scope list/collection reads only, and treating them as a
+        # history filter would return nothing without ever deriving the rows.
+        if category == CATEGORY_HISTORY:
+            return list(self._client.get_watched_history() or [])
+
         by_status = {status: cat for status, _label, cat in self._STATUSES}
         selected = [
             str(key).split(":", 1)[1]

@@ -95,6 +95,83 @@ def _pair(**overrides) -> SyncPair:
     return SyncPair.from_dict(raw)
 
 
+class AniListHistoryPairTests(unittest.TestCase):
+    """AniList is a history *source* only.
+
+    Its rows are derived from progress counts rather than observed as plays, so
+    they may leave AniList but must never be written back into it: AniList
+    stores one absolute progress number per cour, and a wrong answer rewrites
+    the user's real progress instead of adding a stray row.
+    """
+
+    @staticmethod
+    def _episode(tmdb_id: str, season: int, episode: int) -> dict:
+        return {
+            "tmdb_id": tmdb_id,
+            "media_type": "tv",
+            "season": season,
+            "episode": episode,
+            "watched_at": "2025-05-05T00:00:00Z",
+            "cursor_exempt": True,
+            "anilist_derived": True,
+        }
+
+    def test_derived_history_flows_out_of_anilist(self) -> None:
+        source = FakeAdapter(
+            "anilist",
+            {CATEGORY_HISTORY: [self._episode("910", 1, 1), self._episode("910", 1, 2)]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        service = CrossSyncService({"anilist": source, "library": target})
+
+        stats = service.run_pair(_pair(source="anilist", target="library", categories=[CATEGORY_HISTORY]))
+
+        self.assertEqual(stats.added, 2)
+        self.assertEqual(
+            sorted((i["season"], i["episode"]) for i in target.added[0][1]),
+            [(1, 1), (1, 2)],
+        )
+
+    def test_a_second_run_of_a_history_pair_writes_nothing(self) -> None:
+        """Derived rows carry one shared date, so identity has to line up on
+        season/episode alone or the pair re-adds the whole history each run."""
+        rows = [self._episode("910", 1, 1), self._episode("910", 1, 2)]
+        source = FakeAdapter("anilist", {CATEGORY_HISTORY: rows}, reads=(CATEGORY_HISTORY,), writes=())
+        target = FakeAdapter(
+            "library", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        service = CrossSyncService({"anilist": source, "library": target})
+        pair = _pair(source="anilist", target="library", categories=[CATEGORY_HISTORY])
+
+        first = service.run_pair(pair)
+        second = service.run_pair(pair)
+
+        self.assertEqual(first.added, 2)
+        self.assertEqual(second.added, 0)
+
+    def test_writing_history_into_anilist_is_refused(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [self._episode("910", 1, 1)]},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target = FakeAdapter(
+            "anilist", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_WATCHLIST,),
+        )
+        service = CrossSyncService({"trakt": source, "anilist": target})
+
+        stats = service.run_pair(_pair(source="trakt", target="anilist", categories=[CATEGORY_HISTORY]))
+
+        self.assertEqual(stats.added, 0)
+        self.assertEqual(target.added, [])
+        self.assertTrue(stats.errors or any(c.errors for c in stats.categories))
+
+
 class PairAddTests(unittest.TestCase):
     def test_only_missing_items_are_written(self) -> None:
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})

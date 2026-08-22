@@ -8038,6 +8038,12 @@
       const targetPicker = pairTargetListPickerHtml(pair, index);
       const listPicker = pairListPickerHtml(pair, index);
       const destinationNotes = pairDestinationNotes(pair);
+      // AniList records no plays, so a history pair sourced from it exports
+      // dates derived from progress counts. Say so where the pair is built —
+      // the receiving service cannot tell them apart afterwards.
+      const derivedHistoryNote = (pair.source === 'anilist' && (pair.categories || []).includes('history'))
+        ? `<div class="pair-note"><span class="pair-badge">${esc(PAIR_CATEGORY_LABELS.history)}</span> AniList records no plays. These episodes are derived from each entry's progress count and share that entry's completion date, so ${esc(providerLabel(pair.target))} will receive approximate watch dates. Prefer Trakt or SIMKL as the source for anything they track.</div>`
+        : '';
 
       const open = isPairExpanded(pair);
       const autoName = providerLabel(pair.source) + (twoWay ? ' ↔ ' : ' → ') + providerLabel(pair.target);
@@ -8088,6 +8094,7 @@
         <div class="pair-sec">
           <div class="pair-sec-title">What to sync</div>
           <div role="group" aria-label="Categories to sync">${categoryBoxes}</div>
+          ${derivedHistoryNote}
           ${destinationNotes}
           ${listPicker}${targetPicker}
         </div>
