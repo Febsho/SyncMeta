@@ -270,6 +270,72 @@ class AniListClientTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["watched_at"], "2023-01-01T00:00:00Z")
 
+    def test_apply_history_progress_advances_and_preserves_status(self) -> None:
+        """The write is a count, so it must not also re-shelve the entry."""
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 1,
+            "completedAt": {"year": 2025, "month": 1, "day": 1},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Cour One"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+        saved: list[tuple] = []
+        client.save_entry = lambda media_id, status, progress=None: (
+            saved.append((media_id, status, progress)) or {"id": 1}
+        )
+
+        def fake_enrich(item):
+            episode = item.get("episode")
+            if episode is None:
+                return {**item, "tmdb_id": None}
+            return {**item, "tmdb_id": "900", "media_type": "tv", "season": 1, "episode": episode}
+
+        with mock.patch("src.providers.enrich_identity", fake_enrich):
+            totals = client.apply_history_progress([
+                {"tmdb_id": "900", "media_type": "tv", "season": 1, "episode": 1},
+                {"tmdb_id": "900", "media_type": "tv", "season": 1, "episode": 2},
+                {"tmdb_id": "900", "media_type": "tv", "season": 1, "episode": 3},
+            ])
+
+        self.assertEqual(totals["added"], 1)
+        # COMPLETED is the status bucket the entry was read from, and it rides
+        # through unchanged; only the count moves.
+        self.assertEqual(saved, [(1, "COMPLETED", 3)])
+
+    def test_apply_history_progress_never_lowers_a_count(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 9,
+            "completedAt": {"year": 2025, "month": 1, "day": 1},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Cour One"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+        saved: list[tuple] = []
+        client.save_entry = lambda media_id, status, progress=None: (
+            saved.append((media_id, status, progress)) or {"id": 1}
+        )
+
+        def fake_enrich(item):
+            episode = item.get("episode")
+            if episode is None:
+                return {**item, "tmdb_id": None}
+            return {**item, "tmdb_id": "900", "media_type": "tv", "season": 1, "episode": episode}
+
+        with mock.patch("src.providers.enrich_identity", fake_enrich):
+            totals = client.apply_history_progress([
+                {"tmdb_id": "900", "media_type": "tv", "season": 1, "episode": 1},
+            ])
+
+        self.assertEqual(saved, [])
+        self.assertEqual(totals["added"], 0)
+        self.assertEqual(totals["skipped"], 1)
+
+    def test_apply_history_progress_with_no_items_reads_nothing(self) -> None:
+        client = AniListClient(AniListConfig(username="tester"))
+        client._query = lambda *a, **k: self.fail("no AniList read should happen")
+
+        self.assertEqual(client.apply_history_progress([])["added"], 0)
+
     def test_query_returns_none_on_http_error(self) -> None:
         client = AniListClient(AniListConfig(username="tester"))
 

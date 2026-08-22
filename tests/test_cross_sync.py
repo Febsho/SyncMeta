@@ -154,7 +154,10 @@ class AniListHistoryPairTests(unittest.TestCase):
         self.assertEqual(first.added, 2)
         self.assertEqual(second.added, 0)
 
-    def test_writing_history_into_anilist_is_refused(self) -> None:
+    def test_a_target_that_cannot_write_the_category_is_reported(self) -> None:
+        """Generic guard, kept because AniList's history write is narrow: it
+        only ever advances progress on entries the user already has, so a pair
+        can still find nothing it is allowed to do."""
         source = FakeAdapter(
             "trakt", {CATEGORY_HISTORY: [self._episode("910", 1, 1)]},
             reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),

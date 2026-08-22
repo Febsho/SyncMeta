@@ -8044,6 +8044,11 @@
       const derivedHistoryNote = (pair.source === 'anilist' && (pair.categories || []).includes('history'))
         ? `<div class="pair-note"><span class="pair-badge">${esc(PAIR_CATEGORY_LABELS.history)}</span> AniList records no plays. These episodes are derived from each entry's progress count and share that entry's completion date, so ${esc(providerLabel(pair.target))} will receive approximate watch dates. Prefer Trakt or SIMKL as the source for anything they track.</div>`
         : '';
+      // Writing history into AniList is a progress count, not a play log. Say
+      // what it can and cannot do before the user runs it, not afterwards.
+      const progressTargetNote = (pair.target === 'anilist' && (pair.categories || []).includes('history'))
+        ? `<div class="pair-note"><span class="pair-badge">${esc(PAIR_CATEGORY_LABELS.history)}</span> AniList stores one progress count per season, so history arrives as "watched up to episode N". It only ever moves a count forward, only on anime already on your AniList list, and stops at the first gap — watching episodes 1, 2 and 4 sets progress to 2, never 4. Rewatches and individual dates cannot be represented.</div>`
+        : '';
 
       const open = isPairExpanded(pair);
       const autoName = providerLabel(pair.source) + (twoWay ? ' ↔ ' : ' → ') + providerLabel(pair.target);
@@ -8095,6 +8100,7 @@
           <div class="pair-sec-title">What to sync</div>
           <div role="group" aria-label="Categories to sync">${categoryBoxes}</div>
           ${derivedHistoryNote}
+          ${progressTargetNote}
           ${destinationNotes}
           ${listPicker}${targetPicker}
         </div>

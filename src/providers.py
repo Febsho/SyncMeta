@@ -817,15 +817,17 @@ class AniListAdapter(ProviderAdapter):
     # history source for anything they track.
     #
     # Writing: a history row arriving here is TMDB-keyed season/episode, while
-    # AniList stores one absolute progress number per cour. Turning the former
-    # back into the latter needs a reverse of the Fribb/offset mapping that does
-    # not exist in this codebase, and `save_entry` sets progress absolutely — so
-    # a wrong or stale answer does not merely add a spurious row, it rewrites
-    # the user's real AniList progress, possibly backwards. Do not add history
-    # to `writes` without that reverse mapper and a guard that can only ever
-    # advance a count.
+    # AniList stores one absolute progress number per cour, and `save_entry`
+    # sets that number absolutely — a wrong answer rewrites the user's real
+    # progress rather than adding a stray row. `anilist_progress` inverts the
+    # Fribb/offset mapping by running the forward mapper over the user's own
+    # entries, so the inverse cannot disagree with it, and refuses to write
+    # anything it cannot justify: no entry the user does not already have, no
+    # ambiguous coordinate, nothing past a contiguous run from episode 1, and
+    # never a count lower than AniList already holds. Read that module before
+    # loosening any of it.
     reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
     supports_list_selection = True
     supports_target_lists = False
 
@@ -908,11 +910,18 @@ class AniListAdapter(ProviderAdapter):
         self, category: str, items: list[dict], target_list: str = "",
         visibility: str = VISIBILITY_PRIVATE,
     ) -> dict:
+        if category == CATEGORY_HISTORY:
+            return self._client.apply_history_progress(items)
         if category not in self._STATUS_FOR_CATEGORY:
             return self._unsupported(category, "write")
         return self._client.add_to_list(items, category)
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
+        if category == CATEGORY_HISTORY:
+            # Removing history would mean lowering a progress count, which is
+            # the one edit that destroys data the user cannot get back. A
+            # mirror/managed pair therefore reports this rather than acting.
+            return self._unsupported(category, "remove from")
         if category not in self._STATUS_FOR_CATEGORY:
             return self._unsupported(category, "remove from")
         return self._client.remove_from_list(items, category)

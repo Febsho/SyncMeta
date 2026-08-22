@@ -881,10 +881,9 @@ class WebTests(unittest.TestCase):
         saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
         self.assertEqual(saved["categories"], ["history"])
 
-    def test_anilist_is_rejected_as_a_history_target(self) -> None:
-        """AniList stores one absolute progress number per cour; a TMDB-keyed
-        episode row cannot be turned back into one without rewriting the user's
-        real progress, possibly backwards."""
+    def test_anilist_is_accepted_as_a_history_target(self) -> None:
+        """History reaches AniList as progress counts. The safety work is in
+        anilist_progress, not in refusing the pair."""
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
 
@@ -892,23 +891,42 @@ class WebTests(unittest.TestCase):
             "source": "trakt", "target": "anilist", "categories": ["history"],
         }]})
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("history", response.get_json()["error"])
+        self.assertEqual(response.status_code, 200)
+        saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
+        self.assertEqual(saved["categories"], ["history"])
 
     def test_a_two_way_pair_needs_the_category_writable_at_both_ends(self) -> None:
-        """One-way AniList → Trakt history is fine; the same pair two-way would
-        write history back into AniList, which it can never accept."""
+        """A two-way pair writes both ends, so checking only source-read and
+        target-write would accept a pair that fails halfway through its first
+        run. Every shipped adapter is symmetric today, so this pins the rule
+        against a provider that reads a category it cannot write."""
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        class ReadOnlyHistoryTrakt(web.ADAPTER_TYPES["trakt"]):
+            writes = ("watchlist", "collection")
+
+        patched = dict(web.ADAPTER_TYPES)
+        patched["trakt"] = ReadOnlyHistoryTrakt
+        with patch.dict(web.ADAPTER_TYPES, patched, clear=True):
+            response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+                "source": "simkl", "target": "trakt", "mode": "two_way",
+                "categories": ["history"],
+            }]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["pair_index"], 0)
+
+    def test_a_two_way_pair_is_accepted_when_both_ends_support_the_category(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
 
         response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
-            "source": "anilist", "target": "trakt", "mode": "two_way",
+            "source": "simkl", "target": "trakt", "mode": "two_way",
             "categories": ["history"],
         }]})
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("two-way", response.get_json()["error"])
-        self.assertEqual(response.get_json()["pair_index"], 0)
+        self.assertEqual(response.status_code, 200)
 
     def test_saving_an_invalid_pair_is_rejected_with_a_reason(self) -> None:
         profile = self._make_bare_profile()
@@ -1021,9 +1039,9 @@ class WebTests(unittest.TestCase):
 
         providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
 
-        # A token unlocks list writes only: history stays read-only because
-        # AniList has no episode-level thing to write it to.
-        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+        # A token unlocks every category, history included — it lands as a
+        # progress count per entry, guarded by anilist_progress.
+        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection", "history"])
         self.assertIn("history", providers["anilist"]["reads"])
         self.assertEqual(providers["anilist"]["write_blocked_reason"], "")
 
@@ -1173,7 +1191,7 @@ class WebTests(unittest.TestCase):
 
         # And AniList immediately becomes a usable sync target.
         providers = {p["key"]: p for p in self.client.post("/api/profile/pairs", json={}).get_json()["providers"]}
-        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection"])
+        self.assertEqual(providers["anilist"]["writes"], ["watchlist", "collection", "history"])
 
     @patch("web.anilist_exchange_code_for_token")
     def test_anilist_auth_check_reuses_the_saved_secret(self, exchange) -> None:

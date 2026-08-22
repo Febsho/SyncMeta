@@ -347,13 +347,37 @@ SIMKL and Trakt). A pair carrying those rows onward is exporting derived dates,
 so the pair editor states that where the pair is built; the receiving service
 cannot tell them apart afterwards.
 
-Writing is the half that must stay closed: a history row arriving at AniList is
-TMDB-keyed season/episode, while AniList stores one absolute progress number per
-cour. Reversing that needs an inverse of the Fribb/offset mapping which does not
-exist here, and `save_entry` sets progress *absolutely* — so a wrong or stale
-answer does not add a spurious row, it rewrites the user's real progress,
-possibly backwards. Do not add history to `writes` without that reverse mapper
-and a guard that can only ever advance a count.
+**Writing history to AniList is a progress count, and `anilist_progress` owns
+every rule that makes it safe.** A history row arriving at AniList is TMDB-keyed
+season/episode, while AniList stores one *absolute* progress number per cour,
+and `save_entry` sets that number outright — a wrong answer does not add a
+spurious row, it overwrites what the user actually watched.
+
+The inverse mapping is therefore built by running the **forward** mapper
+(`providers.enrich_identity`) over the user's *own* AniList entries and
+recording where each local episode lands. Two properties fall out of that and
+must be preserved if this is ever rewritten: the inverse cannot disagree with
+the forward mapping, because it *is* that mapping read backwards; and only
+entries already on the user's list can ever be written, since nothing else is
+in the index — a history row for an anime they do not track is skipped, never
+turned into a new list entry.
+
+Four refusals do the rest, and none is optional:
+
+* **An ambiguous coordinate is refused, not guessed.** Overlapping Fribb
+  mappings occur; picking one writes progress to the wrong cour.
+* **Progress follows a contiguous run from episode 1.** The number means
+  "watched up to N", so episodes {1,2,3,5} support 3, never 5 — 5 would claim
+  episode 4. A history starting mid-season supports nothing at all.
+* **Progress never decreases.** This is the guard that makes the write
+  non-destructive: a partial or stale history must not roll back a count the
+  user set themselves.
+* **Progress never exceeds the entry's own episode count.**
+
+`remove()` still refuses `CATEGORY_HISTORY` outright: removing history would
+mean lowering a count, the one edit the user cannot undo. A mirror or managed
+pair reports that rather than acting on it. The entry's own status rides
+through unchanged — this writes a count, it does not re-shelve the entry.
 
 Because a two-way pair writes both ends, `/pairs/save` now also checks the
 reverse direction (`target.reads` / `source.writes`) for two-way pairs.

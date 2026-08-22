@@ -734,6 +734,7 @@ class AniListClient:
                         normalized["anilist_entry_id"] = entry["id"]
                     # AniList tracks progress per entry, not per episode, so
                     # these two are all the watch data that exists here.
+                    normalized["anilist_status"] = status
                     normalized["anilist_progress"] = _safe_progress(entry.get("progress"))
                     normalized["anilist_episode_count"] = _safe_progress(media.get("episodes"))
                     normalized["anilist_watched_at"] = _entry_watched_at(entry)
@@ -1205,6 +1206,73 @@ class AniListClient:
             else:
                 totals["not_found"] += 1
         totals["batches"] = 1 if items else 0
+        return totals
+
+    def list_entries_for_progress(self) -> list[dict]:
+        """Every entry that could receive progress, across watch statuses.
+
+        PLANNING is included here although it is excluded from history reads: a
+        plan-to-watch entry is exactly the one another service may have progress
+        for, and advancing its count is the honest result.
+        """
+        entries: list[dict] = []
+        seen: set[str] = set()
+        for status in (ANILIST_STATUS_PLAN_TO_WATCH,) + self.HISTORY_STATUSES:
+            self._check_cancelled()
+            try:
+                items = self.get_status(status)
+            except Exception as exc:
+                logger.warning("AniList progress: could not fetch status '%s': %s", status, exc)
+                continue
+            for item in items:
+                key = str(item.get("anilist_id") or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                entries.append(item)
+        return entries
+
+    def apply_history_progress(self, items: list[dict]) -> dict:
+        """Advance AniList progress to match incoming watch history.
+
+        AniList has no episode-level store, so history is applied as a progress
+        count per entry. Every safety rule lives in `anilist_progress`: only
+        entries the user already has, never an ambiguous coordinate, never past
+        a contiguous run from episode 1, and never backwards. See that module
+        for why each one is not optional.
+        """
+        from . import anilist_progress
+
+        totals = {"added": 0, "not_found": 0, "skipped": 0, "batches": 1 if items else 0}
+        if not items:
+            return totals
+
+        entries = self.list_entries_for_progress()
+        if not entries:
+            totals["not_found"] = len(items)
+            return totals
+
+        plan = anilist_progress.plan_progress_updates(entries, items)
+        totals["not_found"] = plan.unmatched
+        totals["skipped"] = plan.ambiguous + plan.already_current + plan.would_regress
+        if plan.would_regress:
+            logger.info(
+                "AniList progress: %d entr%s left alone because the incoming history "
+                "only supports a lower count than AniList already holds",
+                plan.would_regress, "y" if plan.would_regress == 1 else "ies",
+            )
+
+        for update in plan.updates:
+            self._check_cancelled()
+            status = update.status or ANILIST_STATUS_WATCHING
+            if self.save_entry(update.media_id, status, update.new_progress) is None:
+                totals["not_found"] += 1
+                continue
+            totals["added"] += 1
+            logger.info(
+                "  │ ✓ AniList progress '%s': %d → %d",
+                update.title, update.current_progress, update.new_progress,
+            )
         return totals
 
     def remove_from_list(self, items: list[dict], category: str) -> dict:
