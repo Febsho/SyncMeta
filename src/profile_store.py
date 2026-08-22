@@ -888,7 +888,10 @@ def normalize_profile_options(options: dict | None) -> dict:
         "trakt_sync_watched_history": history_source == "trakt",
         "trakt_watched_history_interval_seconds": watched_history_interval_seconds,
         "trakt_sync_full_watch_counts": False,
-        "trakt_reconcile_watched_history": False,
+        # Reconcile against Trakt's full /sync/watched state, not just the
+        # play log the cursor walks forward. Off by default: it is a second
+        # whole-account read per history run.
+        "trakt_reconcile_watched_history": bool(raw.get("trakt_reconcile_watched_history", False)),
         "trakt_sync_resume_progress": resume_source == "trakt",
         "trakt_resume_progress_interval_seconds": resume_progress_interval_seconds,
         "simkl_visibility": _normalize_visibility(raw.get("simkl_visibility"), "private"),

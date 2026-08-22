@@ -609,7 +609,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
             trakt_watched_history_interval_seconds=options["trakt_watched_history_interval_seconds"],
             trakt_resume_progress_interval_seconds=options["trakt_resume_progress_interval_seconds"],
             trakt_sync_full_watch_counts=False,
-            trakt_reconcile_watched_history=False,
+            trakt_reconcile_watched_history=options["trakt_reconcile_watched_history"],
             trakt_sync_resume_progress=modes["resume"] and options["activity_resume_source"] == "trakt",
             simkl_visibility=options["simkl_visibility"],
             anilist_visibility=options["anilist_visibility"],
@@ -3327,6 +3327,7 @@ def api_profile_library_history_title():
         "year": "",
         "poster_url": "",
         "episodes": [],
+        "seasons": [],
         "plays": [],
         "tmdb_configured": bool(tmdb_key),
         "tmdb_error": "",
@@ -3358,6 +3359,18 @@ def api_profile_library_history_title():
             row["episode"] if row["episode"] is not None else 0,
         ))
         result["episodes"] = episodes
+        # One row per season so the UI can group a multi-season show instead of
+        # printing 200 flat episode rows. `total` stays 0 until TMDB fills it in
+        # below — without a key there is nothing to compare the count against.
+        season_counts: dict[int, int] = {}
+        for row in episodes:
+            if row["season"] is None:
+                continue
+            season_counts[int(row["season"])] = season_counts.get(int(row["season"]), 0) + 1
+        result["seasons"] = [
+            {"season": season, "watched": watched, "total": 0}
+            for season, watched in sorted(season_counts.items())
+        ]
 
     if tmdb_key:
         client = TmdbClient(tmdb_key)
@@ -3373,6 +3386,9 @@ def api_profile_library_history_title():
             })
             for season in seasons:
                 season_map = client.get_season_episodes(tmdb_id, season)
+                for season_row in result["seasons"]:
+                    if season_row["season"] == season:
+                        season_row["total"] = len(season_map)
                 for row in result["episodes"]:
                     if row["season"] != season or row["episode"] is None:
                         continue

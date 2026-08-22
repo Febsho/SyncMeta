@@ -3024,6 +3024,47 @@ class WebTests(unittest.TestCase):
         self.assertEqual(first["name"], "Long Day's Journey Into Night")
         self.assertEqual(first["still_url"], "https://img/e1.jpg")
 
+    def test_library_history_title_reports_per_season_coverage(self) -> None:
+        """A multi-season show has to be readable season by season, and the
+        season totals are what make a gap in the import visible at all."""
+        self._login(self._make_library_profile())
+        season_map = {
+            1: {1: {"name": "S1E1", "still_url": "", "air_date": ""},
+                2: {"name": "S1E2", "still_url": "", "air_date": ""}},
+            2: {number: {"name": f"S2E{number}", "still_url": "", "air_date": ""} for number in range(1, 13)},
+        }
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
+            {"id": "w1", "tmdb_id": 7, "media_type": "tv", "season": 1, "episode": 1, "watched_at": "2026-01-01T10:00:00Z"},
+            {"id": "w2", "tmdb_id": 7, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-01-02T10:00:00Z"},
+            {"id": "w3", "tmdb_id": 7, "media_type": "tv", "season": 2, "episode": 1, "watched_at": "2026-02-01T10:00:00Z"},
+        ]), patch.object(web.TmdbClient, "get_details", return_value={
+            "title": "Multi Season Anime", "year": "2021", "poster_url": "",
+            "tmdb_id": 7, "media_type": "tv", "overview": "",
+        }), patch.object(web.TmdbClient, "get_season_episodes",
+                         side_effect=lambda tmdb_id, season: season_map.get(season, {})):
+            response = self.client.post("/api/profile/library/history/title", json={"tmdb_id": 7, "media_type": "tv"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["seasons"], [
+            {"season": 1, "watched": 2, "total": 2},
+            {"season": 2, "watched": 1, "total": 12},
+        ])
+
+    def test_library_history_title_season_totals_stay_zero_without_a_tmdb_key(self) -> None:
+        """Without a key there is no episode count to compare against, and a
+        coverage bar drawn from a guess is worse than none."""
+        self._login(self._make_library_profile(tmdb_key=""))
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[
+            {"id": "w1", "tmdb_id": 7, "media_type": "tv", "season": 3, "episode": 4, "watched_at": "2026-01-01T10:00:00Z"},
+        ]):
+            response = self.client.post("/api/profile/library/history/title", json={"tmdb_id": 7, "media_type": "tv"})
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["seasons"], [{"season": 3, "watched": 1, "total": 0}])
+        self.assertFalse(data["tmdb_configured"])
+
     def test_library_history_title_movie_returns_plays(self) -> None:
         self._login(self._make_library_profile(tmdb_key=""))
         with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=[

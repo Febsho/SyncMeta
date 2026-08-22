@@ -626,6 +626,18 @@
     .episode-name{font-size:13px;font-weight:600;color:var(--z100);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .episode-tag{padding:1px 7px;border-radius:6px;background:rgba(124,109,247,.15);color:var(--accent);font-size:10px;font-weight:700;letter-spacing:.4px}
     .episode-sub{font-size:11px;color:var(--z500);margin-top:2px}
+    /* A season is titled like every other value in the app: a mono overline
+       above the rows it owns, with a 2px greyscale coverage bar rather than a
+       coloured one — colour stays reserved for status dots and deltas. */
+    .season-block{margin-top:18px}
+    .season-block:first-child{margin-top:0}
+    .season-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+    .season-name{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--z300);font-weight:400}
+    .season-count{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--label)}
+    .season-bar{flex:1;min-width:60px;height:2px;background:var(--z800);overflow:hidden}
+    .season-bar span{display:block;height:100%;background:var(--z400)}
+    .season-gap{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--label);
+      padding:6px 8px;border:1px dashed rgba(39,39,46,.9);border-radius:8px}
     @media (max-width:700px){
       .hero h1{font-size:28px}.hero-card{padding:36px 24px 32px}
       .form-grid{grid-template-columns:1fr}.settings-columns{grid-template-columns:1fr}.options-grid{grid-template-columns:1fr}.source-card{min-height:0}
@@ -1154,6 +1166,11 @@
                       <div class="hint">Minimum 86400 s (24 h). Only affects automatic history sync.</div>
                     </div>
                     <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
+                    <div class="toggle-row hidden" id="opt-trakt-reconcile-history-row" style="margin-bottom:0">
+                      <label for="opt-trakt-reconcile-history" class="toggle"><input type="checkbox" id="opt-trakt-reconcile-history"><span class="slider"></span></label>
+                      <label for="opt-trakt-reconcile-history">Backfill missing episodes from Trakt's full watched state</label>
+                    </div>
+                    <div class="hint hidden" id="opt-trakt-reconcile-history-hint">Trakt's history is a play log read forward from the last sync, so episodes watched before you connected — or missed by an interrupted run — never come back. This also reads your complete watched state and writes only the episodes PublicMetaDB is missing, which is what fills in the earlier seasons of a long-running show. Costs one extra full read per history sync.</div>
                   </div>
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Resume Progress</div>
@@ -2309,6 +2326,7 @@
         activity_history_source: el('opt-activity-history-source').value,
         auto_history_sync: el('opt-auto-history-sync').checked,
         simkl_history_anime_only: el('opt-simkl-history-anime-only').checked,
+        trakt_reconcile_watched_history: el('opt-trakt-reconcile-history').checked,
         activity_resume_source: el('opt-activity-resume-source').value,
         auto_resume_sync: el('opt-auto-resume-sync').checked,
         trakt_watched_history_interval_seconds: Number.isFinite(historyIntervalSeconds) ? historyIntervalSeconds : 86400,
@@ -2453,6 +2471,7 @@
       el('opt-auto-history-sync').checked = !!options.auto_history_sync;
       el('opt-history-interval-seconds').value = Math.max(86400, options.trakt_watched_history_interval_seconds || 86400);
       el('opt-simkl-history-anime-only').checked = !!options.simkl_history_anime_only;
+      el('opt-trakt-reconcile-history').checked = !!options.trakt_reconcile_watched_history;
       el('opt-activity-resume-source').value = options.activity_resume_source || (options.trakt_sync_resume_progress ? 'trakt' : 'off');
       el('opt-auto-resume-sync').checked = !!options.auto_resume_sync;
       el('opt-resume-interval-seconds').value = Math.max(86400, options.trakt_resume_progress_interval_seconds || 86400);
@@ -2704,11 +2723,20 @@
       const autoResumeInput = el('opt-auto-resume-sync');
       const historyIntervalInput = el('opt-history-interval-seconds');
       const resumeIntervalInput = el('opt-resume-interval-seconds');
+      const reconcileRow = el('opt-trakt-reconcile-history-row');
+      const reconcileHint = el('opt-trakt-reconcile-history-hint');
+      const reconcileInput = el('opt-trakt-reconcile-history');
       const showAnimeOnly = historySource === 'simkl';
+      const showReconcile = historySource === 'trakt';
       const historyEnabled = historySource !== 'off';
       const resumeEnabled = resumeSource !== 'off';
       animeOnlyRow.classList.toggle('hidden', !showAnimeOnly);
       if (!showAnimeOnly) animeOnlyInput.checked = false;
+      // Trakt-only: SIMKL already reports per-episode watched state, so it has
+      // no equivalent gap for a second read to fill.
+      reconcileRow.classList.toggle('hidden', !showReconcile);
+      reconcileHint.classList.toggle('hidden', !showReconcile);
+      if (!showReconcile) reconcileInput.checked = false;
       autoHistoryInput.disabled = !historyEnabled;
       autoResumeInput.disabled = !resumeEnabled;
       historyIntervalInput.disabled = !historyEnabled || !autoHistoryInput.checked;
@@ -4132,7 +4160,7 @@
         }).join('') || '<div class="empty">No plays recorded.</div>';
       } else {
         const episodes = Array.isArray(data.episodes) ? data.episodes : [];
-        rows = episodes.map(row => {
+        const episodeRow = row => {
           const tag = row.season != null && row.episode != null
             ? `S${row.season}E${row.episode}`
             : 'Show';
@@ -4150,12 +4178,64 @@
               <div class="episode-sub">${stamp ? `Watched ${esc(stamp)}` : ''}${esc(plays)}</div>
             </div>
           </div>`;
-        }).join('') || '<div class="empty">No episodes recorded.</div>';
+        };
+        // Group by season. A binged multi-season show is otherwise 200 flat
+        // rows in which the seasons are indistinguishable — and the seasons
+        // are exactly what a partially-imported anime is missing.
+        const numbered = episodes.filter(row => row.season != null);
+        const unnumbered = episodes.filter(row => row.season == null);
+        const seasonTotals = {};
+        (Array.isArray(data.seasons) ? data.seasons : []).forEach(entry => {
+          seasonTotals[Number(entry.season)] = Number(entry.total || 0);
+        });
+        const bySeason = new Map();
+        numbered.forEach(row => {
+          const season = Number(row.season);
+          if (!bySeason.has(season)) bySeason.set(season, []);
+          bySeason.get(season).push(row);
+        });
+        const blocks = Array.from(bySeason.keys()).sort((a, b) => a - b).map(season => {
+          const seasonRows = bySeason.get(season);
+          const total = seasonTotals[season] || 0;
+          const watched = seasonRows.length;
+          // Only claim a share when TMDB told us how many episodes exist;
+          // without a key `total` is 0 and a bar would be inventing a number.
+          const pct = total > 0 ? Math.min(100, Math.round((watched / total) * 100)) : 0;
+          const count = total > 0 ? `${watched} / ${total} episodes` : `${watched} episode${watched === 1 ? '' : 's'}`;
+          const bar = total > 0
+            ? `<span class="season-bar"><span style="width:${pct}%"></span></span>`
+            : '';
+          // Name the gap rather than leaving the reader to diff the numbers —
+          // this is the state a Trakt backfill exists to clear.
+          const missing = total > 0 && watched < total
+            ? `<div class="season-gap">${total - watched} episode${total - watched === 1 ? '' : 's'} of this season are not in your history</div>`
+            : '';
+          const label = season === 0 ? 'Specials' : `Season ${season}`;
+          return `<div class="season-block">
+            <div class="season-head">
+              <span class="season-name">${esc(label)}</span>
+              ${bar}
+              <span class="season-count">${esc(count)}</span>
+            </div>
+            ${missing}
+            <div class="episode-list">${seasonRows.map(episodeRow).join('')}</div>
+          </div>`;
+        });
+        if (unnumbered.length) {
+          blocks.push(`<div class="season-block">
+            <div class="season-head"><span class="season-name">No episode recorded</span>
+            <span class="season-count">${unnumbered.length} play${unnumbered.length === 1 ? '' : 's'}</span></div>
+            <div class="episode-list">${unnumbered.map(episodeRow).join('')}</div>
+          </div>`);
+        }
+        rows = blocks.join('') || '<div class="empty">No episodes recorded.</div>';
       }
 
+      const seasonCount = (Array.isArray(data.seasons) ? data.seasons : []).length;
+      const episodeCount = (data.episodes || []).length;
       const summary = isMovie
         ? `${(data.plays || []).length} play${(data.plays || []).length === 1 ? '' : 's'}`
-        : `${(data.episodes || []).length} episode${(data.episodes || []).length === 1 ? '' : 's'} watched`;
+        : `${episodeCount} episode${episodeCount === 1 ? '' : 's'} watched${seasonCount > 1 ? ` across ${seasonCount} seasons` : ''}`;
 
       body.innerHTML = `<div class="library-detail">
         <div class="library-detail-header">
@@ -4166,7 +4246,7 @@
             <div class="poster-sub">${esc(summary)}</div>
           </div>
         </div>
-        <div class="episode-list">${rows}</div>
+        ${isMovie ? `<div class="episode-list">${rows}</div>` : rows}
       </div>`;
       const back = el('btn-library-back');
       if (back) back.addEventListener('click', () => loadLibrarySelection());
@@ -6449,9 +6529,12 @@
       updateClearHistoryButtons(!!(watchEnabled || watchRow), !profile.sync_running);
       const liveStatus = profile.sync_status || '';
       const isHistorySync = profile.sync_running && liveStatus && (liveStatus.toLowerCase().includes('history') || liveStatus.toLowerCase().includes('simkl') || liveStatus.toLowerCase().includes('trakt'));
+      // Backfilled episodes are gap-fills, not new activity — saying so is the
+      // difference between "the import is working" and "you watched 240 things".
+      const reconciled = Number((watchRow && watchRow.items_reconciled) || 0);
       const watchSubtitleLive = isHistorySync
         ? `<span class="status-inline"><span class="spinner"></span><span>${esc(liveStatus)}</span></span>`
-        : esc(watchSubtitle);
+        : `${esc(watchSubtitle)}${reconciled ? ` · ${reconciled} backfilled from Trakt's watched state` : ''}`;
       el('activity-cards').innerHTML = [
           buildActivityCard('Watch History', watchSubtitleLive, watchRow, watchEnabled, 'Imported Unique', 'Fetched', 'Already in PMDB', 'Errors', activityResults.watch_history && activityResults.watch_history.timestamp),
           buildActivityCard('Resume Progress', esc(resumeSubtitle), resumeRow, resumeEnabled, 'Saved', 'Fetched', 'Completed', 'Errors', activityResults.resume_progress && activityResults.resume_progress.timestamp),
@@ -7031,7 +7114,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Signed out. Your server-side profile still exists.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7119,7 +7202,7 @@
         anilist: { selected_statuses: DEFAULT_ANILIST_STATUSES },
         trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
         mdblist: { selected_lists: [] },
-      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
+      }, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 }, {});
       renderEmptyDashboard('Profile deleted. Create or load another profile to continue.');
       credentialsHydrated = false;
       lastStatusRenderKey = '';
@@ -7177,7 +7260,7 @@
       trakt: { sync_watchlist: true, sync_watchlist_movies: true, sync_watchlist_shows: true, sync_liked_lists: false, default_catalogs_initialized: false, selected_lists: [] },
       mdblist: { selected_lists: [] },
     });
-      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
+      const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
     populateForm(draftCreds, draftOptions, {});
     const storedProfileId = localStorage.getItem(PROFILE_KEY);
     if (storedProfileId && !el('profile-id').value.trim()) {

@@ -427,6 +427,123 @@ class TraktClient:
             history = [item for item in history if self._is_history_after(item, since)]
         return history
 
+    def get_watched_state(self, status_callback=None) -> list[dict]:
+        """Return the full watched state as episode/movie rows.
+
+        /sync/history is a *play log*: it is paginated and filtered by
+        start_at, so an incremental run only ever sees plays newer than the
+        cursor and a play missed on an earlier run is never revisited.
+        /sync/watched is the opposite — one unpaginated response carrying every
+        watched episode of every show, grouped season by season. That makes it
+        the only complete answer to "which episodes of this multi-season show
+        have I watched", which is what the reconciliation pass needs.
+
+        It carries only ``last_watched_at`` per episode, never the individual
+        play timestamps, so one row means "this episode has been watched", not
+        "this episode was watched once". Trakt's own play count rides along as
+        ``plays`` for reporting; it cannot be expanded into records, because
+        every copy would carry the same timestamp and PMDB's deduping write
+        would collapse them anyway.
+        """
+        items: list[dict] = []
+        if status_callback:
+            status_callback("Fetching Trakt watched state (movies)…")
+        items.extend(self._get_watched_movies())
+        if status_callback:
+            status_callback(f"Fetching Trakt watched state (shows: {len(items)} rows so far)…")
+        items.extend(self._get_watched_shows())
+        logger.info("Trakt watched state: %d row(s) across movies and episodes", len(items))
+        return items
+
+    @staticmethod
+    def _watched_plays(entry: dict) -> int:
+        try:
+            return max(1, int(entry.get("plays") or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def _get_watched_movies(self) -> list[dict]:
+        self._check_cancelled()
+        raw = self._get("/sync/watched/movies", params={"extended": "full"}) or []
+        if not isinstance(raw, list):
+            return []
+        items: list[dict] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            movie = entry.get("movie")
+            if not isinstance(movie, dict):
+                continue
+            tmdb_id = (movie.get("ids") or {}).get("tmdb")
+            if not tmdb_id:
+                continue
+            watched_at = entry.get("last_watched_at")
+            items.append({
+                "tmdb_id": int(tmdb_id),
+                "media_type": "movie",
+                "watched_at": watched_at,
+                "title": movie.get("title", "Unknown"),
+                "plays": self._watched_plays(entry),
+                "watched_state": True,
+                "cursor_exempt": True,
+            })
+        return items
+
+    def _get_watched_shows(self) -> list[dict]:
+        self._check_cancelled()
+        raw = self._get("/sync/watched/shows", params={"extended": "full"}) or []
+        if not isinstance(raw, list):
+            return []
+        items: list[dict] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            show = entry.get("show")
+            if not isinstance(show, dict):
+                continue
+            tmdb_id = (show.get("ids") or {}).get("tmdb")
+            if not tmdb_id:
+                continue
+            title = show.get("title", "Unknown")
+            show_watched_at = entry.get("last_watched_at")
+            seasons = entry.get("seasons")
+            if not isinstance(seasons, list):
+                continue
+            for season in seasons:
+                if not isinstance(season, dict):
+                    continue
+                try:
+                    season_number = int(season.get("number"))
+                except (TypeError, ValueError):
+                    continue
+                # Season 0 = Trakt specials, matching _normalize_episode_history_entry.
+                if season_number == 0:
+                    continue
+                episodes = season.get("episodes")
+                if not isinstance(episodes, list):
+                    continue
+                for episode in episodes:
+                    if not isinstance(episode, dict):
+                        continue
+                    try:
+                        episode_number = int(episode.get("number"))
+                    except (TypeError, ValueError):
+                        continue
+                    if episode_number == 0:
+                        continue
+                    items.append({
+                        "tmdb_id": int(tmdb_id),
+                        "media_type": "tv",
+                        "season": season_number,
+                        "episode": episode_number,
+                        "watched_at": episode.get("last_watched_at") or show_watched_at,
+                        "title": title,
+                        "plays": self._watched_plays(episode),
+                        "watched_state": True,
+                        "cursor_exempt": True,
+                    })
+        return items
+
     def get_playback_progress(self) -> list[dict]:
         progress: list[dict] = []
         progress.extend(self._get_paginated_playback("/sync/playback/movies", self._normalize_movie_playback_entry))

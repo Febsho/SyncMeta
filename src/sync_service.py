@@ -141,6 +141,10 @@ class SyncStats:
     items_skipped_duplicate: int = 0
     items_skipped_unresolved: int = 0
     items_skipped_fingerprint: int = 0
+    # Episodes written by the Trakt watched-state reconciliation pass — plays
+    # the paginated history log never reported, so they are gap-fills rather
+    # than new activity. Counted separately so the dashboard can say so.
+    items_reconciled: int = 0
     errors: list[str] = field(default_factory=list)
     history_cursor: str = ""
     activities_ts: str = ""  # last-seen source activities timestamp (for freshness skip)
@@ -1818,10 +1822,21 @@ class SyncService:
         )
         cursor = self._config.sync.trakt_history_cursor or ""
         since = None if self._config.sync.full_history_sync or not cursor else cursor
-
+        # /sync/history is a play log read forward from a cursor, so an episode
+        # missed on an earlier run is never revisited. /sync/watched carries the
+        # complete per-episode watched state of every show in one response and
+        # is the only way a partially-imported multi-season show backfills.
+        reconcile = bool(
+            self._config.sync.trakt_reconcile_watched_history
+            or self._config.sync.full_history_sync
+        )
         self._set_status("Fetching Trakt watched history…")
-        _executor = ThreadPoolExecutor(max_workers=min(_ACTIVITY_SOURCE_WORKERS, 2))
+        _executor = ThreadPoolExecutor(max_workers=min(_ACTIVITY_SOURCE_WORKERS, 3))
         f_trakt = _executor.submit(self._trakt.get_watched_history, since=since, status_callback=self._set_status)
+        f_watched = (
+            _executor.submit(self._trakt.get_watched_state, status_callback=self._set_status)
+            if reconcile else None
+        )
         f_pmdb = _executor.submit(self._pmdb.get_watched_history)
         _executor.shutdown(wait=False)
 
@@ -1831,17 +1846,28 @@ class SyncService:
             self._record_error(stats, "fetch", str(exc))
             return stats
 
-        stats.items_fetched = len(items)
-        # Advance the cursor to the latest watched_at seen in this batch.
-        if items:
-            latest = max(
-                (str(item.get("watched_at") or "").strip() for item in items),
-                default="",
-            )
-            stats.history_cursor = latest if latest > cursor else cursor
-        else:
+        watched_rows: list[dict] = []
+        if f_watched is not None:
+            try:
+                watched_rows = f_watched.result()
+            except TraktAuthenticationError as exc:
+                self._record_error(stats, "fetch", str(exc))
+                return stats
+            except Exception as exc:
+                # The incremental import above is still valid without it, so a
+                # failed reconciliation is recorded and skipped, not fatal.
+                self._record_error(
+                    stats, "fetch", f"Trakt watched-state reconciliation failed: {exc}"
+                )
+                watched_rows = []
+
+        stats.items_fetched = len(items) + len(watched_rows)
+        # Advance the cursor to the latest watched_at seen in this batch. Only
+        # the play log may move it: watched-state rows carry last_watched_at,
+        # not per-play stamps, so treating them as cursor input would skip plays.
+        stats.history_cursor = self._latest_history_cursor(items, cursor)
+        if not items and not watched_rows:
             # Nothing new — keep existing cursor and return immediately.
-            stats.history_cursor = cursor
             logger.info("Trakt history: no new events since cursor — skipping PMDB fetch")
             return stats
 
@@ -1889,7 +1915,77 @@ class SyncService:
             status_message="Writing Trakt history to PublicMetaDB",
             total_source=total,
         )
+        # Runs last so it sees the counts the write above just refreshed from
+        # PMDB, and therefore only fills what is genuinely still missing.
+        self._reconcile_trakt_watched_state(watched_rows, existing_counts, stats)
         return stats
+
+    def _reconcile_trakt_watched_state(
+        self,
+        rows: list[dict],
+        existing_counts: dict[str, int],
+        stats: SyncStats,
+    ) -> None:
+        """Write episodes Trakt's watched state has and PublicMetaDB does not.
+
+        These rows carry presence, not plays: /sync/watched reports one
+        last_watched_at per episode, so an episode is written only when PMDB
+        has no record of it at all. A show that is already fully imported
+        therefore writes nothing on the next run, while a partially-imported
+        multi-season anime backfills every season it is missing.
+
+        Rewatch counts stay the play log's job — Trakt's `plays` number has no
+        per-play timestamps behind it, so expanding it here would write records
+        that PMDB's deduping write collapses anyway.
+        """
+        if not rows:
+            return
+
+        self._set_status(f"Reconciling Trakt watched state ({len(rows)} episodes)")
+        total = len(rows)
+        pending_items: list[dict] = []
+        queued_keys: set[str] = set()
+        for index, row in enumerate(rows):
+            self._check_cancelled()
+            if index % 200 == 0:
+                self._set_status(f"Reconciling Trakt watched state ({index}/{total})")
+            item = self._remap_trakt_anime_episode(self._resolve_activity_item(row))
+            key = self._watched_identity_key(item)
+            if not key:
+                stats.items_skipped_unresolved += 1
+                continue
+            stats.items_resolved += 1
+            # The anime remapper can fold two source coordinates onto one PMDB
+            # episode, so a key already queued this pass is a duplicate too.
+            if int(existing_counts.get(key, 0) or 0) > 0 or key in queued_keys:
+                stats.items_skipped_duplicate += 1
+                continue
+            queued_keys.add(key)
+            if self._config.sync.dry_run:
+                existing_counts[key] = 1
+                stats.items_added += 1
+                stats.items_reconciled += 1
+                continue
+            pending_items.append(item)
+
+        if not pending_items:
+            logger.info("Trakt watched-state reconciliation: nothing missing from PublicMetaDB")
+            return
+
+        added_before = stats.items_added
+        self._write_watched_history_items(
+            pending_items,
+            existing_counts,
+            stats,
+            status_message="Backfilling Trakt watched state into PublicMetaDB",
+            total_source=len(pending_items),
+        )
+        backfilled = max(0, stats.items_added - added_before)
+        stats.items_reconciled += backfilled
+        logger.info(
+            "Trakt watched-state reconciliation: backfilled %d episode(s) missing from PublicMetaDB",
+            backfilled,
+        )
 
     def _sync_trakt_resume_progress(self) -> SyncStats:
         stats = SyncStats(
@@ -3524,6 +3620,7 @@ class SyncService:
             aggregate.items_skipped_duplicate += row.items_skipped_duplicate
             aggregate.items_skipped_unresolved += row.items_skipped_unresolved
             aggregate.items_skipped_fingerprint += row.items_skipped_fingerprint
+            aggregate.items_reconciled += row.items_reconciled
             aggregate.errors.extend(list(row.errors))
             for key, value in (row.error_stage_counts or {}).items():
                 aggregate.error_stage_counts[key] = int(aggregate.error_stage_counts.get(key, 0)) + int(value or 0)

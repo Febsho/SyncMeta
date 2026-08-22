@@ -670,6 +670,26 @@ class ProfileStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded["options"]["activity_resume_source"], "off")
 
+    def test_trakt_watched_state_reconciliation_round_trips(self) -> None:
+        """It was declared in SyncConfig but pinned to False everywhere, so the
+        toggle had no way to reach the pipeline."""
+        created = self.store.create_profile("secret", self._trakt_connected_credentials(), {
+            **self.options,
+            "trakt_reconcile_watched_history": True,
+        })
+
+        loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+
+        self.assertTrue(loaded["options"]["trakt_reconcile_watched_history"])
+
+    def test_trakt_watched_state_reconciliation_defaults_off(self) -> None:
+        # It is a second whole-account read per history run, so it opts in.
+        created = self.store.create_profile("secret", self.credentials, self.options)
+
+        loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
+
+        self.assertFalse(loaded["options"]["trakt_reconcile_watched_history"])
+
     def _pair(self) -> dict:
         return {
             "pair_id": "trakt-simkl-1",

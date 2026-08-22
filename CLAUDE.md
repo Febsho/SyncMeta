@@ -264,6 +264,46 @@ are free text until an adapter is looked up, so those go through the same filter
 Render pair ids via `data-` attributes and delegated listeners, never inline
 `onclick`.
 
+**Trakt history is a play log; Trakt watched state is the truth.**
+`/sync/history` is paginated and read forward from `trakt_history_cursor`, so an
+episode missed on an earlier run — an aborted sync, a resolver failure, plays
+scrobbled before the account was connected — is never revisited, and the earlier
+seasons of a long-running show stay permanently absent. `/sync/watched`
+(`TraktClient.get_watched_state`) answers the other question in one unpaginated
+response: every watched episode of every show, season by season.
+`_reconcile_trakt_watched_state` runs it behind
+`options.trakt_reconcile_watched_history` (and always under `full_history_sync`).
+
+Four things this has to keep right:
+
+* **It writes presence, not plays.** `/sync/watched` carries one
+  `last_watched_at` per episode, never the individual play timestamps, so an
+  episode is written only when PMDB has *no* record of it. A fully imported show
+  writes nothing on the next run — there is a regression test on that. Trakt's
+  `plays` count rides along as data and is deliberately not expanded into
+  records: every copy would carry the same timestamp and PMDB's `dedupe=true`
+  write collapses them anyway. Rewatches stay the play log's job.
+  (`trakt_sync_full_watch_counts` is still unwired for exactly this reason.)
+* **It never moves the cursor.** Watched-state rows are `cursor_exempt`;
+  `stats.history_cursor` is computed from the play log alone. A `last_watched_at`
+  far ahead of the cursor would otherwise skip every real play between the two.
+* **It runs last**, after `_write_watched_history_items` has refreshed
+  `existing_counts` from PMDB, so it only fills what is genuinely still missing.
+* **A failed watched-state read is recorded, not fatal** — the incremental
+  import in the same run is still valid.
+
+It is off by default because it is a second whole-account read per history run.
+SIMKL needs no equivalent: `/sync/all-items` already reports per-episode watched
+state, and its multi-season anime problem is aggregate counts, which a different
+endpoint does not solve.
+
+**A season's coverage is only claimed when TMDB supplied the total.**
+`/library/history/title` returns `seasons: [{season, watched, total}]`, and
+`total` stays 0 without a TMDB key — the UI then groups by season and prints the
+count without a bar. Drawing a coverage bar against a guessed episode count is
+worse than drawing none, since the whole point of the view is to show which
+episodes of a multi-season show are *missing*.
+
 **AniList has no watch-history mapping.** It tracks progress per series, not
 individual episode plays, so `AniListAdapter` advertises no history support at
 either end. Do not add one — it would silently write wrong data.

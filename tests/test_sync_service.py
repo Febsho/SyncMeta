@@ -193,8 +193,41 @@ class StubTraktClient:
             {"tmdb_id": 902, "media_type": "tv", "season": 1, "episode": 2, "watched_at": "2026-04-01T13:00:00Z", "title": "Watched Episode"},
         ]
 
+    def get_watched_state(self, status_callback=None) -> list[dict]:
+        return []
+
     def get_playback_progress(self) -> list[dict]:
         return list(self.playback_progress)
+
+
+class StubWatchedStateTraktClient(StubTraktClient):
+    """Play log reports one episode; the watched state knows about three seasons."""
+
+    def __init__(self, watched_state: list[dict] | None = None) -> None:
+        super().__init__()
+        self.watched_state_calls = 0
+        self._watched_state = watched_state if watched_state is not None else [
+            {"tmdb_id": 910, "media_type": "tv", "season": 1, "episode": 1,
+             "watched_at": "2025-01-01T00:00:00Z", "title": "Long Anime",
+             "plays": 1, "watched_state": True, "cursor_exempt": True},
+            {"tmdb_id": 910, "media_type": "tv", "season": 2, "episode": 1,
+             "watched_at": "2025-06-01T00:00:00Z", "title": "Long Anime",
+             "plays": 1, "watched_state": True, "cursor_exempt": True},
+            {"tmdb_id": 910, "media_type": "tv", "season": 3, "episode": 1,
+             "watched_at": "2026-01-01T00:00:00Z", "title": "Long Anime",
+             "plays": 1, "watched_state": True, "cursor_exempt": True},
+        ]
+
+    def get_watched_history(self, since: str | None = None, status_callback=None) -> list[dict]:
+        self.last_history_since = since
+        return [{
+            "tmdb_id": 910, "media_type": "tv", "season": 3, "episode": 1,
+            "watched_at": "2026-01-01T00:00:00Z", "title": "Long Anime",
+        }]
+
+    def get_watched_state(self, status_callback=None) -> list[dict]:
+        self.watched_state_calls += 1
+        return [dict(row) for row in self._watched_state]
 
 
 class StubRepeatedWatchTraktClient(StubTraktClient):
@@ -2205,6 +2238,163 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(watched_stats.items_added, 2)
         self.assertEqual(watched_stats.items_skipped_duplicate, 0)
         self.assertEqual(len(pmdb.watched), 2)
+
+    @staticmethod
+    def _trakt_history_config(**sync_kwargs) -> AppConfig:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="",
+                access_token="",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                remove_missing=False,
+                delete_disabled_lists=False,
+                dry_run=False,
+                media_types=["shows", "movies"],
+                trakt_sync_watched_history=True,
+                **sync_kwargs,
+            ),
+        )
+        config.trakt.client_id = "trakt-client"
+        config.trakt.client_secret = "trakt-secret"
+        config.trakt.access_token = "trakt-token"
+        config.trakt.enabled = True
+        return config
+
+    def test_watched_state_reconciliation_backfills_seasons_the_play_log_never_reported(self) -> None:
+        """The whole point: /sync/history walks forward from a cursor, so the
+        earlier seasons of a multi-season show are invisible to it forever."""
+        config = self._trakt_history_config(trakt_reconcile_watched_history=True)
+        service = SyncService(config)
+        pmdb = StubPMDBClient()
+        trakt = StubWatchedStateTraktClient()
+        service._trakt = trakt
+        service._matcher = StubMatcher()
+        service._pmdb = pmdb
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(trakt.watched_state_calls, 1)
+        self.assertEqual(
+            sorted((row["season"], row["episode"]) for row in pmdb.watched),
+            [(1, 1), (2, 1), (3, 1)],
+        )
+        # S3E1 came from the play log; S1E1 and S2E1 are the backfill.
+        self.assertEqual(watched_stats.items_reconciled, 2)
+        self.assertEqual(watched_stats.items_added, 3)
+
+    def test_watched_state_reconciliation_writes_nothing_on_a_second_run(self) -> None:
+        """Reconciliation is a floor, not plays — a fully imported show must
+        not re-add every episode each time the pass runs."""
+        config = self._trakt_history_config(trakt_reconcile_watched_history=True)
+        pmdb = StubPMDBClient()
+
+        for _ in range(2):
+            service = SyncService(config)
+            service._trakt = StubWatchedStateTraktClient()
+            service._matcher = StubMatcher()
+            service._pmdb = pmdb
+            results = service.run()
+
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+        self.assertEqual(len(pmdb.watched), 3)
+        self.assertEqual(watched_stats.items_added, 0)
+        self.assertEqual(watched_stats.items_reconciled, 0)
+
+    def test_watched_state_is_not_read_unless_reconciliation_is_enabled(self) -> None:
+        """It is a second whole-account read, so it stays off by default."""
+        config = self._trakt_history_config()
+        service = SyncService(config)
+        trakt = StubWatchedStateTraktClient()
+        service._trakt = trakt
+        service._matcher = StubMatcher()
+        service._pmdb = StubPMDBClient()
+
+        service.run()
+
+        self.assertEqual(trakt.watched_state_calls, 0)
+
+    def test_full_history_sync_reconciles_without_the_flag(self) -> None:
+        config = self._trakt_history_config(full_history_sync=True)
+        service = SyncService(config)
+        trakt = StubWatchedStateTraktClient()
+        service._trakt = trakt
+        service._matcher = StubMatcher()
+        service._pmdb = StubPMDBClient()
+
+        service.run()
+
+        self.assertEqual(trakt.watched_state_calls, 1)
+
+    def test_watched_state_rows_never_advance_the_history_cursor(self) -> None:
+        """last_watched_at is not a play timestamp. Letting it move the cursor
+        would skip every real play recorded between the two."""
+        config = self._trakt_history_config(
+            trakt_reconcile_watched_history=True,
+            trakt_history_cursor="2026-01-01T00:00:00Z",
+        )
+        service = SyncService(config)
+        trakt = StubWatchedStateTraktClient(watched_state=[{
+            "tmdb_id": 910, "media_type": "tv", "season": 4, "episode": 1,
+            "watched_at": "2099-01-01T00:00:00Z", "title": "Long Anime",
+            "plays": 1, "watched_state": True, "cursor_exempt": True,
+        }])
+        service._trakt = trakt
+        service._matcher = StubMatcher()
+        service._pmdb = StubPMDBClient()
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(watched_stats.history_cursor, "2026-01-01T00:00:00Z")
+
+    def test_reconciliation_runs_even_when_the_play_log_has_nothing_new(self) -> None:
+        """The cursor early-return used to skip the PMDB read entirely, which
+        would make the backfill unreachable on an up-to-date profile."""
+        class QuietTraktClient(StubWatchedStateTraktClient):
+            def get_watched_history(self, since: str | None = None, status_callback=None) -> list[dict]:
+                self.last_history_since = since
+                return []
+
+        config = self._trakt_history_config(
+            trakt_reconcile_watched_history=True,
+            trakt_history_cursor="2026-05-05T00:00:00Z",
+        )
+        service = SyncService(config)
+        service._trakt = QuietTraktClient()
+        service._matcher = StubMatcher()
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(len(pmdb.watched), 3)
+        self.assertEqual(watched_stats.items_reconciled, 3)
+        self.assertEqual(watched_stats.history_cursor, "2026-05-05T00:00:00Z")
+
+    def test_a_failed_watched_state_read_does_not_lose_the_incremental_import(self) -> None:
+        class BrokenWatchedStateClient(StubWatchedStateTraktClient):
+            def get_watched_state(self, status_callback=None) -> list[dict]:
+                self.watched_state_calls += 1
+                raise RuntimeError("Trakt is down")
+
+        config = self._trakt_history_config(trakt_reconcile_watched_history=True)
+        service = SyncService(config)
+        service._trakt = BrokenWatchedStateClient()
+        service._matcher = StubMatcher()
+        pmdb = StubPMDBClient()
+        service._pmdb = pmdb
+
+        results = service.run()
+        watched_stats = next(item for item in results if item.display_name == "Watch History")
+
+        self.assertEqual(len(pmdb.watched), 1)
+        self.assertEqual(watched_stats.items_reconciled, 0)
+        self.assertTrue(any("reconciliation failed" in error for error in watched_stats.errors))
 
     def test_simkl_anime_history_does_not_backfill_pmdb_external_ids(self) -> None:
         class DirectAnimeSimklClient(StubSimklClient):

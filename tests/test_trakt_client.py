@@ -295,3 +295,115 @@ class TraktClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchedStateSession:
+    """Serves /sync/watched responses; records the paths that were requested."""
+
+    def __init__(self, movies=None, shows=None) -> None:
+        self.paths: list[str] = []
+        self._movies = movies if movies is not None else []
+        self._shows = shows if shows is not None else []
+
+    def request(self, method: str, url: str, timeout: int = 30, **kwargs) -> FakeResponse:
+        self.paths.append(url)
+        payload = self._movies if url.endswith("/sync/watched/movies") else self._shows
+        return FakeResponse(200, "[]", payload)
+
+
+class TraktWatchedStateTests(unittest.TestCase):
+    """`/sync/watched` is the only complete view of a multi-season show.
+
+    The play log at /sync/history is read forward from a cursor, so these
+    tests pin the shape that lets a partially-imported show be backfilled.
+    """
+
+    @staticmethod
+    def _client(session) -> TraktClient:
+        client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))
+        client._session = session
+        return client
+
+    def test_every_season_of_a_show_is_returned_as_episode_rows(self) -> None:
+        session = WatchedStateSession(shows=[{
+            "plays": 38,
+            "last_watched_at": "2026-01-05T20:00:00.000Z",
+            "show": {"title": "Multi Season Anime", "ids": {"tmdb": 4242, "trakt": 9}},
+            "seasons": [
+                {"number": 1, "episodes": [
+                    {"number": 1, "plays": 1, "last_watched_at": "2025-11-01T20:00:00.000Z"},
+                    {"number": 2, "plays": 2, "last_watched_at": "2025-11-02T20:00:00.000Z"},
+                ]},
+                {"number": 3, "episodes": [
+                    {"number": 7, "plays": 1, "last_watched_at": "2026-01-05T20:00:00.000Z"},
+                ]},
+            ],
+        }])
+
+        rows = self._client(session).get_watched_state()
+
+        self.assertEqual(
+            [(row["tmdb_id"], row["season"], row["episode"]) for row in rows],
+            [(4242, 1, 1), (4242, 1, 2), (4242, 3, 7)],
+        )
+        self.assertTrue(all(row["media_type"] == "tv" for row in rows))
+        self.assertTrue(all(row["watched_state"] for row in rows))
+        # These rows must never move the history cursor: last_watched_at is not
+        # a play timestamp, so treating it as one would skip real plays.
+        self.assertTrue(all(row["cursor_exempt"] for row in rows))
+        self.assertEqual(rows[1]["plays"], 2)
+        self.assertEqual(rows[2]["watched_at"], "2026-01-05T20:00:00.000Z")
+
+    def test_specials_and_episode_zero_are_skipped(self) -> None:
+        session = WatchedStateSession(shows=[{
+            "show": {"title": "Specials Show", "ids": {"tmdb": 55}},
+            "seasons": [
+                {"number": 0, "episodes": [{"number": 1, "plays": 1}]},
+                {"number": 1, "episodes": [
+                    {"number": 0, "plays": 1},
+                    {"number": 1, "plays": 1, "last_watched_at": "2026-02-01T10:00:00.000Z"},
+                ]},
+            ],
+        }])
+
+        rows = self._client(session).get_watched_state()
+
+        self.assertEqual([(row["season"], row["episode"]) for row in rows], [(1, 1)])
+
+    def test_episode_without_its_own_timestamp_falls_back_to_the_show(self) -> None:
+        session = WatchedStateSession(shows=[{
+            "last_watched_at": "2026-03-03T09:00:00.000Z",
+            "show": {"title": "No Episode Stamps", "ids": {"tmdb": 77}},
+            "seasons": [{"number": 2, "episodes": [{"number": 4, "plays": 1}]}],
+        }])
+
+        rows = self._client(session).get_watched_state()
+
+        self.assertEqual(rows[0]["watched_at"], "2026-03-03T09:00:00.000Z")
+
+    def test_movies_are_returned_and_entries_without_a_tmdb_id_are_dropped(self) -> None:
+        session = WatchedStateSession(
+            movies=[
+                {"plays": 3, "last_watched_at": "2026-01-01T00:00:00.000Z",
+                 "movie": {"title": "Watched Movie", "ids": {"tmdb": 601}}},
+                {"plays": 1, "movie": {"title": "No TMDB", "ids": {"trakt": 4}}},
+            ],
+            shows=[{"show": {"title": "No TMDB Show", "ids": {"trakt": 5}},
+                    "seasons": [{"number": 1, "episodes": [{"number": 1}]}]}],
+        )
+
+        rows = self._client(session).get_watched_state()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tmdb_id"], 601)
+        self.assertEqual(rows[0]["media_type"], "movie")
+        self.assertEqual(rows[0]["plays"], 3)
+
+    def test_malformed_payloads_do_not_raise(self) -> None:
+        session = WatchedStateSession(
+            movies=["nonsense", {"movie": None}],
+            shows=[{"show": {"ids": {"tmdb": 1}}, "seasons": "not-a-list"},
+                   {"show": {"ids": {"tmdb": 2}}, "seasons": [{"number": "x"}]}],
+        )
+
+        self.assertEqual(self._client(session).get_watched_state(), [])
