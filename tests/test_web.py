@@ -544,6 +544,92 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(data["items"]), 1)
         self.assertEqual(data["items"][0]["id"], 7)
 
+    def test_mdblist_auth_starts_without_a_session(self) -> None:
+        """Someone setting up their first profile has not signed in yet, and
+        this was the only connect flow that refused to run there."""
+        response = self.client.post("/api/mdblist/auth/start", json={
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "redirect_uri": "http://localhost/",
+        })
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("mdblist.com/oauth/authorize/", data["authorize_url"])
+        # The verifier stays server-side; only an opaque handle is handed out,
+        # and it must not be readable by scripts on the page.
+        cookie = response.headers.get("Set-Cookie", "")
+        self.assertIn(web.MDBLIST_FLOW_COOKIE_NAME, cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertNotIn("code_verifier", str(data))
+
+    @patch("web.MdbListClient.exchange_code_for_token")
+    def test_mdblist_auth_without_a_session_returns_the_tokens(self, exchange) -> None:
+        """With no profile there is nowhere to persist, so the tokens go back
+        to the browser to be submitted with the profile — the same shape as
+        Trakt's device check."""
+        exchange.return_value = {
+            "access_token": "mdb-token", "refresh_token": "mdb-refresh", "expires_in": 2592000,
+        }
+        self.client.post("/api/mdblist/auth/start", json={
+            "client_id": "cid", "client_secret": "csecret", "redirect_uri": "http://localhost/",
+        })
+
+        response = self.client.post("/api/mdblist/auth/check", json={
+            "client_id": "cid", "client_secret": "csecret", "code": "the-code",
+        })
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], "approved")
+        self.assertFalse(data["saved"])
+        self.assertEqual(data["access_token"], "mdb-token")
+        self.assertEqual(data["refresh_token"], "mdb-refresh")
+        self.assertTrue(data["access_token_expires_at"])
+
+    @patch("web.MdbListClient.exchange_code_for_token")
+    def test_mdblist_auth_with_a_session_persists_and_withholds_the_token(self, exchange) -> None:
+        exchange.return_value = {"access_token": "mdb-token", "refresh_token": "mdb-refresh"}
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        self.client.post("/api/mdblist/auth/start", json={
+            "client_id": "cid", "client_secret": "csecret", "redirect_uri": "http://localhost/",
+        })
+
+        response = self.client.post("/api/mdblist/auth/check", json={
+            "client_id": "cid", "client_secret": "csecret", "code": "the-code",
+        })
+        data = response.get_json()
+
+        self.assertTrue(data["saved"])
+        # Already stored, so there is no reason to echo it back to the page.
+        self.assertNotIn("access_token", data)
+        stored = web._profile_store.get_private_profile_by_id(
+            profile["profile_id"])["credentials"]["mdblist"]
+        self.assertEqual(stored["access_token"], "mdb-token")
+        self.assertEqual(stored["refresh_token"], "mdb-refresh")
+
+    def test_mdblist_auth_check_without_a_started_flow_is_rejected(self) -> None:
+        """The verifier is the proof the code belongs to this flow, so a code
+        arriving with no pending flow cannot be exchanged."""
+        response = self.client.post("/api/mdblist/auth/check", json={
+            "client_id": "cid", "client_secret": "csecret", "code": "the-code",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("expired", response.get_json()["error"])
+
+    @patch("web.MdbListClient.exchange_code_for_token")
+    def test_a_pending_mdblist_flow_is_single_use(self, exchange) -> None:
+        exchange.return_value = {"access_token": "mdb-token"}
+        self.client.post("/api/mdblist/auth/start", json={
+            "client_id": "cid", "client_secret": "csecret", "redirect_uri": "http://localhost/",
+        })
+        body = {"client_id": "cid", "client_secret": "csecret", "code": "the-code"}
+
+        self.assertEqual(self.client.post("/api/mdblist/auth/check", json=body).status_code, 200)
+        self.assertEqual(self.client.post("/api/mdblist/auth/check", json=body).status_code, 400)
+
     @patch("web.MdbListClient.get_user_lists")
     def test_mdblist_lists_work_for_an_oauth_only_profile(self, mock_get_user_lists) -> None:
         """The list picker demanded an api key, so the users who completed the
@@ -2245,7 +2331,11 @@ class WebTests(unittest.TestCase):
         first_id = first["profile_id"]
         second_id = second["profile_id"]
         token = web._session_store.create(first_id)
-        web._mdblist_pkce_store.put(first_id, "verifier", "http://localhost/callback")
+        # Pending flows are keyed on an opaque flow id now, with the owning
+        # profile recorded alongside so deletion can still purge them.
+        web._mdblist_pkce_store.put(
+            "flow-abc", "verifier", "http://localhost/callback", profile_id=first_id,
+        )
 
         library_path = Path(self.tmpdir.name) / "library" / f"{first_id}.json"
         library = LibraryStore(library_path)
@@ -2265,7 +2355,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(web._profile_store._profiles, {})
         self.assertFalse(library_path.exists())
         self.assertIsNone(web._session_store.get_profile_id(token))
-        self.assertIsNone(web._mdblist_pkce_store.take(first_id))
+        self.assertIsNone(web._mdblist_pkce_store.take("flow-abc"))
         self.assertNotIn(first_id, web._library_stores)
         self.assertNotIn(second_id, web._profile_store._profiles)
 

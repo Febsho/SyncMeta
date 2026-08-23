@@ -1694,6 +1694,10 @@
     let traktSyncAllLikedLists = false;
     let traktDefaultCatalogsInitialized = false;
     let traktAccessTokenExpiresAt = '';
+    // MDBList OAuth completed before a profile existed: there was nowhere to
+    // persist the tokens server-side, so they are held here and submitted with
+    // the profile, the same way the Trakt device flow fills its token fields.
+    let mdblistPendingAuth = null;
     let mdblistCatalogTab = 'my-lists';
     let mdblistLists = [];
     let mdblistDiscoverLists = [];
@@ -1912,15 +1916,27 @@
         }
         // Stored server-side the moment the exchange succeeded, because the
         // code is single-use; reflect that so it reads like any saved secret.
+        // With no profile yet there was nowhere to store it, so the tokens come
+        // back here instead and ride along on the next save.
+        if (!result.data.saved && result.data.access_token) {
+          mdblistPendingAuth = {
+            access_token: result.data.access_token,
+            refresh_token: result.data.refresh_token || '',
+            access_token_expires_at: result.data.access_token_expires_at || '',
+          };
+        }
         secretState.mdblist = Object.assign({}, secretState.mdblist, {
           access_token_saved: true, client_secret_saved: true,
         });
         el('mdblist-auth-box').classList.add('hidden');
         el('mdblist-auth-code').value = '';
         mdblistAuthUrl = '';
-        setMdbListAuthStatus('MDBList connected. You can now sync into MDBList.', false);
+        setMdbListAuthStatus(result.data.saved
+          ? 'MDBList connected. You can now sync into MDBList.'
+          : 'MDBList connected. Save the profile to keep it.', false);
         updateDots();
-        showToast('MDBList connected.', false, true);
+        showToast(result.data.saved ? 'MDBList connected.' : 'MDBList connected. Save the profile.', false, true);
+        saveDraft();
         // Writability changed, so the pair editor's capability report is stale.
         fetchPairs();
       } catch {
@@ -2316,12 +2332,12 @@
           default_catalogs_initialized: traktDefaultCatalogsInitialized,
           selected_lists: normalizeTraktSelectedLists(traktSelectedLists),
         },
-        mdblist: {
+        mdblist: Object.assign({
           api_key: el('mdblist-api-key').value.trim(),
           client_id: el('mdblist-client-id').value.trim(),
           client_secret: el('mdblist-client-secret').value.trim(),
           selected_lists: normalizeMdbListSelectedLists(mdblistSelectedLists),
-        },
+        }, mdblistPendingAuth || {}),
         pmdb: { api_key: el('pmdb-api-key').value.trim() },
         tmdb: { api_key: el('tmdb-api-key').value.trim() },
       };
@@ -6753,6 +6769,8 @@
         }
 
         const profile = result.data.profile;
+        // The tokens are on the profile now, so stop carrying them in memory.
+        mdblistPendingAuth = null;
         populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
         renderDashboard(profile);
         clearDraftDirty();

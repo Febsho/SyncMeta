@@ -606,9 +606,17 @@ prefers the bearer and never sends both. OAuth is **authorization code + PKCE**
 Authorization is on the site host (`mdblist.com/oauth/authorize/`), token
 exchange on the API host, and **every OAuth path needs its trailing slash** or
 the request fails. Tokens last 30 days and refresh. The PKCE verifier is held
-server-side in `PendingPkceStore` keyed by profile and is single-use: it is the
-proof the code belongs to the flow that started it, so it must never round-trip
-through the browser. `/api/mdblist/auth/check` persists via
+server-side in `PendingPkceStore` and is single-use: it is the proof the code
+belongs to the flow that started it, so it must never round-trip through the
+browser. It is keyed on a per-flow id carried in an **http-only cookie**, not on
+the profile — the connect flow has to work before a profile exists, and keying
+it on the profile made MDBList the only service that could not be connected
+during first-time setup (Trakt's device flow always could). The owning profile
+id rides along in the entry purely so `clear_profile` can still purge a deleted
+profile's unfinished flows. Like Trakt's device check, `/auth/check` persists
+straight to the profile when there is a session and otherwise returns the tokens
+for the browser to submit with the profile — and withholds them from the
+response whenever it did persist them. `/api/mdblist/auth/check` persists via
 `update_mdblist_auth` the moment the exchange succeeds — the AniList lesson, the
 code is single-use and short-lived.
 

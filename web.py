@@ -304,10 +304,18 @@ class ProfileLogHandler(logging.Handler):
 
 
 class PendingPkceStore:
-    """Short-lived PKCE verifiers, held server-side per profile.
+    """Short-lived PKCE verifiers, held server-side and keyed per flow.
 
     The verifier is the proof that the code being exchanged belongs to the
     request that started the flow, so it must never travel through the browser.
+    Only an opaque flow id does, in an http-only cookie.
+
+    Keyed on that flow id rather than on the profile, because the connect flow
+    has to work before a profile exists — during first-time setup there is no
+    session yet, and Trakt's device flow has always worked there. The owning
+    profile id rides along (empty when anonymous) purely so a deleted profile
+    can still have its unfinished flows purged.
+
     In memory and best-effort across a restart, like the session revocation set:
     losing one only means the user presses Connect again.
     """
@@ -315,34 +323,40 @@ class PendingPkceStore:
     def __init__(self, ttl_seconds: int = 900):
         self._ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
-        self._pending: dict[str, tuple[str, str, float]] = {}
+        self._pending: dict[str, tuple[str, str, str, float]] = {}
 
-    def put(self, profile_id: str, verifier: str, redirect_uri: str) -> None:
+    def put(self, flow_id: str, verifier: str, redirect_uri: str, profile_id: str = "") -> None:
         with self._lock:
             self._prune_locked()
-            self._pending[profile_id] = (verifier, redirect_uri, time.time() + self._ttl_seconds)
+            self._pending[flow_id] = (
+                verifier, redirect_uri, str(profile_id or ""), time.time() + self._ttl_seconds,
+            )
 
-    def take(self, profile_id: str) -> tuple[str, str] | None:
+    def take(self, flow_id: str) -> tuple[str, str] | None:
         """Single use: an authorization code may only be exchanged once."""
+        flow_id = str(flow_id or "").strip()
+        if not flow_id:
+            return None
         with self._lock:
             self._prune_locked()
-            entry = self._pending.pop(profile_id, None)
+            entry = self._pending.pop(flow_id, None)
         if not entry:
             return None
-        verifier, redirect_uri, _expires = entry
+        verifier, redirect_uri, _profile_id, _expires = entry
         return verifier, redirect_uri
 
-    def clear(self, profile_id: str) -> None:
-        """Discard an unfinished authorization flow for a deleted profile."""
+    def clear_profile(self, profile_id: str) -> None:
+        """Discard unfinished authorization flows for a deleted profile."""
         profile_id = str(profile_id or "").strip()
         if not profile_id:
             return
         with self._lock:
-            self._pending.pop(profile_id, None)
+            for key in [k for k, entry in self._pending.items() if entry[2] == profile_id]:
+                self._pending.pop(key, None)
 
     def _prune_locked(self) -> None:
         now = time.time()
-        for key in [k for k, (_v, _r, exp) in self._pending.items() if exp <= now]:
+        for key in [k for k, entry in self._pending.items() if entry[-1] <= now]:
             self._pending.pop(key, None)
 
 
@@ -828,6 +842,33 @@ def _cookie_secure() -> bool:
     return request.is_secure or forwarded_proto == "https"
 
 
+MDBLIST_FLOW_COOKIE_NAME = "syncmeta_mdblist_flow"
+MDBLIST_FLOW_TTL_SECONDS = 900
+
+
+def _with_mdblist_flow_cookie(response, flow_id: str):
+    """Hand the browser an opaque handle to its pending PKCE verifier.
+
+    http-only on purpose: the page never needs to read it, and keeping it out
+    of JavaScript keeps the handle from being scraped the way a value returned
+    in the JSON body could be.
+    """
+    response.set_cookie(
+        MDBLIST_FLOW_COOKIE_NAME,
+        flow_id,
+        max_age=MDBLIST_FLOW_TTL_SECONDS,
+        httponly=True,
+        samesite="Lax",
+        secure=_cookie_secure(),
+    )
+    return response
+
+
+def _clear_mdblist_flow_cookie(response):
+    response.delete_cookie(MDBLIST_FLOW_COOKIE_NAME)
+    return response
+
+
 def _with_session_cookie(response, session_token: str):
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -1116,7 +1157,7 @@ def _purge_profile_runtime_data(profile_ids: list[str]) -> None:
     for profile_id in profile_ids:
         _session_store.destroy_profile_sessions(profile_id)
         _profile_log_store.clear(profile_id)
-        _mdblist_pkce_store.clear(profile_id)
+        _mdblist_pkce_store.clear_profile(profile_id)
         with _library_stores_lock:
             store = _library_stores.pop(profile_id, None)
         library_path = (
@@ -2201,20 +2242,23 @@ def api_mdblist_auth_start():
     if not redirect_uri:
         return _json_error("A redirect URL is required", 400)
 
-    profile_id = _current_profile_id()
-    if not profile_id:
-        return _json_error("Sign in before connecting MDBList", 401)
+    # No session required, matching Trakt's device flow: someone setting up
+    # their first profile has not signed in yet, and demanding it here made
+    # MDBList the only service that could not be connected during setup.
+    profile_id = _current_profile_id() or ""
+    flow_id = secrets.token_urlsafe(32)
 
     verifier, challenge = MdbListClient.generate_pkce_pair()
     # The verifier never goes to the browser: it is the proof that the code
-    # being exchanged belongs to the request that started this flow.
-    _mdblist_pkce_store.put(profile_id, verifier, redirect_uri)
+    # being exchanged belongs to the request that started this flow. Only the
+    # opaque flow id travels, in an http-only cookie.
+    _mdblist_pkce_store.put(flow_id, verifier, redirect_uri, profile_id=profile_id)
 
     client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
-    return jsonify({
+    return _with_mdblist_flow_cookie(jsonify({
         "authorize_url": client.build_authorize_url(redirect_uri, challenge),
         "redirect_uri": redirect_uri,
-    })
+    }), flow_id)
 
 
 @app.route("/api/mdblist/auth/check", methods=["POST"])
@@ -2237,11 +2281,9 @@ def api_mdblist_auth_check():
     if not client_secret:
         return _json_error("MDBList client secret is required", 400)
 
-    profile_id = _current_profile_id()
-    if not profile_id:
-        return _json_error("Sign in before connecting MDBList", 401)
+    profile_id = _current_profile_id() or ""
 
-    pending = _mdblist_pkce_store.take(profile_id)
+    pending = _mdblist_pkce_store.take(request.cookies.get(MDBLIST_FLOW_COOKIE_NAME) or "")
     if not pending:
         return _json_error(
             "That authorization has expired", 400,
@@ -2273,23 +2315,35 @@ def api_mdblist_auth_check():
     except (TypeError, ValueError):
         expires_at = ""
 
-    # Persisted immediately: the code is single-use, so losing it to an
-    # unsaved form would mean starting the whole flow over.
-    saved = False
-    try:
-        _profile_store.update_mdblist_auth(
-            profile_id,
-            client_id=client_id,
-            client_secret=client_secret,
-            access_token=access_token,
-            refresh_token=str(payload.get("refresh_token", "")).strip(),
-            access_token_expires_at=expires_at,
-        )
-        saved = True
-    except KeyError:
-        saved = False
+    refresh_token = str(payload.get("refresh_token", "")).strip()
 
-    return jsonify({"status": "approved", "saved": saved, "scope": payload.get("scope", "")})
+    # Persisted immediately when there is a profile to persist to: the code is
+    # single-use, so losing it to an unsaved form would mean starting the whole
+    # flow over. Without a session there is nowhere to write yet, so the tokens
+    # go back to the browser to be submitted with the profile — the same shape
+    # as Trakt's device check, and the reason this endpoint no longer 401s.
+    saved = False
+    if profile_id:
+        try:
+            _profile_store.update_mdblist_auth(
+                profile_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                access_token_expires_at=expires_at,
+            )
+            saved = True
+        except KeyError:
+            saved = False
+
+    response = {"status": "approved", "saved": saved, "scope": payload.get("scope", "")}
+    if not saved:
+        response["access_token"] = access_token
+        response["refresh_token"] = refresh_token
+        response["access_token_expires_at"] = expires_at
+
+    return _clear_mdblist_flow_cookie(jsonify(response))
 
 
 @app.route("/api/trakt/device/start", methods=["POST"])
