@@ -11047,7 +11047,16 @@
           if (!pair) return;
           const chosen = new Set(pair.source_lists || []);
           const shown = pairVisibleListEntries(pair);
-          shown.forEach(entry => chosen.add(entry.key));
+          // "Library — all titles" is a broad catalog source. Selecting it
+          // alongside the concrete watchlist used to make the broad source win
+          // and fill a native target watchlist with watched/collected titles.
+          // Select the exact Library sections when they are visible; users can
+          // still choose All titles explicitly for a catalog route.
+          const hasConcreteLibrarySection = pair.source === 'library' && shown.some(entry =>
+            String(entry.key || '').startsWith('section:') && entry.key !== 'section:all');
+          shown.forEach(entry => {
+            if (!(hasConcreteLibrarySection && entry.key === 'section:all')) chosen.add(entry.key);
+          });
           pair.source_lists = Array.from(chosen);
           if (!(pair.categories || []).length) {
             const categories = new Set();

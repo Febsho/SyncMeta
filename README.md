@@ -1,11 +1,11 @@
 # SyncMeta
 
-[![Deploy to Docker](https://github.com/Febsho/SyncMeta-for-PublicMetaDB/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta-for-PublicMetaDB/actions/workflows/docker-publish.yml)
+[![Deploy to Docker](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Self-hosted web app that keeps your watchlists, watch history and resume
-progress in [PublicMetaDB](https://publicmetadb.com) up to date from SIMKL,
-AniList, Trakt and MDBList.
+Self-hosted web app for synchronizing watchlists, collections, custom lists,
+watch history and resume progress between SIMKL, Trakt, AniList, MDBList,
+[PublicMetaDB](https://publicmetadb.com), and a local Library.
 
 You run it in Docker, open it in a browser, connect your accounts, and it syncs
 in the background.
@@ -13,8 +13,8 @@ in the background.
 ## Quick start
 
 ```bash
-git clone https://github.com/Febsho/SyncMeta-for-PublicMetaDB
-cd SyncMeta-for-PublicMetaDB
+git clone https://github.com/Febsho/SyncMeta.git
+cd SyncMeta
 cp .env.example .env
 docker compose up -d syncmeta
 ```
@@ -24,23 +24,24 @@ Open `http://127.0.0.1:8080` and:
 1. Enter a password and click **Save Profile**. You get a profile UUID back —
    copy it and keep it with the password. Together they are the only way back
    into the profile.
-2. In **Settings -> Connections**, paste your PublicMetaDB API key, then connect
-   SIMKL, Trakt, AniList or MDBList.
-3. In **Sync**, add a **pair**: pick a source service, a target service, and what
-   to copy. The built-in PublicMetaDB pipeline is on the same screen below it.
-4. On the **Dashboard**, click **Dry Run** to preview, then run it.
+2. In **Settings -> Connections**, connect the services you want to use. A
+   PublicMetaDB connection is optional; the local Library is always available.
+3. In **Settings -> Sync routes**, choose a source, a destination, and the
+   content to synchronize. Quick setup can create several routes to one target.
+4. Click **Preview** to perform a dry run, then save and run the routes.
 
-After that it runs on its own every 12 hours.
+New routes are manual by default. Enable automatic sync and choose an interval
+on each route when you want it to run in the background.
 
 ## What it does
 
-**Sync pairs.** The main way to sync: a pair copies items between any two
-services. It is one-way or two-way, chooses what happens when an item disappears
-from the source (never remove, remove only what this pair added, or mirror the
-source exactly), and can run on its own schedule with a minimum interval of 12
-hours. Where the target can create lists — PublicMetaDB and Trakt — a pair also
-chooses whether the lists it creates are public or private; a list that already
-exists keeps whatever you set on the service itself.
+**Sync routes.** A route copies items directly between any two compatible
+services; PublicMetaDB is a normal source or destination, not a required hub. A
+route can be one-way or two-way, chooses what happens when an item disappears
+from one side (never remove, remove only what this route added, or mirror the
+source exactly), and has its own automatic schedule. Where a target can create
+lists, the route can select the destination and its initial visibility. An
+existing list keeps the visibility configured on the service itself.
 
 For SIMKL → Trakt, Plan to Watch maps to Trakt's native watchlist. Watching,
 Completed, On Hold and Dropped are kept in separate Trakt lists that SyncMeta
@@ -48,48 +49,64 @@ creates or reuses, rather than being flattened into Trakt Collection.
 
 | Service | Reads | Writes |
 |---|---|---|
-| SIMKL | Watch statuses for shows, movies and anime; watch history; resume | Watchlist, history and collection |
-| Trakt | Watchlist, collection, history, your lists, liked lists, resume | Watchlist, history, collection and personal lists |
-| AniList | Lists by status | only with an access token |
-| MDBList | Your lists and public lists, watchlist, collection, watch history | yes, with an API key or OAuth |
-| PublicMetaDB | Watchlist, lists, collection, watch history and resume | the same |
-| Library (local) | All titles, watchlist, collection, watch history and resume | the same, always |
+| SIMKL | Watch statuses for shows, movies and anime; history; resume | Watchlist, history and collection |
+| Trakt | Watchlist, collection, history, personal and liked lists; resume | Watchlist, history, collection and personal lists |
+| AniList | Status lists, custom lists and activity-derived history | Status lists and progress/history with an access token |
+| MDBList | Watchlist, collection, history, account lists and public lists | Watchlist, collection, history and account lists |
+| PublicMetaDB | Watchlist, Picks, collection, custom lists, history and resume | The same |
+| Library (local) | All titles, watchlist, collection, history and resume | The same, always |
 
-**Watch history and resume progress.** Both are normal pair categories. Resume
+The source-list picker loads each provider's actual lists, not only its default
+watchlist. Small catalogs appear as direct choices; larger catalogs can be
+filtered in the picker. PublicMetaDB's native **Watchlist** and **Picks** lists
+are always exposed even when its generic list endpoint omits them.
+
+**Watch history and resume progress.** Both are normal route categories. Resume
 can be read from SIMKL, Trakt, PublicMetaDB or Library, and written to
-PublicMetaDB or Library. The pair editor only offers directions that both ends
+PublicMetaDB or Library. The route editor only offers directions that both ends
 actually support.
 
-**MDBList OAuth.** An API key is enough to read. To sync *into* MDBList — its
-watchlist, collection, watch history, or one of your static lists — create an app
-at [mdblist.com/developer](https://mdblist.com/developer/), paste the client id
-and secret in Connections, set the shown Redirect URL on your MDBList app, then
-press Connect. MDBList marks its sync API as beta, so preview with a dry run
-before trusting a real run.
+**MDBList OAuth.** An API key is enough to read and may also provide write
+access. For OAuth, create an app at
+[mdblist.com/developer](https://mdblist.com/developer/), paste the client id and
+secret in Connections, and set the exact Redirect URL shown by SyncMeta on the
+MDBList app. Press **Connect MDBList**, approve with **YES**, and the browser
+returns to SyncMeta to finish the connection automatically; there is no code to
+copy. MDBList marks its sync API as beta, so preview with a dry run before
+trusting a real run.
 
-**The PublicMetaDB pipeline.** The original built-in sync, still running and
-unchanged: every connected service feeds PublicMetaDB, and for each one you pick
-which lists or statuses to send, whether entries may be removed again, and
-whether they are public or private. A pair can express the same thing, so new
-setups are better served by one — but nothing about an existing pipeline
-changed, and it sits below the pairs on the Sync screen.
+**Provider-neutral behavior.** Scheduling, removal rules, watch history and
+resume progress belong to each route rather than to a PublicMetaDB-only
+pipeline. Older profile data is still understood and converted for
+compatibility, but new configuration happens entirely through Sync routes.
 
 **Anime matching.** Anime is matched across AniList, MAL, SIMKL, TMDB and IMDB
 using the Fribb anime-lists data, with sequel seasons resolved back to the root
 series. Anything it cannot match with confidence is listed as unresolved for you
 to map by hand rather than guessed at.
 
-**Library.** SyncMeta's own local store, and a sync target like any other
-service — point every service at it once and any other pair can read from it
-without touching a remote API again. It holds **one entry per series with the
+**Library.** SyncMeta's own local store, and a sync source or target like any
+other service — point every service at it once and any other route can read from
+it without touching a remote API again. It holds **one entry per series with the
 seasons inside it**, the shape Trakt and TVDB use, which is what makes SIMKL's
 per-season anime entries and AniList's per-cour entries land on the same row
 instead of three. Filter by **movies, shows, anime and anime films** (anime is
 tracked as a flag on the TMDB type, so an anime film is a film), by watchlist /
-collection / watched, or search by title. Click a title to see its seasons and
-exactly which episodes are watched. Posters, titles and episode names need a
-free TMDB API key; without one it still works and shows ids and episode numbers.
-The PublicMetaDB browser is still there on its own tab.
+collection / watched / resume, search by title, and sort or page through large
+libraries. Click a title to see its seasons and exactly which episodes are
+watched. Posters, titles and episode names need a free TMDB API key; without one
+it still works and shows ids and episode numbers.
+
+The same Library page can browse the connected SIMKL, Trakt, AniList, MDBList
+and PublicMetaDB accounts directly. Their native feeds and service lists are
+available as separate choices, including AniList custom lists and PublicMetaDB
+Picks. Remote results support search, sorting and pagination, and AniList
+episode activity is grouped into one series card instead of repeated cards.
+
+**Dashboard.** The sync graph is built from the saved routes, groups routes by
+destination, links to provider details, and can be collapsed when you do not
+want to see it. Live status, recent activity and issues remain visible while a
+background run is in progress.
 
 **Diagnostics.** Per-list results, row-level errors, failed and unresolved
 samples, timings, and the last 25 detailed run records. A dry run previews
@@ -98,8 +115,8 @@ everything without writing.
 **Connection health.** The Connections screen verifies every configured
 provider with a read-only request, reports read/write capability and the last
 check time, and offers the appropriate reconnect, edit, or retry action. The
-dashboard shows whether PublicMetaDB, a readable source, and configured sync
-pairs are ready before you start a run.
+dashboard shows whether the services required by each configured route are
+ready before you start a run.
 
 **Admin page.** Set `ADMIN_PASSWORD` to enable `/admin`: profile overview, queue
 state, API request counters, anime cache repair and anime mapping refresh.
@@ -124,10 +141,7 @@ on a small server.
 
 | Sync | Default | Minimum |
 |---|---:|---:|
-| Lists | automatic, every 12h | 6h |
-| Each sync pair | manual | 12h when automatic |
-| Watch history | manual | 24h |
-| Resume progress | manual | 24h |
+| Each sync route | manual | 12h when automatic |
 
 Automatic runs are staggered by a per-profile jitter so profiles do not all
 start at once. Manual sync and dry run are always immediate.
@@ -303,8 +317,10 @@ pip install --ignore-installed "cryptography>=42,<44"
 - **Expired tokens.** Reconnect that service in Settings -> Connections.
 - **PublicMetaDB write errors.** Latest Sync Results -> Details, or Sync History
   -> Details, for the row-level error.
-- **Empty Library.** Add a TMDB API key in Settings -> Connections for titles and
-  posters.
+- **Empty local Library.** Add and run a route with **Library** as its target.
+  A TMDB API key is optional and only enriches titles, posters and episodes.
+- **A provider list is missing.** Check that the account is connected, refresh
+  the Library tab, and confirm the credential can read private/account lists.
 
 ## License
 

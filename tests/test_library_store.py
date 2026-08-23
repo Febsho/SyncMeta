@@ -245,6 +245,19 @@ class LibraryAdapterTests(unittest.TestCase):
         self.adapter.add(CATEGORY_COLLECTION, [{"media_type": "movie", "tmdb_id": "2", "title": "x"}])
         self.assertEqual(len(self.adapter.fetch(CATEGORY_WATCHLIST, ["section:all"])), 1)
 
+    def test_explicit_watchlist_wins_over_all_titles_source(self) -> None:
+        planned = {"media_type": "movie", "tmdb_id": "1", "title": "Planned"}
+        watched = {"media_type": "movie", "tmdb_id": "2", "title": "Watched"}
+        self.adapter.add(CATEGORY_WATCHLIST, [planned])
+        self.adapter.add(CATEGORY_HISTORY, [watched])
+
+        rows = self.adapter.fetch(
+            CATEGORY_WATCHLIST,
+            ["section:all", "section:watchlist", "section:history"],
+        )
+
+        self.assertEqual([row["tmdb_id"] for row in rows], ["1"])
+
     def test_resume_writes_go_through_resume_state(self) -> None:
         item = {"media_type": "tv", "tmdb_id": "1429", "season": 1, "episode": 3,
                 "title": "AoT", "position_ms": 12_000, "runtime_ms": 24_000}

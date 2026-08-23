@@ -1630,9 +1630,16 @@ class LibraryAdapter(ProviderAdapter):
         selected = [str(value).strip() for value in (source_lists or []) if str(value).strip()]
         if selected:
             wanted = f"section:{category}"
+            # `section:all` is a broad catalog shortcut, not another name for
+            # Plan to Watch.  When the real category section is selected too,
+            # it must win; otherwise a route containing both "Library — all
+            # titles" and "Library watchlist" sends every watched/collected
+            # title into a target's native watchlist.
+            if wanted in selected:
+                return category
             if category == CATEGORY_WATCHLIST and "section:all" in selected:
                 return "all"
-            return category if wanted in selected else None
+            return None
         return category
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
