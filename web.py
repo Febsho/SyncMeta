@@ -64,6 +64,7 @@ from src.anilist_client import (
 )
 from src.matcher import ItemMatcher
 from src.mdblist_client import MdbListClient
+from src import fribb_client
 from src.publicmetadb_client import PublicMetaDBClient
 from src.profile_store import ProfileStore, merge_credentials, normalize_credentials, normalize_profile_options
 from src.simkl_client import SimklClient
@@ -3366,7 +3367,12 @@ def api_profile_library_entry():
         return _json_error("Not in your library", 404)
 
     watched = entry.get("watched") or {}
+    tmdb_id = entry.get("tmdb_id")
+    anime_segments = {}
+    if entry.get("media_type") != "movie" and str(tmdb_id or "").strip().isdigit():
+        anime_segments = _anime_library_season_segments(int(tmdb_id))
     watched_by_season: dict[int, dict[int, str]] = {}
+    watched_source_seasons: set[int] = set()
     for slot, watched_at in watched.items():
         season_text, _, episode_text = str(slot).partition("x")
         try:
@@ -3374,7 +3380,15 @@ def api_profile_library_entry():
             episode_number = int(episode_text)
         except (TypeError, ValueError):
             continue
-        watched_by_season.setdefault(season_number, {})[episode_number] = watched_at
+        watched_source_seasons.add(season_number)
+        remapped = _remap_library_anime_episode(
+            {"season": season_number, "episode": episode_number}, anime_segments,
+        )
+        logical_season = int(remapped["season"])
+        logical_episode = int(remapped["episode"])
+        current = watched_by_season.setdefault(logical_season, {}).get(logical_episode, "")
+        if str(watched_at or "") > str(current or ""):
+            watched_by_season[logical_season][logical_episode] = watched_at
 
     row = _library_entry_row(entry)
     credentials = normalize_credentials(private_profile.get("credentials"))
@@ -3399,7 +3413,6 @@ def api_profile_library_entry():
     providers.sort(key=lambda item: (item.get("provider") == "pmdb", str(item.get("label") or "")))
 
     seasons = []
-    tmdb_id = entry.get("tmdb_id")
     if entry.get("media_type") == "movie":
         seasons.append({
             "season": 0,
@@ -3413,27 +3426,52 @@ def api_profile_library_entry():
             }],
         })
     else:
-        known_seasons = sorted({
-            *(int(number) for number in (entry.get("seasons") or {}) if str(number).lstrip("-").isdigit()),
-            *watched_by_season.keys(),
-        })
         client = None
         if tmdb_key and str(tmdb_id or "").strip().isdigit():
             try:
                 client = TmdbClient(tmdb_key)
             except Exception:
                 client = None
-        for season_number in known_seasons:
-            # get_season_episodes returns {episode_number: {...}} — one request
-            # per season, not per episode.
-            episodes_meta: dict[int, dict] = {}
-            if client is not None:
+        episodes_meta_by_season: dict[int, dict[int, dict]] = {}
+        source_seasons = {
+            *(int(number) for number in (entry.get("seasons") or {}) if str(number).lstrip("-").isdigit()),
+            *watched_source_seasons,
+            *anime_segments.keys(),
+        }
+        if client is not None:
+            for source_season in sorted(source_seasons):
                 try:
-                    episodes_meta = client.get_season_episodes(int(tmdb_id), season_number) or {}
+                    source_meta = client.get_season_episodes(int(tmdb_id), source_season) or {}
                 except TmdbError as exc:
                     tmdb_error = tmdb_error or str(exc)
+                    continue
                 except Exception:
                     logger.debug("Library detail: TMDB season fetch failed", exc_info=True)
+                    continue
+                for source_episode, meta in source_meta.items():
+                    remapped = _remap_library_anime_episode(
+                        {"season": source_season, "episode": source_episode}, anime_segments,
+                    )
+                    episodes_meta_by_season.setdefault(int(remapped["season"]), {})[
+                        int(remapped["episode"])
+                    ] = meta
+
+        entry_seasons = set()
+        for number in (entry.get("seasons") or {}):
+            if not str(number).lstrip("-").isdigit():
+                continue
+            source_season = int(number)
+            remapped = _remap_library_anime_episode(
+                {"season": source_season, "episode": 1}, anime_segments,
+            )
+            entry_seasons.add(int(remapped["season"]))
+        known_seasons = sorted({
+            *entry_seasons,
+            *watched_by_season.keys(),
+            *episodes_meta_by_season.keys(),
+        })
+        for season_number in known_seasons:
+            episodes_meta = episodes_meta_by_season.get(season_number, {})
             season_watched = watched_by_season.get(season_number, {})
             episodes = []
             for number, meta in sorted(episodes_meta.items()):
@@ -3627,6 +3665,76 @@ def _normalized_history_entries(pmdb: PublicMetaDBClient) -> list[dict]:
     return entries
 
 
+def _anime_library_season_segments(tmdb_id: int) -> dict[int, list[dict]]:
+    """Map one TMDB season's absolute anime numbering back to logical seasons.
+
+    TMDB sometimes keeps several anime cours/seasons in one season and numbers
+    them continuously. Fribb carries both that TMDB season and the TVDB/logical
+    season plus the absolute TMDB offset, which is enough to split the Library
+    view without changing the canonical root TMDB identity used for syncing.
+    """
+    try:
+        mappings = fribb_client.lookup_all_by_tmdb(int(tmdb_id))
+    except Exception:
+        logger.debug("Library anime mapping lookup failed for TMDB %s", tmdb_id, exc_info=True)
+        return {}
+
+    grouped: dict[int, dict[int, int]] = {}
+    for mapping in mappings or []:
+        season_data = mapping.get("season") if isinstance(mapping.get("season"), dict) else {}
+        offset_data = mapping.get("episode_offset") if isinstance(mapping.get("episode_offset"), dict) else {}
+        try:
+            tmdb_season = int(season_data.get("tmdb"))
+            logical_season = int(season_data.get("tvdb"))
+            offset = int(offset_data.get("tmdb") or 0)
+        except (TypeError, ValueError):
+            continue
+        if tmdb_season < 0 or logical_season <= 0 or offset < 0:
+            continue
+        # Split cours can share one logical season. In that case the earliest
+        # offset is the base for the season rather than a new reset point.
+        current = grouped.setdefault(tmdb_season, {}).get(logical_season)
+        if current is None or offset < current:
+            grouped[tmdb_season][logical_season] = offset
+
+    result: dict[int, list[dict]] = {}
+    for tmdb_season, by_logical_season in grouped.items():
+        if len(by_logical_season) < 2:
+            continue
+        result[tmdb_season] = [
+            {"season": logical_season, "offset": offset}
+            for logical_season, offset in sorted(by_logical_season.items(), key=lambda item: item[1])
+        ]
+    return result
+
+
+def _remap_library_anime_episode(entry: dict, segments: dict[int, list[dict]]) -> dict:
+    try:
+        tmdb_season = int(entry.get("season"))
+        tmdb_episode = int(entry.get("episode"))
+    except (TypeError, ValueError):
+        return entry
+    candidates = segments.get(tmdb_season) or []
+    if not candidates or tmdb_episode <= 0:
+        return entry
+    chosen = candidates[0]
+    for candidate in candidates:
+        if tmdb_episode > int(candidate["offset"]):
+            chosen = candidate
+        else:
+            break
+    logical_episode = tmdb_episode - int(chosen["offset"])
+    if logical_episode <= 0:
+        return entry
+    return {
+        **entry,
+        "season": int(chosen["season"]),
+        "episode": logical_episode,
+        "_tmdb_season": tmdb_season,
+        "_tmdb_episode": tmdb_episode,
+    }
+
+
 @app.route("/api/profile/library/history", methods=["POST"])
 def api_profile_library_history():
     """Watch history grouped one row per title, newest activity first.
@@ -3718,6 +3826,9 @@ def api_profile_library_history_title():
         entry for entry in entries
         if entry["tmdb_id"] == tmdb_id and tmdb_media_kind(entry["media_type"]) == kind
     ]
+    anime_segments = _anime_library_season_segments(tmdb_id) if kind == "tv" else {}
+    if anime_segments:
+        entries = [_remap_library_anime_episode(entry, anime_segments) for entry in entries]
 
     fallback_title = next((entry["title"] for entry in entries if entry["title"]), "")
     result = {
@@ -3745,6 +3856,8 @@ def api_profile_library_history_title():
                 row = by_episode[episode_key] = {
                     "season": entry["season"],
                     "episode": entry["episode"],
+                    "_tmdb_season": entry.get("_tmdb_season", entry["season"]),
+                    "_tmdb_episode": entry.get("_tmdb_episode", entry["episode"]),
                     "plays": 0,
                     "watched_at": "",
                 }
@@ -3780,28 +3893,60 @@ def api_profile_library_history_title():
                 result["title"] = details["title"] or result["title"]
                 result["year"] = details["year"]
                 result["poster_url"] = details["poster_url"]
-            seasons = sorted({
-                int(row["season"]) for row in result["episodes"]
-                if row["season"] is not None
+            source_seasons = sorted({
+                int(row.get("_tmdb_season", row["season"]))
+                for row in result["episodes"]
+                if row.get("_tmdb_season", row["season"]) is not None
             })
-            for season in seasons:
-                season_map = client.get_season_episodes(tmdb_id, season)
-                for season_row in result["seasons"]:
-                    if season_row["season"] == season:
-                        season_row["total"] = len(season_map)
-                for row in result["episodes"]:
-                    if row["season"] != season or row["episode"] is None:
-                        continue
-                    try:
-                        episode_details = season_map.get(int(row["episode"]))
-                    except (TypeError, ValueError):
-                        episode_details = None
-                    if episode_details:
-                        row["name"] = episode_details["name"]
-                        row["still_url"] = episode_details["still_url"]
-                        row["air_date"] = episode_details["air_date"]
+            source_maps = {
+                season: client.get_season_episodes(tmdb_id, season)
+                for season in source_seasons
+            }
+            for season_row in result["seasons"]:
+                logical_season = int(season_row["season"])
+                matching_segment = None
+                source_season = logical_season
+                for candidate_source, candidates in anime_segments.items():
+                    for index, candidate in enumerate(candidates):
+                        if int(candidate["season"]) != logical_season:
+                            continue
+                        matching_segment = (candidate_source, candidates, index)
+                        source_season = candidate_source
+                        break
+                    if matching_segment:
+                        break
+                season_map = source_maps.get(source_season, {})
+                if matching_segment:
+                    _candidate_source, candidates, index = matching_segment
+                    offset = int(candidates[index]["offset"])
+                    next_offset = (
+                        int(candidates[index + 1]["offset"])
+                        if index + 1 < len(candidates)
+                        else len(season_map)
+                    )
+                    season_row["total"] = max(0, next_offset - offset)
+                else:
+                    season_row["total"] = len(season_map)
+
+            for row in result["episodes"]:
+                source_season = row.pop("_tmdb_season", row["season"])
+                source_episode = row.pop("_tmdb_episode", row["episode"])
+                if source_season is None or source_episode is None:
+                    continue
+                try:
+                    episode_details = source_maps.get(int(source_season), {}).get(int(source_episode))
+                except (TypeError, ValueError):
+                    episode_details = None
+                if episode_details:
+                    row["name"] = episode_details["name"]
+                    row["still_url"] = episode_details["still_url"]
+                    row["air_date"] = episode_details["air_date"]
         except TmdbError as exc:
             result["tmdb_error"] = str(exc)
+
+    for row in result["episodes"]:
+        row.pop("_tmdb_season", None)
+        row.pop("_tmdb_episode", None)
 
     return jsonify(result)
 

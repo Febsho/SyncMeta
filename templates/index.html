@@ -249,6 +249,16 @@
     .pair-schedule .form-row{margin:0}
     .pair-schedule-copy{font-size:12px;color:var(--z500);line-height:1.45;margin-top:7px}
     .pair-schedule-next{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--accent);margin-top:6px}
+    .route-schedule-list{display:flex;flex-direction:column;gap:10px}
+    .route-schedule-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(170px,.65fr) minmax(170px,.55fr) auto;gap:14px;align-items:center;padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--z950)}
+    .route-schedule-row.is-disabled{opacity:.58}
+    .route-schedule-name{font-size:13px;font-weight:600;color:var(--z100)}
+    .route-schedule-meta{font-size:11.5px;color:var(--z500);line-height:1.45;margin-top:3px}
+    .route-schedule-control{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--z400)}
+    .route-schedule-control input[type="number"]{width:82px;padding:7px 9px;border-radius:6px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font-family:var(--mono)}
+    .route-schedule-next{font-family:var(--mono);font-size:10px;color:var(--label);line-height:1.5}
+    @media(max-width:860px){.route-schedule-row{grid-template-columns:1fr 1fr}.route-schedule-row .route-schedule-open{justify-self:end}}
+    @media(max-width:560px){.route-schedule-row{grid-template-columns:1fr}.route-schedule-row .route-schedule-open{justify-self:start}}
     .pair-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
     .pair-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.45);background:rgba(20,83,45,.26);color:var(--z100);font-size:12px;font-family:inherit;cursor:pointer;max-width:100%;text-transform:none;letter-spacing:normal}
     .pair-chip:hover{border-color:var(--red);color:var(--white)}
@@ -1933,87 +1943,41 @@
 
             <!-- SCHEDULE TAB -->
             <div class="settings-tab" id="stab-schedule">
-              <div class="settings-page-title">Schedule</div>
-              <div class="settings-page-desc">How often SyncMeta runs on its own, and what a background run is allowed to change.</div>
+              <div class="settings-page-title">Schedule &amp; safety</div>
+              <div class="settings-page-desc">Automatic runs and deletion safeguards apply to sync routes, no matter which compatible services are at either end.</div>
               <div class="pipeline-cards">
-              <div class="pipeline-card" id="pipe-schedule">
+              <div class="pipeline-card open" id="pipe-schedule">
                 <button class="pipeline-head" type="button" onclick="togglePipelineCard('schedule')">
                   <span class="dot dot-ok"></span>
-                  <span class="pipeline-title">Schedule &amp; Behavior</span>
+                  <span class="pipeline-title">Route automation</span>
                   <span class="pipeline-summary" id="pipe-summary-schedule"></span>
                   <span class="pipeline-chevron">▾</span>
                 </button>
                 <div class="pipeline-body">
                   <div class="settings-group form-section">
-                    <div class="settings-group-title">List Sync</div>
-                    <div class="settings-group-desc">Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.</div>
-                    <div class="toggle-row"><label for="opt-auto-sync" class="toggle"><input type="checkbox" id="opt-auto-sync"><span class="slider"></span></label><label for="opt-auto-sync">Sync lists automatically in the background</label></div>
-                    <div class="form-row" style="margin-top:12px">
-                      <label for="opt-interval-seconds-preset">Sync frequency</label>
-                      <input type="number" id="opt-interval-seconds" min="21600" step="1" value="43200" onblur="if(parseInt(this.value)<21600||!this.value)this.value=21600">
-                      <div class="hint">Minimum every 6 hours; the default is every 12. Scheduled from the end of the last successful run.</div>
-                    </div>
-                    <div class="toggle-row"><label for="opt-remove-missing" class="toggle"><input type="checkbox" id="opt-remove-missing"><span class="slider"></span></label><label for="opt-remove-missing">Remove items no longer in source</label></div>
-                    <div class="toggle-row"><label for="opt-delete-disabled-lists" class="toggle"><input type="checkbox" id="opt-delete-disabled-lists"><span class="slider"></span></label><label for="opt-delete-disabled-lists">Delete PublicMetaDB lists when disabled in SyncMeta</label></div>
+                    <div class="settings-group-title">Every route has its own schedule</div>
+                    <div class="settings-group-desc">A route defines its source, destination, content, removal behavior, and automatic frequency together. PublicMetaDB, SIMKL, Trakt, AniList, MDBList, and the local Library are treated by capability rather than as a fixed hub.</div>
+                    <div class="route-schedule-list" id="route-schedule-list"><div class="empty">Loading route schedules...</div></div>
+                    <div class="actions-bar"><button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure routes</button></div>
                   </div>
                 </div>
               </div>
-              <div class="pipeline-card" id="pipe-activity">
+              <div class="pipeline-card open" id="pipe-activity">
                 <button class="pipeline-head" type="button" onclick="togglePipelineCard('activity')">
                   <span class="dot dot-ok"></span>
-                  <span class="pipeline-title">Watch History &amp; Resume</span>
+                  <span class="pipeline-title">Content support</span>
                   <span class="pipeline-summary" id="pipe-summary-activity"></span>
                   <span class="pipeline-chevron">▾</span>
                 </button>
                 <div class="pipeline-body">
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Watch History</div>
-                    <div class="settings-group-desc">Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.</div>
-                    <div class="form-row">
-                      <label for="opt-activity-history-source">Source</label>
-                      <select id="opt-activity-history-source">
-                        <option value="off">Off</option>
-                        <option value="simkl">SIMKL</option>
-                        <option value="trakt">Trakt</option>
-                        <option value="anilist">AniList (derived)</option>
-                      </select>
-                    </div>
-                    <div class="hint hidden" id="opt-anilist-history-hint">AniList records no watch history — no plays, no per-episode dates. SyncMeta derives episodes from each entry's progress count ("watched 12 of 24") and stamps them all with that entry's completion date, then places them on the right season using the same mapping SIMKL's episode counts use. It writes only episodes PublicMetaDB is missing and can never represent a rewatch. Pick Trakt or SIMKL instead if either tracks the same anime.</div>
-                    <div class="toggle-row"><label for="opt-auto-history-sync" class="toggle"><input type="checkbox" id="opt-auto-history-sync"><span class="slider"></span></label><label for="opt-auto-history-sync">Sync watch history automatically in the background</label></div>
-                    <div class="form-row" style="margin-top:12px">
-                      <label for="opt-history-interval-seconds-preset">Watch history frequency</label>
-                      <input type="number" id="opt-history-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
-                      <div class="hint">Minimum once a day. Only affects the automatic history sync.</div>
-                    </div>
-                    <div class="toggle-row hidden" id="opt-simkl-history-anime-only-row" style="margin-bottom:0"><label for="opt-simkl-history-anime-only" class="toggle"><input type="checkbox" id="opt-simkl-history-anime-only"><span class="slider"></span></label><label for="opt-simkl-history-anime-only">Only import SIMKL anime watch history</label></div>
-                    <div class="toggle-row hidden" id="opt-simkl-reconcile-history-row" style="margin-bottom:0">
-                      <label for="opt-simkl-reconcile-history" class="toggle"><input type="checkbox" id="opt-simkl-reconcile-history"><span class="slider"></span></label>
-                      <label for="opt-simkl-reconcile-history">Re-read SIMKL's full watched state, not just what changed</label>
-                    </div>
-                    <div class="hint hidden" id="opt-simkl-reconcile-history-hint">A normal sync only asks SIMKL for history since the last run, so an episode missed by an interrupted run — or watched before you connected — is never offered again. This reads your whole watched state each time and writes only what PublicMetaDB is missing, which is what fills in the earlier seasons of a long-running show. Costs one extra full read per history sync.</div>
-                    <div class="toggle-row hidden" id="opt-trakt-reconcile-history-row" style="margin-bottom:0">
-                      <label for="opt-trakt-reconcile-history" class="toggle"><input type="checkbox" id="opt-trakt-reconcile-history"><span class="slider"></span></label>
-                      <label for="opt-trakt-reconcile-history">Backfill missing episodes from Trakt's full watched state</label>
-                    </div>
-                    <div class="hint hidden" id="opt-trakt-reconcile-history-hint">Trakt's history is a play log read forward from the last sync, so episodes watched before you connected — or missed by an interrupted run — never come back. This also reads your complete watched state and writes only the episodes PublicMetaDB is missing, which is what fills in the earlier seasons of a long-running show. Costs one extra full read per history sync.</div>
+                    <div class="settings-group-desc">History is a normal route category. Send it in either supported direction, include it in a two-way route, and schedule that route alongside watchlists and collections.</div>
+                    <button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure history routes</button>
                   </div>
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Resume Progress</div>
-                    <div class="settings-group-desc">Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.</div>
-                    <div class="form-row">
-                      <label for="opt-activity-resume-source">Source</label>
-                      <select id="opt-activity-resume-source">
-                        <option value="off">Off</option>
-                        <option value="simkl">SIMKL</option>
-                        <option value="trakt">Trakt</option>
-                      </select>
-                    </div>
-                    <div class="toggle-row"><label for="opt-auto-resume-sync" class="toggle"><input type="checkbox" id="opt-auto-resume-sync"><span class="slider"></span></label><label for="opt-auto-resume-sync">Sync resume progress automatically in the background</label></div>
-                    <div class="form-row" style="margin-bottom:0">
-                      <label for="opt-resume-interval-seconds-preset">Resume progress frequency</label>
-                      <input type="number" id="opt-resume-interval-seconds" min="86400" step="1" value="86400" onblur="if(parseInt(this.value)<86400||!this.value)this.value=86400">
-                      <div class="hint">Minimum once a day. Only affects the automatic resume sync.</div>
-                    </div>
+                    <div class="settings-group-desc">Resume is not shown as an everything-to-everything route yet because the connected services do not expose compatible read and write APIs for it. It will return when SyncMeta can offer it as a real compatible route instead of a PMDB-only special case.</div>
                   </div>
                 </div>
               </div>
@@ -2027,8 +1991,9 @@
                   <div class="copy-row"><input type="number" id="opt-guard-removal-percent" min="1" max="100" step="1" value="20"><span class="hint" style="margin-top:0">%</span></div>
                   <div class="hint">Applies to sync pairs in <strong>mirror</strong> and <strong>managed</strong> removal modes. A paused run is reported on the Issues page and nothing is deleted.</div>
                 </div>
-                <div class="form-row"><label for="opt-conflict-policy">When comparable provider states disagree</label><select id="opt-conflict-policy"><option value="never">Never overwrite automatically</option><option value="newest">Newest change wins</option><option value="simkl">SIMKL priority</option><option value="trakt">Trakt priority</option><option value="pmdb">PublicMetaDB priority</option></select><div class="hint">Only semantically comparable watchlist/collection membership is considered. “Never” creates an Issue for manual resolution.</div></div>
+                <div class="hint">Removal protection is provider-neutral and applies to every route using <strong>mirror</strong> or <strong>managed</strong> removal mode.</div>
               </div>
+
             </div>
 
             <!-- NOTIFICATIONS TAB -->
@@ -2663,11 +2628,13 @@
     }
 
     function renderOnboardingDataChoices() {
-      const options = gatherOptions();
+      const selectedByRoute = (provider, category) => (pairsState.pairs || []).some(pair =>
+        pair.enabled !== false && pair.source === provider && pair.target === 'pmdb'
+        && (pair.categories || []).includes(category));
       const cards = [];
-      if (providerHasCredential('simkl')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">SIMKL</div>${onboardingChoice('simkl', 'movies', 'Movies', !!simklSelectedStatuses.movies.length)}${onboardingChoice('simkl', 'shows', 'TV Shows', !!simklSelectedStatuses.shows.length)}${onboardingChoice('simkl', 'anime', 'Anime', !!simklSelectedStatuses.anime.length)}${onboardingChoice('simkl', 'history', 'Watch History', options.activity_history_source === 'simkl', 'history')}${onboardingChoice('simkl', 'resume', 'Resume Progress', options.activity_resume_source === 'simkl', 'resume')}</section>`);
-      if (providerHasCredential('trakt')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">Trakt</div>${onboardingChoice('trakt', 'watchlist', 'Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked)}${onboardingChoice('trakt', 'history', 'Watch History', options.activity_history_source === 'trakt', 'history')}${onboardingChoice('trakt', 'resume', 'Resume Progress', options.activity_resume_source === 'trakt', 'resume')}</section>`);
-      if (providerHasCredential('anilist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">AniList</div>${onboardingChoice('anilist', 'PLANNING', 'Planning', anilistSelectedStatuses.includes('PLANNING'))}${onboardingChoice('anilist', 'CURRENT', 'Watching', anilistSelectedStatuses.includes('CURRENT'))}${onboardingChoice('anilist', 'COMPLETED', 'Completed', anilistSelectedStatuses.includes('COMPLETED'))}${onboardingChoice('anilist', 'history', 'Watch History', options.activity_history_source === 'anilist', 'history')}</section>`);
+      if (providerHasCredential('simkl')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">SIMKL</div>${onboardingChoice('simkl', 'movies', 'Movies', !!simklSelectedStatuses.movies.length)}${onboardingChoice('simkl', 'shows', 'TV Shows', !!simklSelectedStatuses.shows.length)}${onboardingChoice('simkl', 'anime', 'Anime', !!simklSelectedStatuses.anime.length)}${onboardingChoice('simkl', 'history', 'Watch History', selectedByRoute('simkl', 'history'))}</section>`);
+      if (providerHasCredential('trakt')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">Trakt</div>${onboardingChoice('trakt', 'watchlist', 'Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked)}${onboardingChoice('trakt', 'history', 'Watch History', selectedByRoute('trakt', 'history'))}</section>`);
+      if (providerHasCredential('anilist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">AniList</div>${onboardingChoice('anilist', 'PLANNING', 'Planning', anilistSelectedStatuses.includes('PLANNING'))}${onboardingChoice('anilist', 'CURRENT', 'Watching', anilistSelectedStatuses.includes('CURRENT'))}${onboardingChoice('anilist', 'COMPLETED', 'Completed', anilistSelectedStatuses.includes('COMPLETED'))}${onboardingChoice('anilist', 'history', 'Watch History', selectedByRoute('anilist', 'history'))}</section>`);
       if (providerHasCredential('mdblist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">MDBList</div>${onboardingChoice('mdblist', 'lists', `Selected lists (${mdblistSelectedLists.length})`, mdblistSelectedLists.length > 0)}${mdblistSelectedLists.length ? '' : '<div class="catalog-note">Choose lists in the MDBList connection card first.</div>'}</section>`);
       return cards.join('') || '<div class="empty">Connect at least one source before choosing data.</div>';
     }
@@ -2705,10 +2672,12 @@
         });
         renderConnectionHealth(connectionHealth, connectionReadiness);
       } else if (onboardingStep === 3) {
-        body.innerHTML = `<h3>What should SyncMeta keep in sync?</h3><p class="onboarding-lead">Only supported capabilities from connected providers are shown. Watch history can have one source.</p><div class="onboarding-choices">${renderOnboardingDataChoices()}</div><div class="onboarding-error" id="onboarding-error"></div>`;
+        body.innerHTML = `<h3>What should SyncMeta keep in sync?</h3><p class="onboarding-lead">Only supported capabilities from connected providers are shown. Each selected source becomes its own route.</p><div class="onboarding-choices">${renderOnboardingDataChoices()}</div><div class="onboarding-error" id="onboarding-error"></div>`;
       } else if (onboardingStep === 4) {
-        const current = Number(el('opt-interval-seconds').value || 43200);
-        body.innerHTML = `<h3>Automatic synchronization</h3><p class="onboarding-lead">This writes to the existing schedule controls; there is no separate wizard schedule.</p><div class="onboarding-schedule"><label class="onboarding-check"><input type="checkbox" id="onboarding-auto-sync" ${el('opt-auto-sync').checked ? 'checked' : ''}><span>Enable automatic sync</span></label><div class="form-row"><label for="onboarding-interval">Sync every</label><select id="onboarding-interval">${intervalPresetOptions(21600, current)}</select></div><div class="onboarding-error" id="onboarding-error"></div></div>`;
+        const setupRoutes = (pairsState.pairs || []).filter(pair => pair.enabled !== false && pair.target === 'pmdb');
+        const scheduled = setupRoutes.some(pair => pair.auto_sync);
+        const current = Number((setupRoutes.find(pair => pair.auto_sync) || setupRoutes[0] || {}).interval_seconds || 43200);
+        body.innerHTML = `<h3>Automatic synchronization</h3><p class="onboarding-lead">This schedule applies to the routes created during setup. You can change each route independently later.</p><div class="onboarding-schedule"><label class="onboarding-check"><input type="checkbox" id="onboarding-auto-sync" ${scheduled ? 'checked' : ''}><span>Enable automatic sync</span></label><div class="form-row"><label for="onboarding-interval">Sync every</label><select id="onboarding-interval">${intervalPresetOptions(43200, current)}</select></div><div class="onboarding-error" id="onboarding-error"></div></div>`;
       } else {
         const routes = (pairsState.pairs || []).filter(pair => pair.enabled !== false && pair.target === 'pmdb');
         const sources = new Set(routes.map(pair => pair.source));
@@ -2737,32 +2706,28 @@
         el('trakt-watchlist-movies-toggle').checked = watchlist;
         el('trakt-watchlist-shows-toggle').checked = watchlist;
       }
-      const history = ['simkl', 'trakt', 'anilist'].find(provider => checked(provider, 'history')) || 'off';
-      el('opt-activity-history-source').value = history;
-      el('opt-activity-resume-source').value = ['simkl', 'trakt'].find(provider => checked(provider, 'resume')) || 'off';
       renderSimklStatuses();
       renderAniListStatuses();
-      renderActivityOptionVisibility();
       updateDots();
 
       const categoriesBySource = {};
       if (providerHasCredential('simkl')) {
         const categories = [];
         if (['movies', 'shows', 'anime'].some(media => checked('simkl', media))) categories.push('watchlist');
-        if (history === 'simkl') categories.push('history');
+        if (checked('simkl', 'history')) categories.push('history');
         if (categories.length) categoriesBySource.simkl = categories;
       }
       if (providerHasCredential('trakt')) {
         const categories = [];
         if (checked('trakt', 'watchlist')) categories.push('watchlist');
-        if (history === 'trakt') categories.push('history');
+        if (checked('trakt', 'history')) categories.push('history');
         if (categories.length) categoriesBySource.trakt = categories;
       }
       if (providerHasCredential('anilist')) {
         const categories = [];
         if (checked('anilist', 'PLANNING') || checked('anilist', 'CURRENT')) categories.push('watchlist');
         if (checked('anilist', 'COMPLETED')) categories.push('collection');
-        if (history === 'anilist') categories.push('history');
+        if (checked('anilist', 'history')) categories.push('history');
         if (categories.length) categoriesBySource.anilist = categories;
       }
       if (providerHasCredential('mdblist') && checked('mdblist', 'lists')) categoriesBySource.mdblist = ['watchlist'];
@@ -2818,16 +2783,13 @@
           if (!(await saveProfile(false, false))) throw new Error('Could not save your selected synchronization data.');
           if (!(await savePairs(false))) throw new Error('Could not create the synchronization routes.');
         } else if (onboardingStep === 4) {
-          el('opt-auto-sync').checked = el('onboarding-auto-sync').checked;
           const interval = el('onboarding-interval').value;
-          if (interval !== 'custom') el('opt-interval-seconds').value = interval;
-          const automatic = el('opt-auto-sync').checked;
-          const intervalSeconds = Math.max(43200, Number(el('opt-interval-seconds').value || 43200));
+          const automatic = el('onboarding-auto-sync').checked;
+          const intervalSeconds = Math.max(43200, Number(interval === 'custom' ? 43200 : interval));
           (pairsState.pairs || []).filter(pair => pair.target === 'pmdb').forEach(pair => {
             pair.auto_sync = automatic;
             pair.interval_seconds = intervalSeconds;
           });
-          if (!(await saveProfile(false, false))) throw new Error('Could not save the synchronization schedule.');
           if (!(await savePairs(false))) throw new Error('Could not save the route schedule.');
         } else {
           onboardingCompleted = true;
@@ -2996,12 +2958,6 @@
         anilistSelectedStatuses = LINKED_ANILIST_STATUSES.slice();
       }
 
-      // Auto-set history source to SIMKL when SIMKL is first linked and no source is set yet.
-      const historySourceEl = el('opt-activity-history-source');
-      if (simklLinked && !simklWasLinked && historySourceEl && historySourceEl.value === 'off') {
-        historySourceEl.value = 'simkl';
-      }
-
       simklWasLinked = simklLinked;
       anilistWasLinked = anilistLinked;
     }
@@ -3130,29 +3086,28 @@
     }
 
     function gatherOptions() {
-      const intervalSeconds = Math.max(21600, parseInt(el('opt-interval-seconds').value || '43200', 10));
-      const historyIntervalSeconds = Math.max(86400, parseInt(el('opt-history-interval-seconds').value || '86400', 10));
-      const resumeIntervalSeconds = Math.max(86400, parseInt(el('opt-resume-interval-seconds').value || '86400', 10));
       return {
-        auto_sync: el('opt-auto-sync').checked,
-        interval_seconds: Number.isFinite(intervalSeconds) ? intervalSeconds : 43200,
-        remove_missing: el('opt-remove-missing').checked,
+        // The former PMDB-first schedulers are retired. These neutral values
+        // keep the profile API stable while all live behavior comes from pairs.
+        auto_sync: false,
+        interval_seconds: 43200,
+        remove_missing: false,
         simkl_sync_to_pmdb_watchlist: el('opt-simkl-pmdb-watchlist').checked,
         trakt_sync_to_pmdb_watchlist: el('opt-trakt-pmdb-watchlist').checked,
         anilist_sync_to_pmdb_watchlist: el('opt-anilist-pmdb-watchlist').checked,
-        delete_disabled_lists: el('opt-delete-disabled-lists').checked,
+        delete_disabled_lists: false,
         guard_large_removals: el('opt-guard-large-removals').checked,
         guard_removal_percent: Math.min(100, Math.max(1, parseInt(el('opt-guard-removal-percent').value, 10) || 20)),
-        conflict_policy: el('opt-conflict-policy').value || 'never',
-        activity_history_source: el('opt-activity-history-source').value,
-        auto_history_sync: el('opt-auto-history-sync').checked,
-        simkl_history_anime_only: el('opt-simkl-history-anime-only').checked,
-        simkl_reconcile_watched_history: el('opt-simkl-reconcile-history').checked,
-        trakt_reconcile_watched_history: el('opt-trakt-reconcile-history').checked,
-        activity_resume_source: el('opt-activity-resume-source').value,
-        auto_resume_sync: el('opt-auto-resume-sync').checked,
-        trakt_watched_history_interval_seconds: Number.isFinite(historyIntervalSeconds) ? historyIntervalSeconds : 86400,
-        trakt_resume_progress_interval_seconds: Number.isFinite(resumeIntervalSeconds) ? resumeIntervalSeconds : 86400,
+        conflict_policy: 'never',
+        activity_history_source: 'off',
+        auto_history_sync: false,
+        simkl_history_anime_only: false,
+        simkl_reconcile_watched_history: false,
+        trakt_reconcile_watched_history: false,
+        activity_resume_source: 'off',
+        auto_resume_sync: false,
+        trakt_watched_history_interval_seconds: 86400,
+        trakt_resume_progress_interval_seconds: 86400,
         simkl_visibility: el('opt-simkl-visibility').value,
         anilist_visibility: el('opt-anilist-visibility').value,
         trakt_personal_visibility: el('opt-trakt-personal-visibility').value,
@@ -3283,25 +3238,11 @@
       setSecretInputState('pmdb-api-key', 'pmdb', 'api_key_saved', 'pm-...');
       setSecretInputState('tmdb-api-key', 'tmdb', 'api_key_saved', 'v3 API key or v4 read access token');
       refreshRedirectUrlHints();
-      el('opt-auto-sync').checked = options.auto_sync !== false;
-      el('opt-interval-seconds').value = Math.max(21600, options.interval_seconds || 43200);
-      el('opt-remove-missing').checked = !!options.remove_missing;
       el('opt-simkl-pmdb-watchlist').checked = !!options.simkl_sync_to_pmdb_watchlist;
       el('opt-trakt-pmdb-watchlist').checked = !!options.trakt_sync_to_pmdb_watchlist;
       el('opt-anilist-pmdb-watchlist').checked = !!options.anilist_sync_to_pmdb_watchlist;
-      el('opt-delete-disabled-lists').checked = !!options.delete_disabled_lists;
       el('opt-guard-large-removals').checked = options.guard_large_removals !== false;
       el('opt-guard-removal-percent').value = Number(options.guard_removal_percent) > 0 ? options.guard_removal_percent : 20;
-      el('opt-conflict-policy').value = options.conflict_policy || 'never';
-      el('opt-activity-history-source').value = options.activity_history_source || (options.simkl_sync_watched_history ? 'simkl' : (options.trakt_sync_watched_history ? 'trakt' : 'off'));
-      el('opt-auto-history-sync').checked = !!options.auto_history_sync;
-      el('opt-history-interval-seconds').value = Math.max(86400, options.trakt_watched_history_interval_seconds || 86400);
-      el('opt-simkl-history-anime-only').checked = !!options.simkl_history_anime_only;
-      el('opt-simkl-reconcile-history').checked = !!options.simkl_reconcile_watched_history;
-      el('opt-trakt-reconcile-history').checked = !!options.trakt_reconcile_watched_history;
-      el('opt-activity-resume-source').value = options.activity_resume_source || (options.trakt_sync_resume_progress ? 'trakt' : 'off');
-      el('opt-auto-resume-sync').checked = !!options.auto_resume_sync;
-      el('opt-resume-interval-seconds').value = Math.max(86400, options.trakt_resume_progress_interval_seconds || 86400);
       el('opt-simkl-visibility').value = options.simkl_visibility || 'private';
       el('opt-anilist-visibility').value = options.anilist_visibility || 'private';
       el('opt-trakt-personal-visibility').value = options.trakt_personal_visibility || 'private';
@@ -3311,7 +3252,6 @@
       simklWasLinked = isSimklLinked();
       anilistWasLinked = isAniListLinked();
       ensureLinkedSourceDefaults(false);
-      renderActivityOptionVisibility();
       updateDots();
       applyTokenErrors(syncError || '');
       renderSimklStatuses();
@@ -3363,7 +3303,6 @@
 
     function updateDots() {
       ensureLinkedSourceDefaults(false);
-      renderActivityOptionVisibility();
       const creds = gatherCreds();
       setDot('dot-simkl', !!(creds.simkl.client_id && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved')));
       setDot('dot-anilist', !!creds.anilist.username);
@@ -3734,44 +3673,6 @@
       }
     }
 
-    function renderActivityOptionVisibility() {
-      const historySource = el('opt-activity-history-source').value || 'off';
-      const resumeSource = el('opt-activity-resume-source').value || 'off';
-      const animeOnlyRow = el('opt-simkl-history-anime-only-row');
-      const animeOnlyInput = el('opt-simkl-history-anime-only');
-      const autoHistoryInput = el('opt-auto-history-sync');
-      const autoResumeInput = el('opt-auto-resume-sync');
-      const historyIntervalInput = el('opt-history-interval-seconds');
-      const resumeIntervalInput = el('opt-resume-interval-seconds');
-      const reconcileRow = el('opt-trakt-reconcile-history-row');
-      const reconcileHint = el('opt-trakt-reconcile-history-hint');
-      const reconcileInput = el('opt-trakt-reconcile-history');
-      const showAnimeOnly = historySource === 'simkl';
-      const showReconcile = historySource === 'trakt';
-      const historyEnabled = historySource !== 'off';
-      const resumeEnabled = resumeSource !== 'off';
-      const anilistHint = el('opt-anilist-history-hint');
-      anilistHint.classList.toggle('hidden', historySource !== 'anilist');
-      const simklReconcileRow = el('opt-simkl-reconcile-history-row');
-      const simklReconcileHint = el('opt-simkl-reconcile-history-hint');
-      const simklReconcileInput = el('opt-simkl-reconcile-history');
-      animeOnlyRow.classList.toggle('hidden', !showAnimeOnly);
-      if (!showAnimeOnly) animeOnlyInput.checked = false;
-      simklReconcileRow.classList.toggle('hidden', !showAnimeOnly);
-      simklReconcileHint.classList.toggle('hidden', !showAnimeOnly);
-      if (!showAnimeOnly) simklReconcileInput.checked = false;
-      // Trakt-only: SIMKL already reports per-episode watched state, so it has
-      // no equivalent gap for a second read to fill.
-      reconcileRow.classList.toggle('hidden', !showReconcile);
-      reconcileHint.classList.toggle('hidden', !showReconcile);
-      if (!showReconcile) reconcileInput.checked = false;
-      autoHistoryInput.disabled = !historyEnabled;
-      autoResumeInput.disabled = !resumeEnabled;
-      historyIntervalInput.disabled = !historyEnabled || !autoHistoryInput.checked;
-      resumeIntervalInput.disabled = !resumeEnabled || !autoResumeInput.checked;
-      if (!historyEnabled) autoHistoryInput.checked = false;
-      if (!resumeEnabled) autoResumeInput.checked = false;
-    }
 
     function renderSimklStatuses() {
       el('simkl-status-groups').innerHTML = Object.keys(SIMKL_STATUS_OPTIONS).map(mediaType => {
@@ -3914,7 +3815,7 @@
       if (target === 'settings') {
         if (settingsTab) showSettingsTab(settingsTab);
         if (requested === 'connections' && sessionProfileId) testConnections(undefined, true);
-        if (settingsTab === 'routes' || activeSettingsTab === 'routes') fetchPairs();
+        if (!settingsTab && (activeSettingsTab === 'routes' || activeSettingsTab === 'schedule')) fetchPairs();
         if (settingsTab === 'about' || activeSettingsTab === 'about') {
           fetchSiteStats();
           if (!siteStatsPolling) siteStatsPolling = setInterval(() => { if (!document.hidden) fetchSiteStats(); }, 30000);
@@ -9773,80 +9674,10 @@
         + `<option value="custom" ${known ? '' : 'selected'}>Custom…</option>`;
     }
 
-    // Each raw seconds input gets a select in front of it. The input keeps its
-    // id, so gatherOptions()/populateForm() are untouched.
-    const SCHEDULE_FIELDS = [
-      { input: 'opt-interval-seconds', min: 21600 },
-      { input: 'opt-history-interval-seconds', min: 86400 },
-      { input: 'opt-resume-interval-seconds', min: 86400 },
-    ];
-
-    function installScheduleSelects() {
-      for (const field of SCHEDULE_FIELDS) {
-        const input = el(field.input);
-        if (!input || input.dataset.presetInstalled) continue;
-        input.dataset.presetInstalled = '1';
-        const select = document.createElement('select');
-        select.id = field.input + '-preset';
-        select.className = 'interval-preset';
-        select.setAttribute('aria-label', 'Synchronization frequency');
-        input.parentNode.insertBefore(select, input);
-        const wrap = document.createElement('div');
-        wrap.className = 'interval-custom hidden';
-        input.parentNode.insertBefore(wrap, input);
-        wrap.appendChild(input);
-        const customLabel = document.createElement('label');
-        customLabel.setAttribute('for', field.input);
-        customLabel.textContent = 'Custom interval (seconds)';
-        wrap.insertBefore(customLabel, input);
-        const hint = document.createElement('div');
-        hint.className = 'hint interval-hint';
-        wrap.appendChild(hint);
-        select.addEventListener('change', () => {
-          if (select.value === 'custom') {
-            wrap.classList.remove('hidden');
-            input.focus();
-          } else {
-            wrap.classList.add('hidden');
-            input.value = select.value;
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-          syncScheduleSelect(field);
-        });
-        input.addEventListener('change', () => syncScheduleSelect(field));
-        input.addEventListener('input', () => syncScheduleSelect(field));
-      }
-      refreshScheduleSelects();
-    }
-
-    function syncScheduleSelect(field) {
-      const input = el(field.input);
-      const select = el(field.input + '-preset');
-      if (!input || !select) return;
-      const wrap = input.closest('.interval-custom');
-      const hint = wrap ? wrap.querySelector('.interval-hint') : null;
-      if (hint) hint.textContent = `${intervalLabel(Number(input.value) || field.min)} · minimum ${intervalLabel(field.min)}`;
-      if (select.value === 'custom') { if (wrap) wrap.classList.remove('hidden'); return; }
-      const match = INTERVAL_PRESETS.find(preset => preset.seconds === Number(input.value));
-      select.value = match ? String(match.seconds) : 'custom';
-      if (wrap) wrap.classList.toggle('hidden', !!match);
-    }
-
-    function refreshScheduleSelects() {
-      for (const field of SCHEDULE_FIELDS) {
-        const input = el(field.input);
-        const select = el(field.input + '-preset');
-        if (!input || !select) continue;
-        select.innerHTML = intervalPresetOptions(field.min, input.value);
-        syncScheduleSelect(field);
-      }
-    }
-
     // ── Wiring ────────────────────────────────────────────────────────────
 
     function bindRedesignEvents() {
       bindActivityPage();
-      installScheduleSelects();
       const searchBtn = el('btn-global-search');
       if (searchBtn) searchBtn.addEventListener('click', openSearchDialog);
       const kbd = el('nav-search-kbd');
@@ -9932,11 +9763,11 @@
 
     setPollingInterval(POLL_IDLE_MS);
     document.querySelectorAll('.form-section input').forEach(input => {
-      input.addEventListener('input', () => { renderActivityOptionVisibility(); updateDots(); scheduleSaveDraft(); });
-      input.addEventListener('change', () => { renderActivityOptionVisibility(); updateDots(); scheduleSaveDraft(); });
+      input.addEventListener('input', () => { updateDots(); scheduleSaveDraft(); });
+      input.addEventListener('change', () => { updateDots(); scheduleSaveDraft(); });
     });
     document.querySelectorAll('.form-section select').forEach(select => {
-      select.addEventListener('change', () => { renderActivityOptionVisibility(); updateDots(); scheduleSaveDraft(); scheduleAutoSave(); });
+      select.addEventListener('change', () => { updateDots(); scheduleSaveDraft(); scheduleAutoSave(); });
     });
     el('trakt-discover-query').addEventListener('keydown', event => {
       if (event.key === 'Enter') {
@@ -9961,6 +9792,16 @@
     document.querySelectorAll('#view-settings select:not([data-theme-select]), #sync-settings select').forEach(select => {
       select.addEventListener('change', scheduleAutoSave);
     });
+    const routeScheduleNode = el('route-schedule-list');
+    if (routeScheduleNode) routeScheduleNode.addEventListener('change', event => {
+      const input = event.target;
+      if (!input || !input.dataset) return;
+      if (input.dataset.routeScheduleAuto !== undefined) {
+        updateRouteSchedule(input.dataset.routeScheduleAuto, input.checked, undefined);
+      } else if (input.dataset.routeScheduleHours !== undefined) {
+        updateRouteSchedule(input.dataset.routeScheduleHours, undefined, input.value);
+      }
+    });
 
     function showSettingsTab(tab) {
       const target = SETTINGS_TABS.includes(tab) ? tab : (SETTINGS_TAB_ALIASES[tab] || 'profile');
@@ -9975,7 +9816,7 @@
       if (tabEl) tabEl.classList.add('active');
       if (navEl) { navEl.classList.add('active'); navEl.setAttribute('aria-current', 'true'); }
       // Opening a section is what should pay for its data, not every page load.
-      if (target === 'routes') fetchPairs();
+      if (target === 'routes' || target === 'schedule') fetchPairs();
       if (target === 'about') fetchSiteStats();
       if (target === 'connections' && sessionProfileId) testConnections(undefined, true);
       if (target === 'notifications') renderNotificationSettings();
@@ -10058,6 +9899,66 @@
       // must not hide. pairScheduleText already covers the disabled case.
       const parts = [flow, categories || 'nothing selected', removalText, pairScheduleText(pair)];
       return parts.join(' · ');
+    }
+
+    function renderRouteScheduleSettings() {
+      const node = el('route-schedule-list');
+      if (!node) return;
+      const pairs = pairsState.pairs || [];
+      const enabled = pairs.filter(pair => pair.enabled !== false);
+      const automatic = enabled.filter(pair => pair.auto_sync);
+      const summary = el('pipe-summary-schedule');
+      if (summary) summary.textContent = automatic.length
+        ? `${automatic.length} of ${enabled.length} enabled route${enabled.length === 1 ? '' : 's'} scheduled`
+        : (enabled.length ? 'all routes manual' : 'no routes configured');
+      const activitySummary = el('pipe-summary-activity');
+      if (activitySummary) {
+        const historyRoutes = enabled.filter(pair => (pair.categories || []).includes('history')).length;
+        activitySummary.textContent = historyRoutes
+          ? `${historyRoutes} history route${historyRoutes === 1 ? '' : 's'}`
+          : 'history uses routes';
+      }
+
+      if (!pairs.length) {
+        node.innerHTML = `<div class="empty"><div>No sync routes yet.</div><div class="catalog-note" style="margin-top:8px">Create a route first, then choose whether it runs manually or on its own.</div></div>`;
+        return;
+      }
+      node.innerHTML = pairs.map((pair, index) => {
+        const twoWay = pair.mode === 'two_way';
+        const flow = `${providerLabel(pair.source)} ${twoWay ? '↔' : '→'} ${providerLabel(pair.target)}`;
+        const categories = (pair.categories || []).map(key => PAIR_CATEGORY_LABELS[key] || key).join(', ') || 'Nothing selected';
+        const hours = Math.max(12, Math.round(Number(pair.interval_seconds || 43200) / 3600));
+        const next = pair.enabled === false ? 'Route disabled'
+          : pair.auto_sync && pair.next_sync_at ? `Next run ${timeUntil(pair.next_sync_at)}`
+          : pair.auto_sync ? `Runs every ${hours} hours` : 'Runs manually';
+        return `<div class="route-schedule-row ${pair.enabled === false ? 'is-disabled' : ''}">
+          <div><div class="route-schedule-name">${esc(pair.name || flow)}</div><div class="route-schedule-meta">${esc(flow)} · ${esc(categories)}</div></div>
+          <label class="route-schedule-control"><input type="checkbox" data-route-schedule-auto="${index}" ${pair.auto_sync ? 'checked' : ''} ${pair.enabled === false ? 'disabled' : ''}>Run automatically</label>
+          <label class="route-schedule-control"><span>Every</span><input type="number" min="12" step="1" value="${hours}" data-route-schedule-hours="${index}" ${pair.auto_sync && pair.enabled !== false ? '' : 'disabled'}><span>hours</span></label>
+          <div class="route-schedule-open"><div class="route-schedule-next">${esc(next)}</div><button class="btn btn-sm" type="button" onclick="editScheduledRoute(${index})">Edit route</button></div>
+        </div>`;
+      }).join('');
+    }
+
+    async function updateRouteSchedule(index, automatic, hours) {
+      const pair = pairsState.pairs[Number(index)];
+      if (!pair) return;
+      if (automatic !== undefined) pair.auto_sync = !!automatic;
+      if (hours !== undefined) pair.interval_seconds = Math.max(12, parseInt(hours || '12', 10) || 12) * 3600;
+      renderRouteScheduleSettings();
+      renderSyncCards();
+      await savePairs(false);
+    }
+
+    function editScheduledRoute(index) {
+      const pair = pairsState.pairs[Number(index)];
+      if (!pair) return;
+      setPairExpanded(pair, true);
+      showSettingsTab('routes');
+      setTimeout(() => {
+        const card = document.querySelector(`[data-pair-card="${Number(index)}"]`);
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 120);
     }
 
     function pairUi(pair) {
@@ -11094,6 +10995,10 @@
       if (!result.ok) {
         const node = el('pairs-list');
         if (node) node.innerHTML = '<div class="empty">Sign in to configure sync pairs.</div>';
+        const scheduleNode = el('route-schedule-list');
+        if (scheduleNode) scheduleNode.innerHTML = '<div class="empty">Sign in to view and change route schedules.</div>';
+        const scheduleSummary = el('pipe-summary-schedule');
+        if (scheduleSummary) scheduleSummary.textContent = 'sign in required';
         return;
       }
       pairsState = {
@@ -11121,6 +11026,7 @@
       renderPairCapabilities();
       renderSyncCards();
       renderPairs();
+      renderRouteScheduleSettings();
       updateMultiSyncBuilder();
     }
 
@@ -11389,16 +11295,13 @@
           return lists ? `${lists} list${lists === 1 ? '' : 's'} syncing` : 'nothing selected';
         },
         schedule: () => {
-          if (!el('opt-auto-sync').checked) return 'background sync off';
-          return `auto every ${intervalLabel(parseInt(el('opt-interval-seconds').value || '43200', 10))}`;
+          const enabled = (pairsState.pairs || []).filter(pair => pair.enabled !== false);
+          const automatic = enabled.filter(pair => pair.auto_sync).length;
+          return automatic ? `${automatic} of ${enabled.length} scheduled` : (enabled.length ? 'all routes manual' : 'no routes configured');
         },
         activity: () => {
-          const history = el('opt-activity-history-source').value;
-          const resume = el('opt-activity-resume-source').value;
-          const parts = [];
-          if (history !== 'off') parts.push(`history from ${history === 'simkl' ? 'SIMKL' : 'Trakt'}`);
-          if (resume !== 'off') parts.push(`resume from ${resume === 'simkl' ? 'SIMKL' : 'Trakt'}`);
-          return parts.length ? parts.join(' · ') : 'off';
+          const count = (pairsState.pairs || []).filter(pair => pair.enabled !== false && (pair.categories || []).includes('history')).length;
+          return count ? `${count} history route${count === 1 ? '' : 's'}` : 'history uses routes';
         },
       };
       for (const [key, build] of Object.entries(summaries)) {

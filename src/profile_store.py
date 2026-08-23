@@ -2290,6 +2290,11 @@ class ProfileStore:
             normalized_id = self._normalize_profile_id(profile_id)
             profile = self._profiles[normalized_id]
             options = dict(profile.get("options") or {})
+            previous_pairs = {
+                pair.get("pair_id"): pair
+                for pair in options.get("sync_pairs") or []
+                if isinstance(pair, dict) and pair.get("pair_id")
+            }
             options["sync_pairs"] = normalized
             profile["options"] = options
             previous_schedule = dict(profile.get("pair_sync_schedule") or {})
@@ -2299,7 +2304,10 @@ class ProfileStore:
                 if not pair.get("enabled", True) or not pair.get("auto_sync", False):
                     continue
                 prior = previous_schedule.get(pair_id)
-                schedule[pair_id] = prior if isinstance(prior, dict) and prior.get("next_sync_at") else {
+                previous_pair = previous_pairs.get(pair_id) or {}
+                interval_unchanged = int(previous_pair.get("interval_seconds") or 43200) == int(pair["interval_seconds"])
+                keep_prior = isinstance(prior, dict) and prior.get("next_sync_at") and interval_unchanged
+                schedule[pair_id] = prior if keep_prior else {
                     "last_sync_at": None,
                     "next_sync_at": self._next_pair_sync_iso(
                         pair["interval_seconds"], profile_id, pair_id,

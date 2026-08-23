@@ -119,21 +119,18 @@ class WebTests(unittest.TestCase):
         self.assertIn("Native MDBList watchlist/history writes are not exposed by this app", html)
         self.assertNotIn("data-nav=\"mapping\"", html)
         self.assertIn("Activity Sync", html)
-        self.assertIn("Sync watch history automatically in the background", html)
-        # Intervals are chosen from a human-readable preset list; the raw
-        # seconds field is still there behind "Custom…", which is what
-        # gatherOptions/populateForm read.
-        self.assertIn("Watch history frequency", html)
-        self.assertIn("Sync frequency", html)
-        self.assertIn("Minimum every 6 hours; the default is every 12.", html)
-        self.assertIn("Minimum once a day. Only affects the automatic history sync.", html)
-        self.assertIn('id="opt-interval-seconds"', html)
-        self.assertIn("Every 12 hours", html)
-        self.assertIn("Only import SIMKL anime watch history", html)
-        self.assertIn('id="opt-activity-resume-source"', html)
-        self.assertIn('id="opt-auto-resume-sync"', html)
-        self.assertIn('id="opt-resume-interval-seconds"', html)
-        self.assertIn("Minimum once a day. Only affects the automatic resume sync.", html)
+        self.assertIn("Every route has its own schedule", html)
+        self.assertIn("Run automatically", html)
+        # Scheduling is exposed only per route; the wiped install no longer
+        # carries hidden PMDB-first migration controls.
+        self.assertNotIn('id="opt-interval-seconds"', html)
+        self.assertNotIn('id="legacy-pmdb-schedule-options"', html)
+        self.assertIn('id="route-schedule-list"', html)
+        self.assertNotIn('id="opt-activity-resume-source"', html)
+        self.assertNotIn('id="opt-auto-resume-sync"', html)
+        self.assertNotIn('id="opt-resume-interval-seconds"', html)
+        self.assertIn("History is a normal route category.", html)
+        self.assertIn("Resume is not shown as an everything-to-everything route yet", html)
         self.assertIn('id="activity-cards"', html)
         self.assertIn("Sync Watch History", html)
         self.assertIn("Clear PMDB History", html)
@@ -142,8 +139,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="dashboard-readiness" role="status"', html)
         self.assertIn("Test all", html)
         self.assertIn("/api/profile/connections/check", html)
-        self.assertIn("Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.", html)
-        self.assertIn("Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.", html)
+        self.assertNotIn("Import watched history into PublicMetaDB. The selected source is the only write direction for this rule.", html)
+        self.assertNotIn("Import continue-watching progress. When background sync is on, this refreshes automatically on its own schedule.", html)
         self.assertIn("Queued", html)
         self.assertIn("position", html)
         self.assertIn("RESULTS_PAGE_SIZE = 25", html)
@@ -153,7 +150,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("cookie_notice_ack", html)
         self.assertIn("Choose which movie, show, and anime statuses should sync from SIMKL.", html)
         self.assertIn("Choose which anime lists should sync into PublicMetaDB.", html)
-        self.assertIn("Delete PublicMetaDB lists when disabled in SyncMeta", html)
+        self.assertNotIn("Delete PublicMetaDB lists when disabled in SyncMeta", html)
         self.assertIn("SIMKL Plan to Watch -&gt; PublicMetaDB Watchlist", html)
         self.assertIn("Trakt Watchlist -&gt; PublicMetaDB Watchlist", html)
         self.assertIn("AniList Planning -&gt; PublicMetaDB Watchlist", html)
@@ -223,7 +220,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Connection failed", html)
         self.assertIn("disconnectProvider(provider)", html)
         self.assertIn("/api/profile/connections/disconnect", html)
-        self.assertIn('<option value="simkl">SIMKL</option>', html)
+        self.assertIn("data-onboarding-provider=", html)
         self.assertIn("add('Lists');\n        add('Watchlist');\n        add('Watch History');\n        add('Resume Progress');", html)
 
     def test_simkl_resume_source_reaches_runtime_config(self) -> None:
@@ -249,7 +246,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("Step ${onboardingStep} of 5", html)
         self.assertIn("/api/profile/onboarding/destination", html)
         self.assertIn("restoreOnboardingProviderCards", html)
-        self.assertIn("intervalPresetOptions(21600, current)", html)
+        self.assertIn("intervalPresetOptions(43200, current)", html)
+        self.assertIn("This schedule applies to the routes created during setup.", html)
         self.assertIn("onboardingReadyGraphHtml", html)
         self.assertNotIn("Enter a profile password. Leave UUID blank", html)
 
@@ -2691,6 +2689,50 @@ class WebTests(unittest.TestCase):
         titles = sorted(row["title"] for row in data["entries"])
         self.assertEqual(titles, ["Attack on Titan", "Inception", "Mononoke"])
 
+    def test_local_library_splits_absolute_anime_season_into_cours(self) -> None:
+        credentials = _blank_credentials()
+        credentials["pmdb"]["api_key"] = "pk"
+        credentials["tmdb"] = {"api_key": "tmdb-key"}
+        profile = web._profile_store.create_profile("pw", credentials, {})
+        profile_id = profile["profile_id"]
+        self.client.post("/api/profile/login", json={"profile_id": profile_id, "password": "pw"})
+        store = web._library_store_for(profile_id)
+        store.add("watchlist", [{
+            "media_type": "tv", "tmdb_id": "203737", "title": "Oshi no Ko", "season": 1,
+        }], source="simkl")
+        store.mark_watched([
+            {"media_type": "tv", "tmdb_id": "203737", "season": 1, "episode": episode}
+            for episode in (1, 12, 25)
+        ], source="simkl")
+        self.addCleanup(web._library_stores.pop, profile_id, None)
+        mappings = [
+            {"season": {"tmdb": 1, "tvdb": 1}},
+            {"season": {"tmdb": 1, "tvdb": 2}, "episode_offset": {"tmdb": 11}},
+            {"season": {"tmdb": 1, "tvdb": 3}, "episode_offset": {"tmdb": 24}},
+        ]
+        season_map = {
+            episode: {"name": f"Absolute {episode}", "still_url": "", "air_date": ""}
+            for episode in range(1, 36)
+        }
+        with patch.object(web.fribb_client, "lookup_all_by_tmdb", return_value=mappings), \
+             patch.object(web.TmdbClient, "get_details", return_value={
+                 "title": "Oshi no Ko", "year": "2023", "poster_url": "",
+                 "tmdb_id": 203737, "media_type": "tv", "overview": "",
+             }), \
+             patch.object(web.TmdbClient, "get_season_episodes", return_value=season_map):
+            response = self.client.post(
+                "/api/profile/library/entry", json={"key": "tmdb:tv:203737"},
+            )
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["season"] for row in data["seasons"]], [1, 2, 3])
+        self.assertEqual([len(row["episodes"]) for row in data["seasons"]], [11, 13, 11])
+        self.assertTrue(data["seasons"][0]["episodes"][0]["watched"])
+        self.assertTrue(data["seasons"][1]["episodes"][0]["watched"])
+        self.assertTrue(data["seasons"][2]["episodes"][0]["watched"])
+        self.assertEqual(data["seasons"][1]["episodes"][0]["name"], "Absolute 12")
+
     def test_library_detail_exposes_persisted_provider_state(self) -> None:
         profile_id, store = self._library_profile()
         store.add("collection", [{
@@ -3529,6 +3571,53 @@ class WebTests(unittest.TestCase):
             {"season": 2, "watched": 1, "total": 12},
         ])
 
+    def test_library_splits_absolute_tmdb_anime_episodes_into_logical_seasons(self) -> None:
+        """TMDB keeps some sequel cours in one long season. Fribb's offsets
+        must split those rows for the Library while retaining TMDB metadata."""
+        self._login(self._make_library_profile())
+        history = [
+            {"id": f"w{episode}", "tmdb_id": 203737, "media_type": "tv",
+             "season": 1, "episode": episode, "watched_at": "2026-01-01T10:00:00Z"}
+            for episode in (1, 11, 12, 24, 25, 35)
+        ]
+        mappings = [
+            {"season": {"tmdb": 1, "tvdb": 1}},
+            {"season": {"tmdb": 1, "tvdb": 2}, "episode_offset": {"tmdb": 11}},
+            {"season": {"tmdb": 1, "tvdb": 3}, "episode_offset": {"tmdb": 24}},
+        ]
+        season_map = {
+            episode: {"name": f"Absolute {episode}", "still_url": f"https://img/{episode}.jpg", "air_date": ""}
+            for episode in range(1, 36)
+        }
+        with patch.object(web.PublicMetaDBClient, "get_watched_history", return_value=history), \
+             patch.object(web.fribb_client, "lookup_all_by_tmdb", return_value=mappings), \
+             patch.object(web.TmdbClient, "get_details", return_value={
+                 "title": "Oshi no Ko", "year": "2023", "poster_url": "",
+                 "tmdb_id": 203737, "media_type": "tv", "overview": "",
+             }), \
+             patch.object(web.TmdbClient, "get_season_episodes", return_value=season_map):
+            response = self.client.post(
+                "/api/profile/library/history/title",
+                json={"tmdb_id": 203737, "media_type": "tv"},
+            )
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [(row["season"], row["episode"]) for row in data["episodes"]],
+            [(1, 1), (1, 11), (2, 1), (2, 13), (3, 1), (3, 11)],
+        )
+        self.assertEqual(data["seasons"], [
+            {"season": 1, "watched": 2, "total": 11},
+            {"season": 2, "watched": 2, "total": 13},
+            {"season": 3, "watched": 2, "total": 11},
+        ])
+        season_two_first = next(
+            row for row in data["episodes"] if row["season"] == 2 and row["episode"] == 1
+        )
+        self.assertEqual(season_two_first["name"], "Absolute 12")
+        self.assertEqual(season_two_first["still_url"], "https://img/12.jpg")
+
     def test_library_history_title_season_totals_stay_zero_without_a_tmdb_key(self) -> None:
         """Without a key there is no episode count to compare against, and a
         coverage bar drawn from a guess is worse than none."""
@@ -3594,8 +3683,7 @@ class WebTests(unittest.TestCase):
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        # Compatibility inputs remain in the DOM for old profile payloads, but
-        # the PMDB-first pipeline is no longer a user-facing settings surface.
+        # The PMDB-first pipeline is no longer a user-facing settings surface.
         self.assertIn('id="sync-settings" class="hidden" style="display:none!important"', html)
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
@@ -3610,15 +3698,31 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('id="stab-behavior"', html)
         self.assertNotIn('id="snav-lists"', html)
         self.assertNotIn('id="snav-behavior"', html)
-        # The moved inputs must exist exactly once — duplicated ids would make
-        # the save logic read whichever copy came first.
-        for element_id in ('id="opt-auto-sync"', 'id="opt-simkl-visibility"', 'id="simkl-status-groups"',
-                           'id="trakt-catalog-list"', 'id="mdblist-list"', 'id="opt-activity-history-source"'):
+        # The remaining provider inputs must exist exactly once — duplicated
+        # ids would make the save logic read whichever copy came first.
+        for element_id in ('id="opt-simkl-visibility"', 'id="simkl-status-groups"',
+                           'id="trakt-catalog-list"', 'id="mdblist-list"'):
             self.assertEqual(html.count(element_id), 1, element_id)
+        for retired_id in ('id="opt-auto-sync"', 'id="opt-activity-history-source"',
+                           'id="opt-activity-resume-source"', 'id="legacy-pmdb-schedule-options"'):
+            self.assertNotIn(retired_id, html)
         self.assertIn('id="pipelines-panel"', html)
         self.assertIn('id="pipelines-panel" style="display:none!important"', html)
         self.assertLess(html.index('id="pairs-dash-panel"'), html.index('id="pipelines-panel"'),
                         "the dashboard must lead with pairs too")
+
+    def test_schedule_settings_are_route_based_instead_of_pmdb_based(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="route-schedule-list"', html)
+        self.assertIn('data-route-schedule-auto=', html)
+        self.assertIn('data-route-schedule-hours=', html)
+        self.assertIn("A route defines its source, destination, content, removal behavior", html)
+        self.assertIn("Automatic runs and deletion safeguards apply to sync routes", html)
+        self.assertIn("renderRouteScheduleSettings", html)
+        self.assertIn("updateRouteSchedule", html)
+        self.assertNotIn("Schedule and behavior for syncing lists from your connected sources into PublicMetaDB.", html)
+        self.assertNotIn("Delete PublicMetaDB lists when disabled in SyncMeta", html)
 
 
 if __name__ == "__main__":

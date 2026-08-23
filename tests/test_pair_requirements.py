@@ -256,6 +256,44 @@ class PairAutoSyncContractTests(unittest.TestCase):
 
 
 class PairSchedulerContractTests(unittest.TestCase):
+    def test_changing_pair_interval_reschedules_the_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProfileStore(Path(directory) / "profiles.json")
+            created = store.create_profile("secret", {
+                "simkl": {"client_id": "c", "access_token": "s"},
+                "trakt": {"client_id": "c", "access_token": "t"},
+                "pmdb": {"api_key": "p"},
+            }, {
+                "auto_sync": False,
+                "media_types": ["movies"],
+                "sync_pairs": [{
+                    "pair_id": "simkl-trakt-auto",
+                    "source": "simkl",
+                    "target": "trakt",
+                    "categories": ["watchlist"],
+                    "auto_sync": True,
+                    "interval_seconds": TWELVE_HOURS_SECONDS,
+                }],
+            })
+            profile_id = created["profile_id"]
+            before = store.get_private_profile_by_id(profile_id)["pair_sync_schedule"]["simkl-trakt-auto"]["next_sync_at"]
+
+            store.update_sync_pairs(profile_id, [{
+                "pair_id": "simkl-trakt-auto",
+                "source": "simkl",
+                "target": "trakt",
+                "categories": ["watchlist"],
+                "auto_sync": True,
+                "interval_seconds": 24 * 60 * 60,
+            }])
+
+            after = store.get_private_profile_by_id(profile_id)["pair_sync_schedule"]["simkl-trakt-auto"]["next_sync_at"]
+            self.assertNotEqual(after, before)
+            self.assertGreaterEqual(
+                datetime.fromisoformat(after),
+                datetime.now(timezone.utc) + timedelta(hours=23),
+            )
+
     def test_auto_pair_is_claimed_with_global_sync_off_then_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ProfileStore(Path(directory) / "profiles.json")
