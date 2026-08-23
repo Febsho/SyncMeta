@@ -673,6 +673,34 @@ class SourceListSelectionTests(unittest.TestCase):
         self.assertEqual(target.fetched[0][1], [])
 
 
+class AniListCustomListTests(unittest.TestCase):
+    class Client:
+        def __init__(self):
+            self.by_status = {
+                "PLANNING": [{**_movie("1", "Plan"), "anilist_custom_lists": ["Favorites"]}],
+                "CURRENT": [{**_movie("2", "Current"), "anilist_custom_lists": ["Favorites", "2026"]}],
+                "COMPLETED": [{**_movie("3", "Done"), "anilist_custom_lists": ["2026"]}],
+                "PAUSED": [], "DROPPED": [],
+            }
+
+        def get_status(self, status):
+            return list(self.by_status.get(status, []))
+
+        def can_write(self): return False
+        def write_blocked_reason(self): return "read only"
+
+    def test_custom_lists_are_discovered_and_can_be_read(self) -> None:
+        from src.providers import AniListAdapter
+        adapter = AniListAdapter(self.Client())
+
+        sources = adapter.list_sources()
+        favorites = next(entry for entry in sources if entry["label"] == "Favorites")
+        items = adapter.fetch(CATEGORY_WATCHLIST, [favorites["key"]])
+
+        self.assertEqual(favorites["kind"], "list")
+        self.assertEqual(sorted(item["tmdb_id"] for item in items), ["1", "2"])
+
+
 class TraktListDiscoveryTests(unittest.TestCase):
     class Client:
         def get_personal_lists_metadata(self):

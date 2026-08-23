@@ -544,6 +544,8 @@
     .lib-search{width:100%;max-width:320px;background:var(--z900);border:1px solid var(--z800);border-radius:7px;
       padding:8px 12px;font-size:13px;color:var(--z100);outline:none;font-family:inherit}
     .lib-search:focus{border-color:var(--accent)}
+    .lib-toolbar-select{background:var(--z900);border:1px solid var(--z800);border-radius:7px;padding:8px 32px 8px 12px;
+      font-size:13px;color:var(--z100);font-family:inherit}
     .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:14px;padding:16px}
     .lib-card{background:none;border:none;padding:0;cursor:pointer;text-align:left;font-family:inherit;color:inherit;min-width:0}
     .lib-poster{width:100%;aspect-ratio:2/3;border-radius:8px;background:var(--z900);border:1px solid var(--line);
@@ -1381,7 +1383,15 @@
             <div class="lib-filters">
               <div class="lib-filter-row" id="lib-kind-filters" role="group" aria-label="Filter by type"></div>
               <div class="lib-filter-row" id="lib-section-filters" role="group" aria-label="Filter by section"></div>
-              <input type="text" id="lib-search" class="lib-search" placeholder="Search titles…" autocomplete="off">
+              <div class="lib-filter-row">
+                <input type="text" id="lib-search" class="lib-search" placeholder="Search titles…" autocomplete="off">
+                <select id="lib-sort" class="lib-toolbar-select" aria-label="Sort local library">
+                  <option value="title">Title A–Z</option>
+                  <option value="recent">Recently updated</option>
+                  <option value="year">Newest release</option>
+                  <option value="watched">Most watched</option>
+                </select>
+              </div>
             </div>
           </div>
           <div id="lib-local-body"><div class="empty">Sign in to see your library.</div></div>
@@ -1395,8 +1405,17 @@
           </div>
           <div class="panel-body" style="padding-bottom:0">
             <div class="library-chips" id="library-chips"><div class="empty">Sign in and save a profile to browse your library.</div></div>
+            <div class="lib-filter-row hidden" id="library-browse-tools" style="margin-top:12px">
+              <input type="text" id="library-item-search" class="lib-search" placeholder="Search this list…" autocomplete="off">
+              <select id="library-item-sort" class="lib-toolbar-select" aria-label="Sort provider library">
+                <option value="recent">Recently watched / added</option>
+                <option value="title">Title A–Z</option>
+                <option value="year">Newest release</option>
+              </select>
+            </div>
           </div>
           <div id="library-body"><div class="empty">Pick a list or your watch history above.</div></div>
+          <div class="lib-pager hidden" id="library-pager"></div>
         </div>
 
         <div class="lib-detail-overlay hidden" id="lib-detail" role="dialog" aria-modal="true" aria-label="Title details">
@@ -4477,6 +4496,15 @@
     let libraryOverviewLoaded = false;
     let libraryOverviewProvider = '';
     let libraryLoadToken = 0;
+    let libraryItems = [];
+    let libraryItemsHistory = false;
+    let libraryItemsTotal = 0;
+    let libraryItemsPlays = 0;
+    let libraryItemsLimited = false;
+    let libraryItemsDerived = false;
+    let libraryItemQuery = '';
+    let libraryItemSort = 'recent';
+    let libraryItemPage = 1;
 
     const LIBRARY_PROVIDER_LABELS = {
       pmdb: 'PublicMetaDB', simkl: 'SIMKL', trakt: 'Trakt', anilist: 'AniList', mdblist: 'MDBList',
@@ -4515,6 +4543,7 @@
     let libKinds = [];          // empty = every kind
     let libSection = '';        // '' = every section
     let libQuery = '';
+    let libSort = 'title';
     let libPage = 1;
     let libData = { entries: [], total: 0, counts: {}, kinds: [] };
     let libSearchTimer = null;
@@ -4532,6 +4561,9 @@
         libraryLists = [];
         librarySourceFilter = 'all';
         libraryTextFilter = '';
+        libraryItems = [];
+        libraryItemPage = 1;
+        libraryItemQuery = '';
       }
       document.querySelectorAll('[data-lib-mode]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.libMode === libMode);
@@ -4541,6 +4573,10 @@
       const pmdb = el('library-pmdb-panel');
       if (local) local.classList.toggle('hidden', libMode !== 'local');
       if (pmdb) pmdb.classList.toggle('hidden', libMode === 'local');
+      const tools = el('library-browse-tools');
+      const pager = el('library-pager');
+      if (tools && libMode === 'local') tools.classList.add('hidden');
+      if (pager && libMode === 'local') pager.classList.add('hidden');
       const sub = el('library-sub');
       if (sub) {
         sub.textContent = libMode === 'local'
@@ -4570,7 +4606,7 @@
       const sectionNode = el('lib-section-filters');
       if (sectionNode) {
         const bySection = (libData.counts && libData.counts.by_section) || {};
-        const sections = [['', 'Everything'], ['watchlist', 'Watchlist'], ['collection', 'Collection'], ['history', 'Watched']];
+        const sections = [['', 'Everything'], ['watchlist', 'Watchlist'], ['collection', 'Collection'], ['history', 'Watched'], ['resume', 'In progress']];
         sectionNode.innerHTML = sections.map(([key, label]) => {
           const count = key ? (bySection[key] || 0) : ((libData.counts && libData.counts.total) || 0);
           return `<button class="lib-chip${libSection === key ? ' active' : ''}" type="button" data-lib-section="${escAttr(key)}">${esc(label)}<span class="lib-chip-count">${count}</span></button>`;
@@ -4616,6 +4652,8 @@
             <span>${esc(LIB_KIND_LABEL[entry.kind] || entry.kind || '')}</span>
             ${entry.year ? `<span>${esc(String(entry.year))}</span>` : ''}
             ${entry.watched_count ? `<span>${entry.watched_count} watched</span>` : ''}
+            ${entry.resume_count ? `<span>${entry.resume_count} in progress</span>` : ''}
+            ${(entry.sources || []).length ? `<span>${entry.sources.length} source${entry.sources.length === 1 ? '' : 's'}</span>` : ''}
           </div>
         </button>`).join('')}</div>`;
 
@@ -4642,7 +4680,7 @@
       const seq = ++libRequestSeq;
       if (body && !(libData.entries || []).length) body.innerHTML = skeletonRows(5);
       const result = await apiPost('/api/profile/library/entries', {
-        kinds: libKinds, section: libSection, query: libQuery, page: libPage,
+        kinds: libKinds, section: libSection, query: libQuery, sort: libSort, page: libPage,
       });
       if (seq !== libRequestSeq) return;
       if (!result.ok) {
@@ -4779,11 +4817,30 @@
     });
 
     document.addEventListener('input', event => {
-      if (!event.target || event.target.id !== 'lib-search') return;
-      libQuery = event.target.value;
-      libPage = 1;
-      clearTimeout(libSearchTimer);
-      libSearchTimer = setTimeout(loadLocalLibrary, 250);
+      if (!event.target) return;
+      if (event.target.id === 'lib-search') {
+        libQuery = event.target.value;
+        libPage = 1;
+        clearTimeout(libSearchTimer);
+        libSearchTimer = setTimeout(loadLocalLibrary, 250);
+      } else if (event.target.id === 'library-item-search') {
+        libraryItemQuery = event.target.value;
+        libraryItemPage = 1;
+        renderRemoteLibraryItems();
+      }
+    });
+
+    document.addEventListener('change', event => {
+      if (!event.target) return;
+      if (event.target.id === 'lib-sort') {
+        libSort = event.target.value || 'title';
+        libPage = 1;
+        loadLocalLibrary();
+      } else if (event.target.id === 'library-item-sort') {
+        libraryItemSort = event.target.value || 'recent';
+        libraryItemPage = 1;
+        renderRemoteLibraryItems();
+      }
     });
 
     async function refreshLibrary() {
@@ -4801,6 +4858,8 @@
           el('library-chips').innerHTML = `<div class="empty">${esc(message)}</div>`;
           el('library-body').innerHTML = '';
           el('library-count').textContent = '';
+          if (el('library-browse-tools')) el('library-browse-tools').classList.add('hidden');
+          if (el('library-pager')) el('library-pager').classList.add('hidden');
           return;
         }
         libraryOverviewLoaded = true;
@@ -4825,6 +4884,8 @@
         else {
           el('library-body').innerHTML = `<div class="empty">No readable lists are available from ${esc(LIBRARY_PROVIDER_LABELS[libMode] || libMode)}.</div>`;
           el('library-count').textContent = '';
+          if (el('library-browse-tools')) el('library-browse-tools').classList.add('hidden');
+          if (el('library-pager')) el('library-pager').classList.add('hidden');
         }
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; }
@@ -4858,6 +4919,10 @@
     function bindLibraryChip(node) {
       node.addEventListener('click', () => {
         librarySelection = node.dataset.libraryTarget;
+        libraryItemPage = 1;
+        libraryItemQuery = '';
+        const search = el('library-item-search');
+        if (search) search.value = '';
         setLibraryPickerOpen(false);
         renderLibraryChips();
         loadLibrarySelection();
@@ -4896,12 +4961,17 @@
 
     function librarySelectedListName() {
       const entry = libraryLists.find(item => item.id === librarySelection);
-      if (entry) return entry.name;
+      if (entry && !libraryPinnedLists().some(item => item.id === entry.id)) return entry.name;
       return '';
     }
 
     function libraryPinnedLists() {
-      return libraryLists.filter(entry => entry.type === 'watchlist' || entry.type === 'history');
+      // Small service catalogues are easier to scan as direct chips. Only a
+      // genuinely large Trakt/MDBList/PMDB catalogue needs the searchable
+      // dropdown. Native Picks stays visible beside Watchlist and History even
+      // when the rest overflow into that dropdown.
+      if (libraryLists.length <= 12) return libraryLists;
+      return libraryLists.filter(entry => ['watchlist', 'history', 'picks'].includes(entry.type));
     }
 
     function libraryBrowsableLists() {
@@ -4938,8 +5008,7 @@
       const pinnedLists = libraryPinnedLists();
       const listCount = libraryBrowsableLists().length;
       const { sources, hasOther } = libraryListSources();
-      // Watch History and the watchlists are the entries people actually reach
-      // for, and there are only ever a couple, so they stay as direct buttons.
+      // Native sources and compact catalogues stay visible as direct buttons.
       const pinned = [
         ...(libMode === 'pmdb' ? [`<button class="library-chip${librarySelection === 'history' ? ' active' : ''}" type="button" data-library-target="history">Watch History</button>`] : []),
         ...pinnedLists.map(entry => libraryChipHtml(entry)),
@@ -5042,13 +5111,51 @@
       updateLibraryTmdbNotice(result.data.tmdb_error || '');
       const items = Array.isArray(result.data.items) ? result.data.items : [];
       const total = Number(result.data.total || items.length);
-      if (isHistory) {
-        const plays = Number(result.data.total_plays || 0);
-        el('library-count').textContent = `${total} title${total === 1 ? '' : 's'}${plays ? ` · ${plays} play${plays === 1 ? '' : 's'}` : ''}${items.length < total ? ` — showing latest ${items.length}` : ''}`;
-      } else {
-        el('library-count').textContent = `${items.length} item${items.length === 1 ? '' : 's'}`;
+      libraryItems = items;
+      libraryItemsHistory = isHistory;
+      libraryItemsTotal = total;
+      libraryItemsPlays = Number(result.data.total_plays || 0);
+      libraryItemsLimited = !!result.data.limited || items.length < total;
+      libraryItemsDerived = items.some(item => item.derived);
+      libraryItemPage = 1;
+      const tools = el('library-browse-tools');
+      if (tools) tools.classList.remove('hidden');
+      renderRemoteLibraryItems();
+    }
+
+    function renderRemoteLibraryItems() {
+      const query = libraryItemQuery.trim().toLowerCase();
+      const rows = libraryItems.filter(item => !query || String(item.title || '').toLowerCase().includes(query));
+      rows.sort((a, b) => {
+        if (libraryItemSort === 'title') return String(a.title || '').localeCompare(String(b.title || ''));
+        if (libraryItemSort === 'year') return Number(b.year || 0) - Number(a.year || 0)
+          || String(a.title || '').localeCompare(String(b.title || ''));
+        return String(b.last_watched_at || '').localeCompare(String(a.last_watched_at || ''));
+      });
+      const pageSize = 60;
+      const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+      libraryItemPage = Math.min(libraryItemPage, pages);
+      const start = (libraryItemPage - 1) * pageSize;
+      const shown = rows.slice(start, start + pageSize);
+      const count = el('library-count');
+      if (count) {
+        const label = libraryItemsHistory ? 'title' : 'item';
+        const filtered = query ? `${rows.length} of ` : '';
+        const plays = libraryItemsHistory && libraryItemsPlays
+          ? ` · ${libraryItemsPlays} ${libraryItemsDerived ? 'derived episode' : 'play'}${libraryItemsPlays === 1 ? '' : 's'}` : '';
+        count.textContent = `${filtered}${libraryItemsTotal} ${label}${libraryItemsTotal === 1 ? '' : 's'}${plays}${libraryItemsLimited ? ' · first 1000 loaded' : ''}`;
       }
-      renderLibraryGrid(items, isHistory, isHistory && libMode === 'pmdb');
+      renderLibraryGrid(shown, libraryItemsHistory, libraryItemsHistory && libMode === 'pmdb');
+      const pager = el('library-pager');
+      if (!pager) return;
+      pager.classList.toggle('hidden', pages <= 1);
+      if (pages > 1) {
+        pager.innerHTML = `<button class="btn btn-sm" type="button" id="library-prev" ${libraryItemPage <= 1 ? 'disabled' : ''}>Previous</button>
+          <span class="lib-pager-info">Page ${libraryItemPage} of ${pages}</span>
+          <button class="btn btn-sm" type="button" id="library-next" ${libraryItemPage >= pages ? 'disabled' : ''}>Next</button>`;
+        el('library-prev').onclick = () => { libraryItemPage -= 1; renderRemoteLibraryItems(); };
+        el('library-next').onclick = () => { libraryItemPage += 1; renderRemoteLibraryItems(); };
+      }
     }
 
     function libraryPosterHtml(item, title) {

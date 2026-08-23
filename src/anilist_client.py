@@ -70,6 +70,7 @@ query ($userName: String, $status: MediaListStatus) {
       entries {
         id
         progress
+        customLists
         completedAt {
           year
           month
@@ -738,6 +739,10 @@ class AniListClient:
                     normalized["anilist_progress"] = _safe_progress(entry.get("progress"))
                     normalized["anilist_episode_count"] = _safe_progress(media.get("episodes"))
                     normalized["anilist_watched_at"] = _entry_watched_at(entry)
+                    normalized["anilist_custom_lists"] = [
+                        str(name).strip() for name in (entry.get("customLists") or [])
+                        if str(name).strip()
+                    ]
                     items.append(normalized)
 
         self._status_cache[status] = list(items)

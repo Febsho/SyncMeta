@@ -80,6 +80,7 @@ from src.providers import (
     CATEGORY_LABELS,
     CATEGORY_COLLECTION,
     CATEGORY_WATCHLIST,
+    enrich_identity,
     PAIR_MODE_LABELS,
     PROVIDER_LABELS,
     PROVIDER_ORDER,
@@ -3070,7 +3071,14 @@ def _remote_library_item(raw: dict) -> dict | None:
         media_type = "movie"
     else:
         media_type = "tv" if raw.get("season") is not None or raw.get("episode") is not None else "movie"
-    title = str(raw.get("title") or raw.get("name") or "Unknown").strip()
+    title = str(raw.get("root_title") or raw.get("title") or raw.get("name") or "Unknown").strip()
+    root_anilist_id = raw.get("root_anilist_id") or (raw.get("anime_identity") or {}).get("root_anilist_id")
+    anilist_id = raw.get("anilist_id") or ids.get("anilist")
+    mal_id = raw.get("root_mal_id") or raw.get("mal_id") or ids.get("mal")
+    try:
+        root_offset = int(raw.get("root_episode_offset") or 0)
+    except (TypeError, ValueError):
+        root_offset = 0
     return {
         "tmdb_id": str(tmdb_id) if tmdb_id else None,
         "media_type": media_type,
@@ -3079,9 +3087,64 @@ def _remote_library_item(raw: dict) -> dict | None:
         "poster_url": str(raw.get("poster_url") or ""),
         "season": raw.get("season"),
         "episode": raw.get("episode"),
+        "root_episode_offset": root_offset,
+        "anilist_id": str(anilist_id) if anilist_id else None,
+        "root_anilist_id": str(root_anilist_id) if root_anilist_id else None,
+        "mal_id": str(mal_id) if mal_id else None,
+        "derived": bool(raw.get("anilist_derived")),
         "last_watched_at": raw.get("watched_at") or raw.get("last_watched_at") or raw.get("added_at"),
         "play_count": int(raw.get("plays") or raw.get("play_count") or 1),
     }
+
+
+def _remote_library_identity(item: dict) -> str:
+    media_type = str(item.get("media_type") or "tv")
+    root_anilist = str(item.get("root_anilist_id") or "").strip()
+    if root_anilist:
+        # Sequel cours commonly have different TMDB ids but share one AniList
+        # prequel-chain root. The Library card represents that root series.
+        return f"{media_type}:anilist-root:{root_anilist}"
+    for namespace, value in (
+        ("tmdb", item.get("tmdb_id")),
+        ("anilist", item.get("root_anilist_id") or item.get("anilist_id")),
+        ("mal", item.get("mal_id")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return f"{media_type}:{namespace}:{text}"
+    return f"{media_type}:title:{str(item.get('title') or '').strip().casefold()}:{item.get('year') or ''}"
+
+
+def _group_remote_library_history(items: list[dict]) -> list[dict]:
+    """Collapse episode/play rows into one card per movie or root series."""
+    grouped: dict[str, dict] = {}
+    for item in items:
+        key = _remote_library_identity(item)
+        row = grouped.get(key)
+        if row is None:
+            row = {**item, "play_count": 0, "_episodes": set(), "_seasons": set()}
+            grouped[key] = row
+        row["play_count"] += max(1, int(item.get("play_count") or 1))
+        watched_at = str(item.get("last_watched_at") or "")
+        if watched_at > str(row.get("last_watched_at") or ""):
+            row["last_watched_at"] = watched_at
+        if item.get("season") is not None and item.get("episode") is not None:
+            try:
+                season = int(item["season"])
+                episode = int(item["episode"]) + int(item.get("root_episode_offset") or 0)
+            except (TypeError, ValueError):
+                continue
+            row["_episodes"].add((season, episode))
+            row["_seasons"].add(season)
+    out = []
+    for row in grouped.values():
+        episodes = row.pop("_episodes")
+        seasons = row.pop("_seasons")
+        row["episodes_watched"] = len(episodes)
+        row["seasons_watched"] = len(seasons)
+        out.append(row)
+    out.sort(key=lambda row: str(row.get("last_watched_at") or ""), reverse=True)
+    return out
 
 
 @app.route("/api/profile/library/provider/overview", methods=["POST"])
@@ -3120,17 +3183,36 @@ def api_profile_library_provider_items():
         logger.warning("Library provider %s source %s failed: %s", provider, source_key, exc)
         return _json_error(f"Could not load {source['name']} from {adapter.label}", 502)
     items = []
-    for raw in raw_items[:1000]:
-        normalized = _remote_library_item(raw)
+    for raw in raw_items:
+        # AniList sequel/cour entries carry their root identity separately.
+        # Enrichment maps them onto a shared portable series identity when a
+        # mapping is available; the normalizer retains root AniList/MAL ids as
+        # a fallback when it is not.
+        enriched = enrich_identity(raw)
+        normalized = _remote_library_item(enriched)
         if normalized:
+            if (
+                enriched.get("season") != raw.get("season")
+                or enriched.get("episode") != raw.get("episode")
+            ):
+                # enrich_identity already applied the provider/root episode
+                # offset while translating to portable coordinates.
+                normalized["root_episode_offset"] = 0
             items.append(normalized)
+    is_history = source["category"] == "history"
+    total_plays = sum(max(1, int(item.get("play_count") or 1)) for item in items)
+    if is_history:
+        items = _group_remote_library_history(items)
+    total = len(items)
+    items = items[:1000]
     items, tmdb_error = _enrich_library_items(items, tmdb_key)
     return jsonify({
         "provider": provider,
         "source": source,
         "items": items,
-        "total": len(raw_items),
-        "limited": len(raw_items) > len(items),
+        "total": total,
+        "total_plays": total_plays if is_history else 0,
+        "limited": total > len(items),
         "tmdb_configured": bool(tmdb_key),
         "tmdb_error": tmdb_error,
     })
@@ -3170,6 +3252,7 @@ def _library_entry_row(entry: dict) -> dict:
         "sections": sorted((entry.get("sections") or {}).keys()),
         "sources": list(entry.get("sources") or []),
         "watched_count": len(watched),
+        "resume_count": len(entry.get("resume") or {}),
         "season_count": len(seasons),
         "updated_at": entry.get("updated_at"),
     }
@@ -3188,6 +3271,7 @@ def api_profile_library_entries():
     kinds = body.get("kinds") or []
     section = str(body.get("section") or "").strip().lower()
     query = str(body.get("query") or "").strip().lower()
+    sort = str(body.get("sort") or "title").strip().lower()
     try:
         page = max(1, int(body.get("page") or 1))
     except (TypeError, ValueError):
@@ -3201,13 +3285,23 @@ def api_profile_library_entries():
             if section == "history":
                 if not entry.get("watched"):
                     continue
+            elif section == "resume":
+                if not entry.get("resume"):
+                    continue
             elif section not in (entry.get("sections") or {}):
                 continue
         if query and query not in str(entry.get("title") or "").lower():
             continue
         rows.append(_library_entry_row(entry))
 
-    rows.sort(key=lambda row: (str(row["title"]).lower(), row.get("year") or 0))
+    if sort == "recent":
+        rows.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=True)
+    elif sort == "year":
+        rows.sort(key=lambda row: (row.get("year") or 0, str(row["title"]).lower()), reverse=True)
+    elif sort == "watched":
+        rows.sort(key=lambda row: (row.get("watched_count") or 0, str(row["title"]).lower()), reverse=True)
+    else:
+        rows.sort(key=lambda row: (str(row["title"]).lower(), row.get("year") or 0))
     total = len(rows)
     start = (page - 1) * LIBRARY_PAGE_SIZE
     page_rows = rows[start:start + LIBRARY_PAGE_SIZE]
@@ -3523,6 +3617,17 @@ def api_profile_library_overview():
     except Exception as exc:
         logger.warning("Library overview: PMDB list fetch failed: %s", exc)
         return _json_error("Could not load your PublicMetaDB lists", 502)
+    # Native typed lists are account singletons. Keep Picks visible even when a
+    # PMDB deployment omits native lists from the generic paginated catalogue.
+    by_id = {str(entry.get("id")): entry for entry in raw_lists if entry.get("id")}
+    for native_type in ("watchlist", "picks"):
+        try:
+            native = pmdb.find_list_by_type(native_type)
+        except Exception:
+            native = None
+        if isinstance(native, dict) and native.get("id"):
+            by_id.setdefault(str(native["id"]), native)
+    raw_lists = list(by_id.values())
     # SyncMeta-managed lists know which service wrote them; join on list id
     # first, falling back to the list name, so the UI can filter per service.
     managed = (private_profile or {}).get("managed_lists") or []
@@ -3537,7 +3642,7 @@ def api_profile_library_overview():
     lists = [{
         "id": str(entry.get("id", "")),
         "name": str(entry.get("name", "") or "Unnamed list"),
-        "type": str(entry.get("type", "") or "custom"),
+        "type": str(entry.get("type") or entry.get("list_type") or "custom").strip().lower(),
         "item_count": entry.get("item_count") or entry.get("itemCount"),
         "is_public": bool(entry.get("is_public") or entry.get("isPublic")),
         "source": source_by_id.get(str(entry.get("id", "")))

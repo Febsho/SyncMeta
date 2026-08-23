@@ -205,6 +205,20 @@ class AniListClientTests(unittest.TestCase):
         self.assertTrue(all(row["cursor_exempt"] for row in rows))
         self.assertTrue(all(row["anilist_derived"] for row in rows))
 
+    def test_custom_list_membership_is_preserved_on_normalized_entries(self) -> None:
+        client = self._progress_client([{
+            "id": 5,
+            "progress": 1,
+            "customLists": ["Favorites", "2026", ""],
+            "completedAt": {"year": 2025, "month": 7, "day": 14},
+            "media": {"id": 1, "idMal": 11, "title": {"english": "Some Anime"},
+                      "seasonYear": 2024, "format": "TV", "episodes": 12},
+        }])
+
+        items = client.get_status("COMPLETED")
+
+        self.assertEqual(items[0]["anilist_custom_lists"], ["Favorites", "2026"])
+
     def test_progress_is_clamped_to_the_entrys_own_episode_count(self) -> None:
         client = self._progress_client([{
             "id": 5,

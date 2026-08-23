@@ -2800,6 +2800,20 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual([row["title"] for row in data["entries"]], ["Attack on Titan"])
 
+    def test_resume_filter_and_recent_sort_are_available(self) -> None:
+        _profile_id, store = self._library_profile()
+        store.save_resume([{
+            "media_type": "movie", "tmdb_id": "27205", "title": "Inception",
+            "position_ms": 10_000, "runtime_ms": 100_000,
+        }])
+
+        data = self.client.post(
+            "/api/profile/library/entries", json={"section": "resume", "sort": "recent"},
+        ).get_json()
+
+        self.assertEqual([row["title"] for row in data["entries"]], ["Inception"])
+        self.assertEqual(data["entries"][0]["resume_count"], 1)
+
     def test_search_matches_titles(self) -> None:
         self._library_profile()
 
@@ -3328,6 +3342,20 @@ class WebTests(unittest.TestCase):
         # The watchlist sorts first, entries without an id are dropped.
         self.assertEqual([entry["id"] for entry in data["lists"]], ["l1", "l2"])
 
+    def test_library_overview_includes_native_pmdb_picks(self) -> None:
+        self._login(self._make_library_profile(tmdb_key=""))
+        picks = {"id": "p1", "name": "My Picks", "type": "picks", "item_count": 4}
+        with patch.object(web.PublicMetaDBClient, "get_lists", return_value=[]), \
+             patch.object(web.PublicMetaDBClient, "find_list_by_type",
+                          side_effect=lambda kind: picks if kind == "picks" else None):
+            response = self.client.post("/api/profile/library/overview", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["lists"], [{
+            "id": "p1", "name": "My Picks", "type": "picks", "item_count": 4,
+            "is_public": False, "source": "",
+        }])
+
     def test_library_overview_attaches_source_service(self) -> None:
         profile = self._make_library_profile(tmdb_key="")
         web._profile_store.record_sync_success(profile["profile_id"], [], managed_lists=[
@@ -3491,6 +3519,46 @@ class WebTests(unittest.TestCase):
         self.assertEqual(items.status_code, 200)
         self.assertEqual(items.get_json()["items"][0]["tmdb_id"], "603")
         self.assertEqual(adapter.last_fetch, (CATEGORY_WATCHLIST, ["list:me/favorites"]))
+
+    def test_anilist_derived_history_is_grouped_by_root_before_limiting(self) -> None:
+        from src.providers import CATEGORY_HISTORY, ProviderAdapter
+
+        class FakeAniList(ProviderAdapter):
+            key = "anilist"
+            label = "AniList"
+            reads = (CATEGORY_HISTORY,)
+
+            def list_sources(self):
+                return [{
+                    "key": "history", "label": "Watch History (derived from progress)",
+                    "category": CATEGORY_HISTORY, "kind": "status",
+                }]
+
+            def fetch(self, category, source_lists=None):
+                return [{
+                    "title": f"Demon Slayer cour {cour}", "root_title": "Demon Slayer",
+                    "media_type": "tv", "tmdb_id": str(100 + cour),
+                    "anilist_id": str(200 + cour), "root_anilist_id": "101922",
+                    "season": 1, "episode": 1, "root_episode_offset": offset,
+                    "watched_at": f"2026-01-0{cour}T00:00:00Z", "anilist_derived": True,
+                } for cour, offset in ((1, 0), (2, 12))]
+
+        self._login(self._make_library_profile(tmdb_key=""))
+        adapter = FakeAniList()
+        with patch.object(web, "_build_provider_adapters", return_value={"anilist": adapter}), \
+             patch.object(web, "enrich_identity", side_effect=lambda item: item):
+            response = self.client.post(
+                "/api/profile/library/provider/items",
+                json={"provider": "anilist", "source_key": "history"},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["total_plays"], 2)
+        self.assertEqual(len(data["items"]), 1)
+        self.assertEqual(data["items"][0]["title"], "Demon Slayer")
+        self.assertEqual(data["items"][0]["episodes_watched"], 2)
 
     def test_library_provider_requires_a_configured_connection(self) -> None:
         self._login(self._make_library_profile(tmdb_key=""))

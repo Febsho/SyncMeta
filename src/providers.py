@@ -18,6 +18,7 @@ removal mode are recorded against, so it must be stable across runs.
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote, unquote
 
 logger = logging.getLogger(__name__)
 
@@ -872,6 +873,22 @@ class AniListAdapter(ProviderAdapter):
             "category": CATEGORY_HISTORY,
             "kind": "status",
         })
+        custom_names: set[str] = set()
+        for status, _label, _category in self._STATUSES:
+            try:
+                for item in self._client.get_status(status) or []:
+                    custom_names.update(
+                        str(name).strip() for name in (item.get("anilist_custom_lists") or [])
+                        if str(name).strip()
+                    )
+            except Exception:
+                logger.warning("AniList: could not discover custom lists from %s", status, exc_info=True)
+        sources.extend({
+            "key": f"custom:{quote(name, safe='')}",
+            "label": name,
+            "category": CATEGORY_WATCHLIST,
+            "kind": "list",
+        } for name in sorted(custom_names, key=str.casefold))
         return sources
 
     def __init__(self, client):
@@ -889,6 +906,24 @@ class AniListAdapter(ProviderAdapter):
         # history filter would return nothing without ever deriving the rows.
         if category == CATEGORY_HISTORY:
             return list(self._client.get_watched_history() or [])
+
+        selected_custom = {
+            unquote(str(key).split(":", 1)[1])
+            for key in (source_lists or []) if str(key).startswith("custom:")
+        }
+        if selected_custom:
+            items: list[dict] = []
+            seen: set[str] = set()
+            for status, _label, _category in self._STATUSES:
+                for item in self._client.get_status(status) or []:
+                    if not selected_custom.intersection(item.get("anilist_custom_lists") or []):
+                        continue
+                    key = item_key(item)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    items.append(item)
+            return items
 
         by_status = {status: cat for status, _label, cat in self._STATUSES}
         selected = [
@@ -1054,7 +1089,7 @@ class PmdbAdapter(ProviderAdapter):
             list_id = entry.get("id")
             if not list_id:
                 continue
-            if str(entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
+            if str(entry.get("type") or entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
                 continue  # already offered above by type
             if str(entry.get("name") or "").strip() == self._COLLECTION_LIST_NAME:
                 continue  # offered above as the default collection
@@ -1160,7 +1195,7 @@ class PmdbAdapter(ProviderAdapter):
             list_id = entry.get("id")
             if not list_id:
                 continue
-            if str(entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
+            if str(entry.get("type") or entry.get("list_type") or "").strip().lower() in self._NATIVE_LIST_TYPES:
                 continue
             out.append({"key": f"list:{list_id}", "label": str(entry.get("name") or f"List {list_id}")})
         return out
