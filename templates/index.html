@@ -336,17 +336,59 @@
     .settings-group-desc{font-size:12px;color:var(--z500);margin-bottom:16px;line-height:1.55}
     .settings-group.danger-zone{border-color:rgba(248,113,113,.25);background:rgba(239,68,68,.04)}
     .settings-group.danger-zone .settings-group-title{color:var(--red)}
-    .conn-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-    .conn-card{background:var(--z950);border:1px solid var(--z900);border-radius:10px;padding:18px}
-    .conn-card-title{font-size:15px;font-weight:700;color:var(--z100);margin-bottom:4px;display:flex;align-items:center;gap:8px}
-    .conn-card-desc{font-size:12px;color:var(--z500);margin-bottom:14px}
+    .conn-grid{display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:14px}
+    .conn-card{background:var(--z950);border:1px solid var(--z900);border-radius:12px;padding:0;overflow:hidden;transition:border-color .16s,background .16s}
+    .conn-card[data-connection-state="healthy"]{border-color:rgba(52,211,153,.28)}
+    .conn-card[data-connection-state="error"]{border-color:rgba(248,113,113,.3)}
+    .conn-card[data-connection-state="degraded"]{border-color:rgba(251,191,36,.3)}
+    .provider-card-main{padding:20px}
+    .provider-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+    .provider-card-identity{display:flex;align-items:flex-start;gap:12px;min-width:0}
+    .provider-mark{display:grid;place-items:center;flex:0 0 38px;width:38px;height:38px;border:1px solid color-mix(in srgb,var(--provider-color) 42%,var(--z800));border-radius:10px;background:color-mix(in srgb,var(--provider-color) 10%,transparent);color:var(--provider-color);font-family:var(--mono);font-size:11px;font-weight:800;letter-spacing:.04em}
+    .conn-card-title{font-size:15px;font-weight:700;color:var(--z100);margin-bottom:3px;display:flex;align-items:center;gap:8px}
+    .conn-card-desc{font-size:12.5px;color:var(--z500);margin:0;line-height:1.5;max-width:66ch}
+    .provider-status{display:inline-flex;align-items:center;gap:7px;flex:0 0 auto;padding:5px 10px;border:1px solid var(--z800);border-radius:999px;color:var(--z400);font-size:11px;font-weight:700;white-space:nowrap}
+    .provider-status::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--z600)}
+    .provider-status[data-status="healthy"]{border-color:rgba(52,211,153,.28);color:var(--green);background:rgba(52,211,153,.05)}
+    .provider-status[data-status="healthy"]::before{background:var(--green)}
+    .provider-status[data-status="error"]{border-color:rgba(248,113,113,.3);color:var(--red);background:rgba(248,113,113,.05)}
+    .provider-status[data-status="error"]::before{background:var(--red)}
+    .provider-status[data-status="degraded"],.provider-status[data-status="checking"]{border-color:rgba(251,191,36,.3);color:var(--orange);background:rgba(251,191,36,.05)}
+    .provider-status[data-status="degraded"]::before,.provider-status[data-status="checking"]::before{background:var(--orange)}
+    .provider-summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;margin-top:18px;align-items:end}
+    .provider-capabilities{display:flex;flex-wrap:wrap;gap:7px}
+    .provider-capability{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid var(--z850,var(--z800));border-radius:7px;color:var(--z400);font-size:11.5px;background:rgba(255,255,255,.015)}
+    .provider-capability::before{content:"\2713";color:var(--green);font-size:10px;font-weight:800}
+    .provider-capability.disabled::before{content:"\2013";color:var(--z600)}
+    .provider-capability.disabled{color:var(--z600)}
+    .provider-checked{font-size:11px;color:var(--z600);text-align:right;white-space:nowrap}
+    .provider-checked strong{display:block;color:var(--z400);font-size:11.5px;margin-top:3px;font-weight:600}
+    .connection-advanced{border-top:1px solid var(--z900);background:rgba(0,0,0,.12)}
+    .connection-advanced>summary{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;color:var(--z500);font-size:12px;font-weight:600;cursor:pointer;list-style:none}
+    .connection-advanced>summary::-webkit-details-marker{display:none}
+    .connection-advanced>summary::after{content:"+";font-family:var(--mono);font-size:15px;color:var(--z600)}
+    .connection-advanced[open]>summary::after{content:"\2212"}
+    .connection-advanced>summary:hover{color:var(--z200);background:rgba(255,255,255,.02)}
+    .connection-advanced-body{padding:6px 20px 20px;max-width:760px}
+    .provider-card-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 20px;border-top:1px solid var(--z900);background:rgba(255,255,255,.012)}
+    .provider-health-message{min-width:0;color:var(--z500);font-size:11.5px;line-height:1.45}
+    .provider-health-message strong{display:block;color:var(--z300);font-size:12px;margin-bottom:2px}
+    .provider-card-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+    .provider-card-actions .btn-danger-quiet{color:var(--red);border-color:rgba(248,113,113,.22)}
+    .connection-utility{margin-top:18px}
+    .connection-utility>summary{color:var(--z500);font-size:12px;cursor:pointer;padding:4px 0 12px}
+    .connection-skeleton{height:14px;border-radius:6px;background:linear-gradient(90deg,var(--z900),var(--z800),var(--z900));background-size:220% 100%;animation:skeleton-shimmer 1.4s linear infinite}
+    .notification-channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:14px}
+    .notification-channel{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--z950)}
+    .notification-channel .notify-events{display:grid;gap:6px;margin:10px 0;color:var(--z400);font-size:12px}
+    @keyframes skeleton-shimmer{to{background-position:-220% 0}}
     .conn-card.full{grid-column:1 / -1;margin-bottom:0}
     .connection-readiness{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:12px 14px;margin:12px 0 14px;border:1px solid var(--z800);border-radius:9px;background:var(--z950)}
     .connection-readiness.ready{border-color:rgba(52,211,153,.35)}
     .connection-readiness.blocked{border-color:rgba(248,113,113,.35)}
     .connection-readiness-title{font-size:13px;font-weight:700;color:var(--z100)}
     .connection-readiness-detail{font-size:12px;color:var(--z500);margin-top:3px}
-    .connection-health{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--z900)}
+    .connection-health{display:flex;align-items:center;justify-content:space-between;gap:10px}
     .connection-health-copy{min-width:0;font-size:11px;color:var(--z500)}
     .connection-health-copy strong{display:block;color:var(--z300);font-size:12px;margin-bottom:2px}
     .connection-health[data-status="error"] strong{color:var(--red)}
@@ -523,6 +565,13 @@
     .lib-detail-title{font-size:19px;font-weight:600;letter-spacing:-.3px;color:var(--white)}
     .lib-detail-sub{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
       color:var(--label);margin-top:6px;display:flex;gap:8px;flex-wrap:wrap}
+    .lib-provider-inspector{margin:18px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+    .lib-provider-inspector>.lib-season-title{padding:10px 12px;margin:0;background:var(--z900)}
+    .lib-provider-row{display:grid;grid-template-columns:34px minmax(0,1fr) minmax(150px,auto);gap:10px;align-items:center;padding:11px 12px;border-top:1px solid var(--line)}
+    .lib-provider-row .provider-mark{width:30px;height:30px}
+    .lib-provider-row small{display:block;margin-top:2px;color:var(--z500);font-size:11px}
+    .lib-provider-state{text-align:right;color:var(--green)}
+    .lib-provider-state small{color:var(--z500)}
     .lib-season{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
     .lib-season-title{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
       color:var(--label);margin-bottom:8px;display:flex;justify-content:space-between;gap:10px}
@@ -955,6 +1004,41 @@
     .modal-detail{color:var(--z500);font-size:12px}
     .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;flex-wrap:wrap}
 
+    /* ── First-run onboarding ───────────────────────────────────────────── */
+    .onboarding-card{max-width:780px;padding:0;overflow:hidden}
+    .onboarding-head{padding:22px 24px 18px;border-bottom:1px solid var(--line)}
+    .onboarding-kicker{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--label);margin-bottom:7px}
+    .onboarding-head .modal-title{font-size:21px;margin:0 0 5px}
+    .onboarding-progress{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:18px}
+    .onboarding-progress span{height:3px;border-radius:999px;background:var(--line)}
+    .onboarding-progress span.done,.onboarding-progress span.active{background:var(--accent)}
+    .onboarding-main{padding:24px;min-height:330px;max-height:60vh;overflow:auto}
+    .onboarding-main h3{font-size:17px;color:var(--z100);margin:0 0 7px}
+    .onboarding-lead{color:var(--z400);font-size:13px;line-height:1.55;margin-bottom:20px}
+    .onboarding-destination{border:1px solid color-mix(in srgb,var(--accent) 42%,var(--line));border-radius:12px;padding:17px;background:color-mix(in srgb,var(--accent) 5%,var(--surface))}
+    .onboarding-destination-title{display:flex;align-items:center;gap:10px;font-weight:600;color:var(--z100);margin-bottom:15px}
+    .onboarding-provider-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .onboarding-provider-grid .conn-card{margin:0}
+    .onboarding-choices{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .onboarding-choice-card{border:1px solid var(--line);border-radius:11px;padding:15px;background:var(--surface-2)}
+    .onboarding-choice-title{display:flex;align-items:center;gap:8px;color:var(--z100);font-weight:600;margin-bottom:10px}
+    .onboarding-check{display:flex;align-items:center;gap:9px;padding:7px 0;color:var(--z300);font-size:13px}
+    .onboarding-check input{width:auto;margin:0}
+    .onboarding-schedule{max-width:430px}
+    .onboarding-summary{display:flex;gap:18px;flex-wrap:wrap;margin-top:18px;color:var(--z300)}
+    .onboarding-summary strong{display:block;font-size:24px;color:var(--z100);font-weight:500}
+    .onboarding-ready-graph .graph-flow{margin-top:18px}
+    .onboarding-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 24px;border-top:1px solid var(--line);background:var(--surface-2)}
+    .onboarding-foot-actions{display:flex;gap:8px}
+    .onboarding-error{color:var(--red);font-size:12px;margin-top:10px;min-height:18px}
+    @media(max-width:700px){
+      .onboarding-card{max-height:94vh}
+      .onboarding-main{padding:18px;max-height:64vh}
+      .onboarding-head{padding:18px}
+      .onboarding-provider-grid,.onboarding-choices{grid-template-columns:1fr}
+      .onboarding-foot{padding:13px 18px}
+    }
+
     /* ── Sync preview ────────────────────────────────────────────────────── */
     .preview-total{display:flex;flex-direction:column;gap:4px;padding:0 0 14px;margin-bottom:12px;border-bottom:1px solid var(--line)}
     .preview-total .overline{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label)}
@@ -1037,6 +1121,13 @@
       .search-overlay{padding:10px;align-items:flex-start;padding-top:6vh}
       .search-card{max-height:82vh}
       .prov-stats{gap:12px}
+      .provider-card-header,.provider-summary,.provider-card-footer{display:flex;flex-direction:column;align-items:stretch}
+      .provider-status{align-self:flex-start}
+      .provider-checked{text-align:left}
+      .provider-card-actions{justify-content:flex-start;width:100%}
+      .provider-card-actions .btn{flex:1 1 auto;justify-content:center}
+      .connection-advanced>summary,.provider-card-main,.provider-card-footer{padding-left:16px;padding-right:16px}
+      .connection-advanced-body{padding-left:16px;padding-right:16px}
     }
     @media (max-width:480px){
       .cards{grid-template-columns:minmax(0,1fr)}
@@ -1213,6 +1304,7 @@
             <button class="btn btn-sm" type="button" id="btn-activity-refresh">Refresh</button>
           </div>
         </div>
+        <div class="lib-filter-row" role="tablist" aria-label="Activity type"><button class="lib-filter active" type="button" id="activity-mode-runs" onclick="setActivityMode('runs')">Runs</button><button class="lib-filter" type="button" id="activity-mode-changes" onclick="setActivityMode('changes')">Changes</button></div>
         <div class="lib-filter-row" id="activity-filters" role="group" aria-label="Filter activity"></div>
         <div class="panel hidden" id="run-detail-panel">
           <div class="panel-header"><span>Run Details</span><button class="btn btn-sm" type="button" id="btn-run-detail-close">Close</button></div>
@@ -1403,12 +1495,8 @@
                      to leave the UUID blank while their own UUID is sitting in
                      the field below it. -->
                 <div id="profile-quick-setup">
-                  <div class="settings-group-title">Quick Setup</div>
-                  <div class="guide-list" style="margin-bottom:20px">
-                    <div class="guide-step"><div class="guide-step-num">1</div><div>Enter a profile password. Leave UUID blank for a new profile. Click <strong>Save Profile</strong>.</div></div>
-                    <div class="guide-step"><div class="guide-step-num">2</div><div>Connect at least one remote service in <strong>Connections</strong>. PublicMetaDB is optional, just like the other providers.</div></div>
-                    <div class="guide-step"><div class="guide-step-num">3</div><div>Create a pair in <strong>Sync</strong>, choose its lists and behavior, then click <strong>Sync All Pairs</strong>.</div></div>
-                  </div>
+                  <div class="settings-group-title">Finish setup</div>
+                  <div class="guide-box" style="margin-bottom:20px">Connect PublicMetaDB, choose your sources and create the first synchronization routes in one guided flow.<div class="actions-bar"><button class="btn btn-primary" type="button" onclick="openOnboardingWizard()">Continue setup</button></div></div>
                 </div>
                 <div class="form-row">
                   <label for="profile-id">Profile UUID</label>
@@ -1434,6 +1522,7 @@
                   <button class="btn" onclick="loadProfile()">Load Profile</button>
                   <button class="btn" onclick="resetProfilePassword()">Change Password</button>
                   <button class="btn btn-ghost btn-sm" onclick="logoutProfile()">Log Out</button>
+                  <button class="btn btn-ghost btn-sm" type="button" onclick="openOnboardingWizard(true)">Run Setup Wizard</button>
                   <span class="save-flash" id="save-flash">Saved</span>
                 </div>
               </div>
@@ -1659,7 +1748,7 @@
               <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
               <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save</button>
               <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Preview</button>
-              <button class="btn btn-sm" type="button" id="btn-pairs-run">Sync now</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-run">Sync All Pairs</button>
             </span>
           </div>
           <div class="panel-body">
@@ -1952,6 +2041,7 @@
                   <div class="copy-row"><input type="number" id="opt-guard-removal-percent" min="1" max="100" step="1" value="20"><span class="hint" style="margin-top:0">%</span></div>
                   <div class="hint">Applies to sync pairs in <strong>mirror</strong> and <strong>managed</strong> removal modes. A paused run is reported on the Issues page and nothing is deleted.</div>
                 </div>
+                <div class="form-row"><label for="opt-conflict-policy">When comparable provider states disagree</label><select id="opt-conflict-policy"><option value="never">Never overwrite automatically</option><option value="newest">Newest change wins</option><option value="simkl">SIMKL priority</option><option value="trakt">Trakt priority</option><option value="pmdb">PublicMetaDB priority</option></select><div class="hint">Only semantically comparable watchlist/collection membership is considered. “Never” creates an Issue for manual resolution.</div></div>
               </div>
             </div>
 
@@ -1969,16 +2059,21 @@
                   <span class="actions-meta" id="notify-status"></span>
                 </div>
               </div>
+              <div class="settings-group form-section">
+                <div class="settings-group-title">Server-side channels</div>
+                <div class="desc">Discord, ntfy, Gotify and generic webhooks are sent by the server. Stored URLs and tokens are encrypted and never returned after saving.</div>
+                <div class="notification-channel-grid" id="server-notification-channels"></div>
+              </div>
             </div>
 
             <div class="settings-tab" id="stab-danger">
-              <div class="settings-page-title">Danger Zone</div>
-              <div class="settings-page-desc">Irreversible actions that affect this profile and its stored data.</div>
-              <div class="settings-group danger-zone form-section">
-                <div class="settings-group-title">Delete Profile</div>
-                <div class="settings-group-desc">Permanently deletes this profile, saved credentials, sync history, and local draft data from this browser. Type <span class="mono">DELETE</span> when asked to confirm.</div>
-                <button class="btn btn-danger" style="width:100%;justify-content:center" type="button" onclick="deleteProfileData()">Delete User Records</button>
-              </div>
+              <div class="settings-page-title">Data Management</div>
+              <div class="settings-page-desc">Explicit controls for SyncMeta state, mappings, connections, PublicMetaDB lists and this profile. Destructive actions remain clearly marked as the Danger Zone.</div>
+              <div class="settings-group form-section"><div class="settings-group-title">Synchronization state</div><div class="desc">Clears cursors, list fingerprints and pair ownership state. Connections remain; the next run rebuilds state.</div><button class="btn btn-sm" type="button" onclick="runDataAction('reset-sync-state','Reset synchronization state?','The next synchronization will rebuild all derived state.')">Reset sync state</button></div>
+              <div class="settings-group form-section"><div class="settings-group-title">Mappings</div><div class="desc">Automatic resolution caches can be rebuilt independently. Manually confirmed mappings are preserved unless you explicitly choose to remove them.</div><div class="actions-bar"><button class="btn btn-sm" type="button" onclick="clearMappingData(false)">Delete automatic cache</button><button class="btn btn-sm btn-danger" type="button" onclick="clearMappingData(true)">Delete cache and manual mappings</button></div></div>
+              <div class="settings-group form-section"><div class="settings-group-title">Connections</div><div class="desc">Disconnect SIMKL, Trakt, AniList and MDBList. PublicMetaDB destination and TMDB metadata settings remain.</div><button class="btn btn-sm btn-danger" type="button" onclick="runDataAction('disconnect-sources','Disconnect all source providers?','PublicMetaDB remains configured.')">Disconnect all providers</button></div>
+              <div class="settings-group form-section"><div class="settings-group-title">PublicMetaDB data</div><div class="desc">Deletes lists managed by SyncMeta. It does not delete media from PublicMetaDB itself and cannot be automatically restored.</div><button class="btn btn-sm btn-danger" type="button" onclick="runDataAction('delete-pmdb-lists','Delete managed PublicMetaDB lists?','This cannot be undone.')">Delete PublicMetaDB lists</button></div>
+              <div class="settings-group danger-zone form-section"><div class="settings-group-title">Profile</div><div class="settings-group-desc">Permanently deletes this profile, saved credentials, sync history, mappings and local Library data.</div><button class="btn btn-danger" type="button" onclick="deleteProfileData()">Delete User Records</button></div>
             </div>
 
 
@@ -2009,6 +2104,24 @@
   </div>
 
   <!-- Application dialogs replace the browser's alert()/confirm(). -->
+  <div class="modal-overlay hidden" id="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+    <div class="modal-card onboarding-card" role="document">
+      <div class="onboarding-head">
+        <div class="onboarding-kicker" id="onboarding-step-label">Step 1 of 5</div>
+        <h2 class="modal-title" id="onboarding-title">Set up SyncMeta</h2>
+        <div class="onboarding-progress" id="onboarding-progress" aria-label="Setup progress"></div>
+      </div>
+      <div class="onboarding-main" id="onboarding-body"></div>
+      <div class="onboarding-foot">
+        <button class="btn btn-ghost" type="button" id="onboarding-close" onclick="closeOnboardingWizard()">Close</button>
+        <div class="onboarding-foot-actions">
+          <button class="btn" type="button" id="onboarding-back" onclick="onboardingBack()">Back</button>
+          <button class="btn btn-primary" type="button" id="onboarding-next" onclick="onboardingNext()">Continue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay hidden" id="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
     <div class="modal-card" role="document">
       <h2 class="modal-title" id="confirm-dialog-title">Are you sure?</h2>
@@ -2167,12 +2280,19 @@
     let mdblistLists = [];
     let mdblistDiscoverLists = [];
     let mdblistSelectedLists = [];
+    let onboardingCompleted = true;
+    let onboardingStep = 1;
+    let onboardingAutoOpened = false;
+    const onboardingProviderHomes = new Map();
     let sessionProfileId = '';
     let secretState = emptySecretState();
     let lastDashboardProfile = null;
     let connectionHealth = {};
     let connectionReadiness = null;
     let connectionCheckRunning = false;
+    const SETTINGS_TABS = ['profile', 'appearance', 'connections', 'routes', 'schedule', 'notifications', 'danger', 'about'];
+    const SETTINGS_TAB_ALIASES = { lists: 'routes', behavior: 'routes', rules: 'routes', sync: 'routes', pairs: 'routes', stats: 'about', data: 'danger' };
+    let activeSettingsTab = 'profile';
     let lastSiteStats = null;
     let currentResultsPage = 1;
     let currentResultsFilter = 'all';
@@ -2404,6 +2524,7 @@
         saveDraft();
         // Writability changed, so the pair editor's capability report is stale.
         fetchPairs();
+        if (sessionProfileId) testConnections('mdblist');
       } catch {
         setMdbListAuthStatus('Network error while finishing MDBList auth.', true);
       } finally {
@@ -2525,11 +2646,244 @@
       showToast('Profile UUID copied. Keep it with your password.', false, true);
     }
 
-    // The setup steps are for someone who has no profile yet. Hidden once one is
-    // open, where step 1's "leave UUID blank" contradicts the filled field.
     function renderQuickSetupVisibility() {
       const node = el('profile-quick-setup');
-      if (node) node.style.display = sessionProfileId ? 'none' : '';
+      const needsSetup = !sessionProfileId || onboardingCompleted === false;
+      if (node) node.style.display = needsSetup ? '' : 'none';
+      if (needsSetup && !onboardingAutoOpened && localStorage.getItem(ENTERED_KEY) && el('app').classList.contains('active')) {
+        onboardingAutoOpened = true;
+        setTimeout(() => openOnboardingWizard(), 0);
+      }
+    }
+
+    function restoreOnboardingProviderCards() {
+      for (const [card, home] of onboardingProviderHomes.entries()) {
+        if (home.next && home.next.parentNode === home.parent) home.parent.insertBefore(card, home.next);
+        else home.parent.appendChild(card);
+      }
+      onboardingProviderHomes.clear();
+    }
+
+    function openOnboardingWizard(explicit) {
+      onboardingStep = 1;
+      if (explicit) onboardingAutoOpened = true;
+      el('onboarding-dialog').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+      renderOnboardingStep();
+    }
+
+    function closeOnboardingWizard() {
+      restoreOnboardingProviderCards();
+      el('onboarding-dialog').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
+    function onboardingBack() {
+      if (onboardingStep <= 1) return;
+      restoreOnboardingProviderCards();
+      onboardingStep -= 1;
+      renderOnboardingStep();
+    }
+
+    function onboardingChoice(provider, value, label, checked, kind) {
+      const historyHandler = kind === 'history' ? 'onchange="onboardingSelectHistory(this)"' : '';
+      return `<label class="onboarding-check"><input type="checkbox" data-onboarding-provider="${escAttr(provider)}" data-onboarding-value="${escAttr(value)}" data-onboarding-kind="${escAttr(kind || 'category')}" ${checked ? 'checked' : ''} ${historyHandler}><span>${esc(label)}</span></label>`;
+    }
+
+    function onboardingSelectHistory(node) {
+      if (!node.checked) return;
+      document.querySelectorAll('[data-onboarding-kind="history"]').forEach(other => { if (other !== node) other.checked = false; });
+    }
+
+    function renderOnboardingDataChoices() {
+      const options = gatherOptions();
+      const cards = [];
+      if (providerHasCredential('simkl')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">SIMKL</div>${onboardingChoice('simkl', 'movies', 'Movies', !!simklSelectedStatuses.movies.length)}${onboardingChoice('simkl', 'shows', 'TV Shows', !!simklSelectedStatuses.shows.length)}${onboardingChoice('simkl', 'anime', 'Anime', !!simklSelectedStatuses.anime.length)}${onboardingChoice('simkl', 'history', 'Watch History', options.activity_history_source === 'simkl', 'history')}</section>`);
+      if (providerHasCredential('trakt')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">Trakt</div>${onboardingChoice('trakt', 'watchlist', 'Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked)}${onboardingChoice('trakt', 'history', 'Watch History', options.activity_history_source === 'trakt', 'history')}${onboardingChoice('trakt', 'resume', 'Resume Progress', options.activity_resume_source === 'trakt')}</section>`);
+      if (providerHasCredential('anilist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">AniList</div>${onboardingChoice('anilist', 'PLANNING', 'Planning', anilistSelectedStatuses.includes('PLANNING'))}${onboardingChoice('anilist', 'CURRENT', 'Watching', anilistSelectedStatuses.includes('CURRENT'))}${onboardingChoice('anilist', 'COMPLETED', 'Completed', anilistSelectedStatuses.includes('COMPLETED'))}${onboardingChoice('anilist', 'history', 'Watch History', options.activity_history_source === 'anilist', 'history')}</section>`);
+      if (providerHasCredential('mdblist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">MDBList</div>${onboardingChoice('mdblist', 'lists', `Selected lists (${mdblistSelectedLists.length})`, mdblistSelectedLists.length > 0)}${mdblistSelectedLists.length ? '' : '<div class="catalog-note">Choose lists in the MDBList connection card first.</div>'}</section>`);
+      return cards.join('') || '<div class="empty">Connect at least one source before choosing data.</div>';
+    }
+
+    function onboardingReadyGraphHtml() {
+      const pairs = (pairsState.pairs || []).filter(pair => pair.enabled !== false && pair.target === 'pmdb');
+      if (!pairs.length) return '<div class="empty">Your selected provider data will synchronize to PublicMetaDB.</div>';
+      const idle = { key: 'idle', icon: '○', text: 'Ready' };
+      const sources = pairs.map(pair => graphNodeHtml(pair.source, idle, 'source', (pair.categories || []).map(category => PAIR_CATEGORY_LABELS[category] || category).join(', ')));
+      return `<div class="graph-flow"><div class="graph-col graph-col-sources">${sources.join('')}</div><div class="graph-wires" aria-hidden="true">${graphWiresSvg(sources.length)}</div><div class="graph-col graph-col-target">${graphNodeHtml('pmdb', idle, 'target', `${sources.length} route${sources.length === 1 ? '' : 's'}`)}</div></div>`;
+    }
+
+    function renderOnboardingStep() {
+      restoreOnboardingProviderCards();
+      const body = el('onboarding-body');
+      const next = el('onboarding-next');
+      const titles = ['Choose your destination', 'Connect your media services', 'Choose data to synchronize', 'Set your schedule', "You're ready"];
+      el('onboarding-title').textContent = titles[onboardingStep - 1];
+      el('onboarding-step-label').textContent = `Step ${onboardingStep} of 5`;
+      el('onboarding-progress').innerHTML = [1, 2, 3, 4, 5].map(step => `<span class="${step < onboardingStep ? 'done' : (step === onboardingStep ? 'active' : '')}"></span>`).join('');
+      el('onboarding-back').style.visibility = onboardingStep === 1 ? 'hidden' : 'visible';
+      next.textContent = onboardingStep === 5 ? 'Start first sync' : 'Continue';
+      next.disabled = false;
+
+      if (onboardingStep === 1) {
+        body.innerHTML = `<h3>Where should your media be synchronized?</h3><p class="onboarding-lead">PublicMetaDB is checked against the real service before setup continues.</p><div class="onboarding-destination"><div class="onboarding-destination-title"><span class="provider-mark" style="--provider-color:#34d399">PM</span>PublicMetaDB</div><div class="form-row"><label for="onboarding-pmdb-key">API Key</label><input type="password" id="onboarding-pmdb-key" placeholder="${hasSavedSecret('pmdb', 'api_key_saved') ? 'Stored key — leave blank to re-check it' : 'pm-…'}" autocomplete="off"></div>${sessionProfileId ? '' : '<div class="form-row"><label for="onboarding-password">Profile Password</label><input type="password" id="onboarding-password" placeholder="Required to secure this profile" autocomplete="new-password"></div>'}<div class="onboarding-error" id="onboarding-error"></div></div>`;
+      } else if (onboardingStep === 2) {
+        body.innerHTML = '<h3>Choose any sources</h3><p class="onboarding-lead">One source is enough. These are the same connection cards and real health checks used in Settings.</p><div class="onboarding-provider-grid" id="onboarding-provider-cards"></div><div class="onboarding-error" id="onboarding-error"></div>';
+        const host = el('onboarding-provider-cards');
+        ['simkl', 'trakt', 'anilist', 'mdblist'].forEach(provider => {
+          const card = el(`connection-card-${provider}`);
+          if (!card) return;
+          onboardingProviderHomes.set(card, { parent: card.parentNode, next: card.nextSibling });
+          host.appendChild(card);
+        });
+        renderConnectionHealth(connectionHealth, connectionReadiness);
+      } else if (onboardingStep === 3) {
+        body.innerHTML = `<h3>What should SyncMeta keep in sync?</h3><p class="onboarding-lead">Only supported capabilities from connected providers are shown. Watch history can have one source.</p><div class="onboarding-choices">${renderOnboardingDataChoices()}</div><div class="onboarding-error" id="onboarding-error"></div>`;
+      } else if (onboardingStep === 4) {
+        const current = Number(el('opt-interval-seconds').value || 43200);
+        body.innerHTML = `<h3>Automatic synchronization</h3><p class="onboarding-lead">This writes to the existing schedule controls; there is no separate wizard schedule.</p><div class="onboarding-schedule"><label class="onboarding-check"><input type="checkbox" id="onboarding-auto-sync" ${el('opt-auto-sync').checked ? 'checked' : ''}><span>Enable automatic sync</span></label><div class="form-row"><label for="onboarding-interval">Sync every</label><select id="onboarding-interval">${intervalPresetOptions(21600, current)}</select></div><div class="onboarding-error" id="onboarding-error"></div></div>`;
+      } else {
+        const routes = (pairsState.pairs || []).filter(pair => pair.enabled !== false && pair.target === 'pmdb');
+        const sources = new Set(routes.map(pair => pair.source));
+        const types = new Set(routes.flatMap(pair => pair.categories || []));
+        body.innerHTML = `<h3>Everything is ready for the first synchronization.</h3><p class="onboarding-lead">Your profile, provider credentials, routes and schedule are saved server-side.</p><div class="onboarding-ready-graph">${onboardingReadyGraphHtml()}</div><div class="onboarding-summary"><div><strong>${sources.size}</strong>service${sources.size === 1 ? '' : 's'} connected</div><div><strong>${types.size}</strong>synchronization type${types.size === 1 ? '' : 's'} enabled</div></div><div class="onboarding-error" id="onboarding-error"></div>`;
+      }
+    }
+
+    function onboardingError(message) {
+      const node = el('onboarding-error');
+      if (node) node.textContent = message || '';
+    }
+
+    function onboardingApplyChoices() {
+      const checked = (provider, value) => !!document.querySelector(`[data-onboarding-provider="${provider}"][data-onboarding-value="${value}"]:checked`);
+      if (providerHasCredential('simkl')) {
+        for (const media of ['movies', 'shows', 'anime']) {
+          simklSelectedStatuses[media] = checked('simkl', media) ? SIMKL_STATUS_OPTIONS[media].map(row => row.value) : [];
+        }
+      }
+      if (providerHasCredential('anilist')) {
+        anilistSelectedStatuses = ['PLANNING', 'CURRENT', 'COMPLETED'].filter(status => checked('anilist', status));
+      }
+      if (providerHasCredential('trakt')) {
+        const watchlist = checked('trakt', 'watchlist');
+        el('trakt-watchlist-movies-toggle').checked = watchlist;
+        el('trakt-watchlist-shows-toggle').checked = watchlist;
+        el('opt-activity-resume-source').value = checked('trakt', 'resume') ? 'trakt' : 'off';
+      }
+      const history = ['simkl', 'trakt', 'anilist'].find(provider => checked(provider, 'history')) || 'off';
+      el('opt-activity-history-source').value = history;
+      renderSimklStatuses();
+      renderAniListStatuses();
+      renderActivityOptionVisibility();
+      updateDots();
+
+      const categoriesBySource = {};
+      if (providerHasCredential('simkl')) {
+        const categories = [];
+        if (['movies', 'shows', 'anime'].some(media => checked('simkl', media))) categories.push('watchlist');
+        if (history === 'simkl') categories.push('history');
+        if (categories.length) categoriesBySource.simkl = categories;
+      }
+      if (providerHasCredential('trakt')) {
+        const categories = [];
+        if (checked('trakt', 'watchlist')) categories.push('watchlist');
+        if (history === 'trakt') categories.push('history');
+        if (categories.length) categoriesBySource.trakt = categories;
+      }
+      if (providerHasCredential('anilist')) {
+        const categories = [];
+        if (checked('anilist', 'PLANNING') || checked('anilist', 'CURRENT')) categories.push('watchlist');
+        if (checked('anilist', 'COMPLETED')) categories.push('collection');
+        if (history === 'anilist') categories.push('history');
+        if (categories.length) categoriesBySource.anilist = categories;
+      }
+      if (providerHasCredential('mdblist') && checked('mdblist', 'lists')) categoriesBySource.mdblist = ['watchlist'];
+
+      Object.entries(categoriesBySource).forEach(([source, categories]) => {
+        const supported = new Set(quickSyncSupportedCategories(source, 'pmdb').map(row => row.key));
+        const valid = categories.filter(category => supported.has(category));
+        if (!valid.length) return;
+        let pair = pairsState.pairs.find(row => row.source === source && row.target === 'pmdb' && row.mode !== 'two_way' && !(row.source_lists || []).length && !row.target_list);
+        if (!pair) {
+          pair = { pair_id: '', name: `${providerLabel(source)} → PublicMetaDB`, source, target: 'pmdb', categories: [], source_lists: [], target_list: '', removal_mode: 'additive', mode: 'one_way', enabled: true, auto_sync: false, interval_seconds: 43200 };
+          pairsState.pairs.push(pair);
+        }
+        pair.categories = valid;
+        pair.enabled = true;
+      });
+      renderPairs();
+      renderSyncCards();
+    }
+
+    async function onboardingNext() {
+      const next = el('onboarding-next');
+      onboardingError('');
+      next.disabled = true;
+      try {
+        if (onboardingStep === 1) {
+          const key = el('onboarding-pmdb-key').value.trim();
+          if (!key && sessionProfileId && hasSavedSecret('pmdb', 'api_key_saved')) {
+            const checked = await apiPost('/api/profile/connections/check', { providers: ['pmdb'], force: true });
+            if (!checked.ok || !checked.data.checks || checked.data.checks[0].status !== 'healthy') {
+              throw new Error(formatApiError(checked.data, 'The stored PublicMetaDB key could not be validated.'));
+            }
+          } else {
+            const password = el('onboarding-password') ? el('onboarding-password').value : '';
+            const result = await apiPost('/api/profile/onboarding/destination', { api_key: key, password });
+            if (!result.ok) throw new Error(formatApiError(result.data, 'Your PublicMetaDB API key could not be validated.'));
+            const profile = result.data.profile;
+            connectionHealth = { ...(profile.connection_health || {}) };
+            populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
+            renderDashboard(profile);
+            localStorage.setItem(PROFILE_KEY, profile.profile_id);
+          }
+          onboardingCompleted = false;
+          await fetchPairs();
+        } else if (onboardingStep === 2) {
+          restoreOnboardingProviderCards();
+          const connected = ['simkl', 'trakt', 'anilist', 'mdblist'].filter(providerHasCredential);
+          if (!connected.length) throw new Error('Connect at least one media service to continue.');
+          if (!(await saveProfile(false, true))) throw new Error('Save the connected source before continuing.');
+          await fetchPairs();
+        } else if (onboardingStep === 3) {
+          onboardingApplyChoices();
+          if (!(await saveProfile(false, false))) throw new Error('Could not save your selected synchronization data.');
+          if (!(await savePairs(false))) throw new Error('Could not create the synchronization routes.');
+        } else if (onboardingStep === 4) {
+          el('opt-auto-sync').checked = el('onboarding-auto-sync').checked;
+          const interval = el('onboarding-interval').value;
+          if (interval !== 'custom') el('opt-interval-seconds').value = interval;
+          const automatic = el('opt-auto-sync').checked;
+          const intervalSeconds = Math.max(43200, Number(el('opt-interval-seconds').value || 43200));
+          (pairsState.pairs || []).filter(pair => pair.target === 'pmdb').forEach(pair => {
+            pair.auto_sync = automatic;
+            pair.interval_seconds = intervalSeconds;
+          });
+          if (!(await saveProfile(false, false))) throw new Error('Could not save the synchronization schedule.');
+          if (!(await savePairs(false))) throw new Error('Could not save the route schedule.');
+        } else {
+          onboardingCompleted = true;
+          const saved = await saveProfile(false, false);
+          if (!saved) {
+            onboardingCompleted = false;
+            throw new Error('Could not finish setup.');
+          }
+          closeOnboardingWizard();
+          showToast('Setup complete. Starting your first sync…', false, true);
+          switchView('sync');
+          await runPairs('', false);
+          return;
+        }
+        restoreOnboardingProviderCards();
+        onboardingStep += 1;
+        renderOnboardingStep();
+      } catch (error) {
+        if (onboardingStep === 2 && !onboardingProviderHomes.size) renderOnboardingStep();
+        onboardingError(error && error.message ? error.message : 'Setup could not continue.');
+      } finally {
+        if (el('onboarding-next')) el('onboarding-next').disabled = false;
+      }
     }
 
     async function copyRedirectUrl(inputId) {
@@ -2822,6 +3176,7 @@
         delete_disabled_lists: el('opt-delete-disabled-lists').checked,
         guard_large_removals: el('opt-guard-large-removals').checked,
         guard_removal_percent: Math.min(100, Math.max(1, parseInt(el('opt-guard-removal-percent').value, 10) || 20)),
+        conflict_policy: el('opt-conflict-policy').value || 'never',
         activity_history_source: el('opt-activity-history-source').value,
         auto_history_sync: el('opt-auto-history-sync').checked,
         simkl_history_anime_only: el('opt-simkl-history-anime-only').checked,
@@ -2836,6 +3191,7 @@
         trakt_personal_visibility: el('opt-trakt-personal-visibility').value,
         trakt_public_visibility: el('opt-trakt-public-visibility').value,
         mdblist_visibility: el('opt-mdblist-visibility').value,
+        onboarding_completed: onboardingCompleted,
         media_types: ['shows', 'movies', 'anime'],
       };
     }
@@ -2969,6 +3325,7 @@
       el('opt-delete-disabled-lists').checked = !!options.delete_disabled_lists;
       el('opt-guard-large-removals').checked = options.guard_large_removals !== false;
       el('opt-guard-removal-percent').value = Number(options.guard_removal_percent) > 0 ? options.guard_removal_percent : 20;
+      el('opt-conflict-policy').value = options.conflict_policy || 'never';
       el('opt-activity-history-source').value = options.activity_history_source || (options.simkl_sync_watched_history ? 'simkl' : (options.trakt_sync_watched_history ? 'trakt' : 'off'));
       el('opt-auto-history-sync').checked = !!options.auto_history_sync;
       el('opt-history-interval-seconds').value = Math.max(86400, options.trakt_watched_history_interval_seconds || 86400);
@@ -2983,6 +3340,7 @@
       el('opt-trakt-personal-visibility').value = options.trakt_personal_visibility || 'private';
       el('opt-trakt-public-visibility').value = options.trakt_public_visibility || 'public';
       el('opt-mdblist-visibility').value = options.mdblist_visibility || 'public';
+      onboardingCompleted = options.onboarding_completed !== false;
       simklWasLinked = isSimklLinked();
       anilistWasLinked = isAniListLinked();
       ensureLinkedSourceDefaults(false);
@@ -3053,9 +3411,7 @@
       setDot('dot-pipe-mdblist', mdblistHasCredential());
       updatePipelineSummaries();
       renderQuickSetupVisibility();
-      if (!profileDraftDirty && Object.keys(connectionHealth).length) {
-        renderConnectionHealth(connectionHealth, connectionReadiness);
-      }
+      renderConnectionHealth(connectionHealth, connectionReadiness);
     }
 
     // 'state' is 'ok' | 'off' | 'err'
@@ -3080,6 +3436,188 @@
     const CONNECTION_LABELS = { pmdb: 'PublicMetaDB', tmdb: 'TMDB', simkl: 'SIMKL', trakt: 'Trakt', anilist: 'AniList', mdblist: 'MDBList' };
     const CONNECTION_FIELDS = { pmdb: 'pmdb-api-key', tmdb: 'tmdb-api-key', simkl: 'simkl-client-id', trakt: 'trakt-client-id', anilist: 'anilist-username', mdblist: 'mdblist-api-key' };
 
+    const CONNECTION_CARD_META = {
+      pmdb: { short: 'PM', color: '#34d399', description: 'Destination for synchronized lists, watch history and resume progress. It can also participate in compatible provider routes.' },
+      simkl: { short: 'SK', color: '#fbbf24', description: 'Synchronize movies, TV shows, anime and watch history from your SIMKL account.' },
+      trakt: { short: 'TK', color: '#ef4444', description: 'Synchronize watchlists, collections, custom lists, watch history and resume progress.' },
+      anilist: { short: 'AL', color: '#7c6df7', description: 'Synchronize planning, watching and completed anime from a public or authenticated AniList account.' },
+      mdblist: { short: 'MD', color: '#38bdf8', description: 'Read MDBList lists with an API key, or connect with OAuth to synchronize in both directions.' },
+      tmdb: { short: 'TM', color: '#0ea5e9', description: 'Enriches Library titles and posters. TMDB is not a synchronization provider.' },
+    };
+    let connectionCheckingProvider = '';
+
+    function enhanceConnectionCards() {
+      const tab = el('stab-connections');
+      if (!tab || tab.dataset.enhanced === 'true') return;
+      tab.dataset.enhanced = 'true';
+      tab.querySelector('.settings-page-desc').textContent = 'Connection health, enabled capabilities and recovery actions stay visible while credentials remain tucked away.';
+      const readiness = el('connection-readiness');
+      const oldGrids = Array.from(tab.querySelectorAll(':scope > .conn-grid'));
+      const grid = document.createElement('div');
+      grid.className = 'conn-grid provider-cards';
+      readiness.insertAdjacentElement('afterend', grid);
+
+      for (const provider of ['pmdb', 'simkl', 'trakt', 'anilist', 'mdblist', 'tmdb']) {
+        const card = el(`connection-card-${provider}`);
+        if (!card) continue;
+        const health = el(`connection-health-${provider}`);
+        if (health) health.remove();
+        const meta = CONNECTION_CARD_META[provider];
+        card.dataset.provider = provider;
+        card.style.setProperty('--provider-color', meta.color);
+
+        const oldTitle = card.querySelector(':scope > .conn-card-title');
+        const oldDescription = card.querySelector(':scope > .conn-card-desc');
+        if (oldTitle) oldTitle.remove();
+        if (oldDescription) oldDescription.remove();
+        const legacyMeta = card.querySelector('.conn-card-pmdb-meta');
+        if (legacyMeta) legacyMeta.remove();
+
+        const advancedBody = document.createElement('div');
+        advancedBody.className = 'connection-advanced-body';
+        while (card.firstChild) advancedBody.appendChild(card.firstChild);
+        const advanced = document.createElement('details');
+        advanced.className = 'connection-advanced';
+        advanced.id = `connection-advanced-${provider}`;
+        const summary = document.createElement('summary');
+        summary.textContent = 'Advanced connection settings';
+        advanced.append(summary, advancedBody);
+
+        const main = document.createElement('div');
+        main.className = 'provider-card-main';
+        main.innerHTML = `<div class="provider-card-header"><div class="provider-card-identity"><span class="provider-mark">${meta.short}</span><div><div class="conn-card-title"><span class="dot" id="dot-${provider}"></span>${esc(CONNECTION_LABELS[provider])}</div><p class="conn-card-desc">${esc(meta.description)}</p></div></div><span class="provider-status" id="provider-status-${provider}" data-status="checking">Loading…</span></div><div class="provider-summary"><div class="provider-capabilities" id="provider-capabilities-${provider}"><span class="connection-skeleton" style="width:180px"></span></div><div class="provider-checked" id="provider-checked-${provider}"></div></div>`;
+
+        const footer = health || document.createElement('div');
+        footer.id = `connection-health-${provider}`;
+        footer.className = 'provider-card-footer connection-health';
+        footer.innerHTML = '<div class="provider-health-message"><strong>Loading connection</strong><span>Checking saved configuration…</span></div>';
+        card.append(main, advanced, footer);
+        if (provider === 'tmdb') continue;
+        grid.appendChild(card);
+      }
+
+      const tmdb = el('connection-card-tmdb');
+      if (tmdb) {
+        const utility = document.createElement('details');
+        utility.className = 'connection-utility';
+        utility.innerHTML = '<summary>Library metadata connection (optional)</summary>';
+        utility.appendChild(tmdb);
+        grid.insertAdjacentElement('afterend', utility);
+      }
+      oldGrids.forEach(node => { if (node !== grid && !node.children.length) node.remove(); });
+    }
+
+    function openConnectionAdvanced(provider, focus) {
+      const details = el(`connection-advanced-${provider}`);
+      if (details) details.open = true;
+      if (focus) {
+        const node = el(CONNECTION_FIELDS[provider]);
+        if (node) { node.focus(); node.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      }
+    }
+
+    function providerCapabilities(provider) {
+      const options = gatherOptions();
+      const rows = [];
+      const add = (label, enabled) => rows.push({ label, enabled: enabled !== false });
+      if (provider === 'pmdb') {
+        add('Lists'); add('Watch History'); add('Resume Progress');
+      } else if (provider === 'simkl') {
+        add('Movies', !!(simklSelectedStatuses.movies || []).length);
+        add('TV Shows', !!(simklSelectedStatuses.shows || []).length);
+        add('Anime', !!(simklSelectedStatuses.anime || []).length);
+        add('Watch History', options.activity_history_source === 'simkl');
+      } else if (provider === 'trakt') {
+        add('Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked);
+        add('Lists', traktSelectedLists.length > 0 || traktSyncAllLikedLists);
+        add('Watch History', options.activity_history_source === 'trakt');
+        add('Resume Progress', options.activity_resume_source === 'trakt');
+      } else if (provider === 'anilist') {
+        add('Anime Lists', anilistSelectedStatuses.length > 0);
+        add('Watch History', options.activity_history_source === 'anilist');
+        add('Write Access', hasSecretInputOrSaved('anilist-access-token', 'anilist', 'access_token_saved'));
+      } else if (provider === 'mdblist') {
+        add('Lists', mdblistSelectedLists.length > 0);
+        add('Read Access', mdblistHasCredential());
+        add('Write Access', !!((secretState.mdblist || {}).access_token_saved || (mdblistPendingAuth || {}).access_token));
+      } else if (provider === 'tmdb') add('Library artwork');
+      return rows;
+    }
+
+    function providerStatusPresentation(provider, row, configured) {
+      if (connectionCheckingProvider === '*' || connectionCheckingProvider === provider) return { status: 'checking', title: 'Checking…' };
+      if (!configured || (row && row.status === 'unconfigured')) return { status: 'unconfigured', title: 'Not configured' };
+      if (!row) return { status: 'checking', title: 'Checking…' };
+      if (row.status === 'healthy') return { status: 'healthy', title: 'Connected' };
+      if (row.status === 'degraded') return { status: 'degraded', title: 'Connection failed' };
+      if (row.code === 'auth_invalid' || row.code === 'permission_missing') {
+        if (provider === 'trakt' && traktAccessTokenExpiresAt && new Date(traktAccessTokenExpiresAt).getTime() <= Date.now()) return { status: 'error', title: 'Token expired' };
+        return { status: 'error', title: 'Authentication required' };
+      }
+      return { status: 'error', title: 'Connection failed' };
+    }
+
+    function primaryProviderAction(provider, configured, row) {
+      const needsReconnect = configured && row && row.status === 'error' && row.recovery_action === 'reconnect';
+      if (provider === 'pmdb' || provider === 'tmdb') {
+        const label = configured ? 'Configure' : (provider === 'pmdb' ? 'Add API key' : 'Configure TMDB');
+        return `<button class="btn btn-sm btn-primary" type="button" onclick="openConnectionAdvanced('${provider}', true)">${label}</button>`;
+      }
+      if (needsReconnect) return `<button class="btn btn-sm btn-primary" type="button" onclick="reconnectProvider('${provider}')">Reconnect ${esc(CONNECTION_LABELS[provider])}</button>`;
+      if (!configured) return `<button class="btn btn-sm btn-primary" type="button" onclick="connectProvider('${provider}')">Connect ${esc(CONNECTION_LABELS[provider])}</button>`;
+      return `<button class="btn btn-sm" type="button" onclick="openConnectionAdvanced('${provider}', false)">Configure</button>`;
+    }
+
+    function connectProvider(provider) {
+      openConnectionAdvanced(provider, false);
+      const required = {
+        simkl: !!el('simkl-client-id').value.trim(),
+        trakt: !!el('trakt-client-id').value.trim(),
+        anilist: !!el('anilist-client-id').value.trim(),
+        mdblist: !!el('mdblist-client-id').value.trim(),
+      };
+      if (!required[provider]) {
+        openConnectionAdvanced(provider, true);
+        showToast(`Enter your ${CONNECTION_LABELS[provider]} connection details first.`, true, false);
+        return;
+      }
+      reconnectProvider(provider);
+    }
+
+    function reconnectProvider(provider) {
+      openConnectionAdvanced(provider, false);
+      if (provider === 'simkl') startSimklAuth();
+      if (provider === 'trakt') startTraktAuth();
+      if (provider === 'anilist') startAniListAuth();
+      if (provider === 'mdblist') startMdbListAuth();
+    }
+
+    async function disconnectProvider(provider) {
+      const approved = await confirmDialog({
+        title: `Disconnect ${CONNECTION_LABELS[provider]}?`,
+        body: `Stored authentication for ${CONNECTION_LABELS[provider]} will be removed. Your selected sync types and lists will be kept for a later reconnect.`,
+        confirmLabel: 'Disconnect', destructive: true,
+      });
+      if (!approved) return;
+      try {
+        const result = await apiPost('/api/profile/connections/disconnect', { provider });
+        if (!result.ok) {
+          showToast(formatApiError(result.data, `Could not disconnect ${CONNECTION_LABELS[provider]}.`), true, false);
+          return;
+        }
+        const profile = result.data.profile;
+        connectionHealth = { ...(profile.connection_health || {}) };
+        connectionReadiness = profile.connection_readiness || null;
+        populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
+        renderDashboard(profile);
+        renderConnectionHealth(connectionHealth, connectionReadiness);
+        showToast(`${CONNECTION_LABELS[provider]} disconnected.`, false, true);
+        _forceStatusRefresh();
+      } catch {
+        showToast(`Network error while disconnecting ${CONNECTION_LABELS[provider]}.`, true, false);
+      }
+    }
+
     function recoveryButtonHtml(row) {
       if (!row || !row.recovery_action || row.recovery_action === 'none') return '';
       const provider = row.provider;
@@ -3093,8 +3631,7 @@
     }
 
     function focusConnectionField(provider) {
-      const node = el(CONNECTION_FIELDS[provider]);
-      if (node) { node.focus(); node.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      openConnectionAdvanced(provider, true);
     }
 
     function renderConnectionHealth(health, readiness) {
@@ -3104,16 +3641,27 @@
         const host = el(`connection-health-${provider}`);
         const row = connectionHealth[provider];
         if (!host) continue;
-        const status = row ? row.status : 'unconfigured';
+        const configured = providerHasCredential(provider);
+        const presentation = providerStatusPresentation(provider, row, configured);
+        const status = presentation.status;
         host.dataset.status = status;
-        const title = !row ? 'Not checked' : ({ healthy: 'Verified', degraded: 'Degraded', error: 'Needs attention', unconfigured: 'Not configured' }[status] || 'Not checked');
-        const modes = row && row.capabilities && row.capabilities.readable
-          ? ` · Read${row.capabilities.writable ? ' + write' : ' only'}` : '';
-        const identity = row && row.identity ? ` · ${row.identity}` : '';
-        const stamp = row && row.checked_at ? ` · ${timeAgo(row.checked_at)}` : '';
-        const message = row ? `${row.message || ''}${identity}${modes}${stamp}` : 'Test this saved connection.';
-        host.innerHTML = `<div class="connection-health-copy"><strong>${esc(title)}</strong><span>${esc(message)}</span></div><div class="actions-bar" style="margin-top:0">${recoveryButtonHtml(row)}<button class="btn btn-sm" type="button" onclick="testConnections('${provider}')" ${connectionCheckRunning ? 'disabled' : ''}>${connectionCheckRunning ? 'Checking…' : 'Test'}</button></div>`;
-        const dotState = status === 'healthy' ? 'ok' : (status === 'degraded' ? 'warn' : (status === 'error' ? 'err' : 'off'));
+        const statusNode = el(`provider-status-${provider}`);
+        if (statusNode) {
+          statusNode.dataset.status = status;
+          statusNode.textContent = presentation.title;
+        }
+        const card = el(`connection-card-${provider}`);
+        if (card) card.dataset.connectionState = status;
+        const capabilities = el(`provider-capabilities-${provider}`);
+        if (capabilities) capabilities.innerHTML = providerCapabilities(provider).map(capability => `<span class="provider-capability${capability.enabled ? '' : ' disabled'}">${esc(capability.label)}</span>`).join('');
+        const checked = el(`provider-checked-${provider}`);
+        if (checked) checked.innerHTML = row && row.checked_at ? `Last checked<strong>${esc(timeAgo(row.checked_at))}</strong>` : '';
+        const identity = row && row.identity ? `Connected as @${String(row.identity).replace(/^@/, '')}` : '';
+        const defaultMessage = configured ? 'Connection validation is pending.' : `${CONNECTION_LABELS[provider]} has not been connected yet.`;
+        const message = row && row.message ? row.message : defaultMessage;
+        const actions = `${primaryProviderAction(provider, configured, row)}<button class="btn btn-sm" type="button" onclick="testConnections('${provider}')" ${connectionCheckRunning ? 'disabled' : ''}>${connectionCheckRunning ? 'Checking…' : 'Check'}</button>${configured && !['pmdb', 'tmdb'].includes(provider) ? `<button class="btn btn-sm btn-danger-quiet" type="button" onclick="disconnectProvider('${provider}')">Disconnect</button>` : ''}`;
+        host.innerHTML = `<div class="provider-health-message"><strong>${esc(identity || presentation.title)}</strong><span>${esc(message)}</span></div><div class="provider-card-actions">${actions}</div>`;
+        const dotState = status === 'healthy' ? 'ok' : (status === 'degraded' || status === 'checking' ? 'warn' : (status === 'error' ? 'err' : 'off'));
         setDot(`dot-${provider}`, dotState, row ? row.message : '');
       }
       renderConnectionReadiness(connectionReadiness);
@@ -3147,6 +3695,7 @@
         return;
       }
       connectionCheckRunning = true;
+      connectionCheckingProvider = provider || '*';
       renderConnectionHealth(connectionHealth, connectionReadiness);
       const payload = { force: useCache ? false : true };
       if (provider) payload.providers = [provider];
@@ -3163,11 +3712,13 @@
         if (lastDashboardProfile) {
           lastDashboardProfile.connection_health = { ...(lastDashboardProfile.connection_health || {}), ...rows };
           lastDashboardProfile.connection_readiness = result.data.readiness;
+          renderDashboard(lastDashboardProfile);
         }
       } catch {
         showToast('Network error while checking connections.', true, false);
       } finally {
         connectionCheckRunning = false;
+        connectionCheckingProvider = '';
         renderConnectionHealth(connectionHealth, connectionReadiness);
       }
     }
@@ -3328,6 +3879,7 @@
       localStorage.setItem(ENTERED_KEY, '1');
       fetchSiteStats();
       switchView(targetView);
+      renderQuickSetupVisibility();
     }
 
     function showLanding() {
@@ -4211,6 +4763,7 @@
       const body = el('lib-local-body');
       // Filters change fast; a slow page must not paint over a newer one.
       const seq = ++libRequestSeq;
+      if (body && !(libData.entries || []).length) body.innerHTML = skeletonRows(5);
       const result = await apiPost('/api/profile/library/entries', {
         kinds: libKinds, section: libSection, query: libQuery, page: libPage,
       });
@@ -4249,6 +4802,7 @@
       }
       const entry = result.data.entry || {};
       const seasons = Array.isArray(result.data.seasons) ? result.data.seasons : [];
+      const providers = Array.isArray(result.data.providers) ? result.data.providers : [];
       const meta = [
         LIB_KIND_LABEL[entry.kind] || entry.kind || '',
         entry.year ? String(entry.year) : '',
@@ -4264,6 +4818,14 @@
               (entry.sources || []).length ? `<span>via ${esc((entry.sources || []).join(', '))}</span>` : ''}</div>
           </div>
         </div>
+        ${providers.length ? `<div class="lib-provider-inspector">
+          <div class="lib-season-title"><span>Provider state</span><span>${providers.length} relevant</span></div>
+          ${providers.map(provider => `<div class="lib-provider-row">
+            <span class="provider-mark">${esc(String(provider.label || '?').slice(0, 1))}</span>
+            <span><strong>${esc(provider.label || provider.provider)}</strong><small>${provider.provider_id ? `ID ${esc(provider.provider_id)}` : 'Connected source'}</small></span>
+            <span class="lib-provider-state"><strong>✓ ${esc(provider.status || 'Synced')}</strong><small>${provider.last_synced ? `Last synchronized ${esc(timeAgo(provider.last_synced))}` : ''}</small></span>
+          </div>`).join('')}
+        </div>` : ''}
         ${seasons.length ? seasons.map(season => {
           const watched = season.episodes.filter(ep => ep.watched).length;
           return `
@@ -4291,6 +4853,18 @@
     // One delegated listener for the whole view: the grid re-renders on every
     // filter change, so per-card handlers would have to be rebound each time.
     document.addEventListener('click', event => {
+      const animeHealth = event.target.closest && event.target.closest('[data-anime-health]');
+      if (animeHealth) {
+        const filter = animeHealth.dataset.animeHealth;
+        if (filter === 'manual') {
+          el('anime-mapping-panel').style.display = '';
+          el('anime-mapping-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else if (filter === 'review' || filter === 'unresolved') {
+          setIssuesTab('unresolved');
+          el('issues-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else showToast('Healthy anime use verified mappings from the latest synchronization.', 'ok');
+        return;
+      }
       const modeBtn = event.target.closest && event.target.closest('[data-lib-mode]');
       if (modeBtn) { setLibraryMode(modeBtn.dataset.libMode); return; }
 
@@ -6095,39 +6669,20 @@
       const pctAmb = Math.round((ambiguous / barTotal) * 100);
       const pctUnres = Math.max(0, 100 - pctOk - pctAmb);
 
-      // Two cards, matching the Activity Sync panel: what matching produced,
-      // and what a human had to help with.
+      const total = verified + ambiguous + unresolved;
+      const healthPct = total ? Math.round((verified / total) * 100) : 100;
       cards.innerHTML = `
-        <div class="svc-card svc-card-static ${unresolved > 0 ? 'is-warn' : ''}">
-          <div class="svc-card-head">
-            <span class="svc-name">Anime Matching</span>
-            <span class="svc-status svc-${level}"><span class="svc-dot"></span>${pctOk}% matched</span>
-          </div>
-          <div class="svc-stats">
-            <span class="svc-stat"><span class="svc-stat-val">${verified}</span><span class="svc-stat-label">verified</span></span>
-            <span class="svc-stat"><span class="svc-stat-val ${ambiguous > 0 ? 'c-orange' : 'c-dim'}">${ambiguous}</span><span class="svc-stat-label">ambiguous</span></span>
-            <span class="svc-stat"><span class="svc-stat-val ${unresolved > 0 ? 'c-orange' : 'c-dim'}">${unresolved}</span><span class="svc-stat-label">unresolved</span></span>
-          </div>
+        <button class="svc-card anime-health-filter" type="button" data-anime-health="healthy"><div class="svc-card-head"><span class="svc-name">Healthy</span><span class="svc-status svc-ok"><span class="svc-dot"></span>${healthPct}%</span></div><div class="svc-stats"><span class="svc-stat"><span class="svc-stat-val">${verified}</span><span class="svc-stat-label">anime</span></span></div><div class="svc-foot">verified provider mappings</div></button>
+        <button class="svc-card anime-health-filter ${ambiguous ? 'is-warn' : ''}" type="button" data-anime-health="review"><div class="svc-card-head"><span class="svc-name">Needs review</span></div><div class="svc-stats"><span class="svc-stat"><span class="svc-stat-val ${ambiguous ? 'c-orange' : 'c-dim'}">${ambiguous}</span><span class="svc-stat-label">suggestions</span></span></div><div class="svc-foot">possible matches held back</div></button>
+        <button class="svc-card anime-health-filter ${unresolved ? 'is-warn' : ''}" type="button" data-anime-health="unresolved"><div class="svc-card-head"><span class="svc-name">Unresolved</span></div><div class="svc-stats"><span class="svc-stat"><span class="svc-stat-val ${unresolved ? 'c-orange' : 'c-dim'}">${unresolved}</span><span class="svc-stat-label">anime</span></span></div><div class="svc-foot">no safe match yet</div></button>
+        <button class="svc-card anime-health-filter" type="button" data-anime-health="manual"><div class="svc-card-head"><span class="svc-name">Manually mapped</span></div><div class="svc-stats"><span class="svc-stat"><span class="svc-stat-val">${overrides}</span><span class="svc-stat-label">mappings</span></span></div><div class="svc-foot">explicit TMDB choices</div></button>
+        <div class="svc-card svc-card-static" style="grid-column:1/-1">
           <div class="svc-bar" aria-hidden="true">
             ${pctOk ? `<span style="width:${pctOk}%;background:var(--green)"></span>` : ''}
             ${pctAmb ? `<span style="width:${pctAmb}%;background:var(--z700)"></span>` : ''}
             ${pctUnres ? `<span style="width:${pctUnres}%;background:var(--orange)"></span>` : ''}
           </div>
-          <div class="svc-foot">trusted matches in the latest run</div>
-          <div class="svc-foot">${ambiguous > 0 ? 'ambiguous entries are held back rather than guessed' : 'nothing held back for safety'}</div>
-        </div>
-        <div class="svc-card svc-card-static ${overrides || remapped ? '' : 'svc-card-off'}">
-          <div class="svc-card-head">
-            <span class="svc-name">Mapping Help</span>
-            <span class="svc-status svc-${overrides || remapped ? 'ok' : 'muted'}"><span class="svc-dot"></span>${overrides || remapped ? 'in use' : 'none yet'}</span>
-          </div>
-          <div class="svc-stats">
-            <span class="svc-stat"><span class="svc-stat-val">${overrides}</span><span class="svc-stat-label">overrides</span></span>
-            <span class="svc-stat"><span class="svc-stat-val ${remapped > 0 ? '' : 'c-dim'}">${remapped}</span><span class="svc-stat-label">remapped</span></span>
-            ${reviewed > 0 ? `<span class="svc-stat"><span class="svc-stat-val c-dim">${reviewed}</span><span class="svc-stat-label">reviewed</span></span>` : ''}
-          </div>
-          <div class="svc-foot">TMDB ids you pinned by hand</div>
-          <div class="svc-foot">root-series and season remaps applied on top</div>
+          <div class="svc-foot">${total} anime inspected · ${reviewed} reviewed · ${remapped} root/season remaps</div>
         </div>
       `;
     }
@@ -6283,6 +6838,7 @@
         renderEmptyDashboard('Save a profile in Settings to enable background sync.');
         return;
       }
+      renderServerNotifications(profile);
       if (profile.profile_id) {
         sessionProfileId = profile.profile_id;
         el('profile-id').value = profile.profile_id;
@@ -6918,6 +7474,7 @@
     }
 
     async function fetchUnresolved() {
+      fetchConflicts();
       let result;
       try {
         result = await apiPost('/api/profile/unresolved', {});
@@ -6933,6 +7490,13 @@
         return;
       }
       renderUnresolvedPanel(result.data.items || [], true);
+    }
+
+    async function fetchConflicts() {
+      const result = await apiPost('/api/profile/conflicts', {});
+      if (!result.ok) return;
+      lastConflicts = Array.isArray(result.data.conflicts) ? result.data.conflicts : [];
+      if (lastDashboardProfile) renderAttentionPanel(lastDashboardProfile);
     }
 
     async function dismissUnresolvedItems(cacheKeys) {
@@ -7785,6 +8349,25 @@
       }
     }
 
+    async function runDataAction(action, title, detail, payload = {}) {
+      const confirmed = await confirmDialog({ title, body: detail, confirmLabel: 'Continue', destructive: true });
+      if (!confirmed) return false;
+      const result = await apiPost(`/api/profile/data/${action}`, payload);
+      if (!result.ok) { showToast(formatApiError(result.data, 'Data action failed.'), true, false); return false; }
+      showToast('Data management action completed.', false, true);
+      _forceStatusRefresh(true);
+      return true;
+    }
+
+    async function clearMappingData(includeManual) {
+      return runDataAction(
+        'clear-mappings',
+        includeManual ? 'Delete automatic and manual mappings?' : 'Delete automatic mapping cache?',
+        includeManual ? 'Every explicit mapping choice will be removed too.' : 'Manually confirmed mappings will be preserved.',
+        { include_manual: !!includeManual },
+      );
+    }
+
     async function deleteProfileData() {
       if (!sessionProfileId) {
         showToast('Sign into a profile first.', true, false);
@@ -8353,6 +8936,8 @@
     let activityQuery = '';
     let activityPage = 1;
     let activityRuns = { items: [], total: 0, page: 1, page_size: HISTORY_PAGE_SIZE };
+    let activityMode = 'runs';
+    let activityChanges = [];
     let activityBound = false;
 
     function runMatchesActivityFilter(run) {
@@ -8386,13 +8971,55 @@
     function renderActivityPage() {
       const filters = el('activity-filters');
       if (filters) {
-        filters.innerHTML = ACTIVITY_FILTERS.map(f =>
+        const available = activityMode === 'changes'
+          ? [...ACTIVITY_FILTERS.filter(f => f.key !== 'errors'), {key:'added',label:'Added'}, {key:'updated',label:'Updated'}, {key:'removed',label:'Removed'}]
+          : ACTIVITY_FILTERS;
+        filters.innerHTML = available.map(f =>
           `<button class="lib-chip ${activityFilter === f.key ? 'active' : ''}" type="button" data-activity-filter="${f.key}" aria-pressed="${activityFilter === f.key}">${esc(f.label)}</button>`).join('');
         filters.querySelectorAll('[data-activity-filter]').forEach(node => {
           node.addEventListener('click', () => { activityFilter = node.dataset.activityFilter; renderActivityPage(); });
         });
       }
-      renderActivityRuns();
+      if (activityMode === 'changes') renderActivityChanges(); else renderActivityRuns();
+    }
+
+    async function setActivityMode(mode) {
+      activityMode = mode === 'changes' ? 'changes' : 'runs';
+      activityFilter = 'all';
+      el('activity-mode-runs').classList.toggle('active', activityMode === 'runs');
+      el('activity-mode-changes').classList.toggle('active', activityMode === 'changes');
+      el('activity-feed-panel').querySelector('.panel-header>span').textContent = activityMode === 'runs' ? 'Runs' : 'Changes';
+      if (activityMode === 'changes' && !activityChanges.length) {
+        el('activity-feed-body').innerHTML = skeletonRows(4);
+        const result = await apiPost('/api/profile/activity/changes', { limit: 500 });
+        activityChanges = result.ok && Array.isArray(result.data.changes) ? result.data.changes : [];
+      }
+      renderActivityPage();
+    }
+
+    function renderActivityChanges() {
+      const body = el('activity-feed-body');
+      const meta = el('activity-feed-meta');
+      const pager = el('activity-feed-pager');
+      const query = activityQuery.trim().toLowerCase();
+      const rows = activityChanges.filter(change => {
+        if (['added','updated','removed'].includes(activityFilter) && change.change_type !== activityFilter) return false;
+        if (activityFilter === 'lists' && !['watchlist','collection'].includes(change.category)) return false;
+        if (activityFilter === 'history' && change.category !== 'history') return false;
+        if (activityFilter === 'resume' && change.category !== 'progress') return false;
+        return !query || `${change.title} ${change.source_provider} ${change.destination_provider} ${change.change_type}`.toLowerCase().includes(query);
+      });
+      if (meta) meta.textContent = `${rows.length} persisted change${rows.length === 1 ? '' : 's'}`;
+      if (pager) pager.innerHTML = '';
+      if (!rows.length) { body.innerHTML = '<div class="empty">No persisted item changes match this filter.</div>'; return; }
+      let day = '';
+      body.innerHTML = rows.map(change => {
+        const nextDay = dayLabel(change.timestamp); const heading = nextDay !== day ? `<div class="act-day">${esc(nextDay)}</div>` : ''; day = nextDay;
+        const tmdb = change.ids && change.ids.tmdb;
+        const key = tmdb ? `tmdb:${change.media_type === 'movie' ? 'movie' : 'tv'}:${tmdb}` : '';
+        const time = change.timestamp ? new Date(change.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+        return `${heading}<div class="act-row" ${key ? `role="button" tabindex="0" onclick="openLibraryDetail('${escAttr(key)}')"` : ''}><span class="act-icon act-ok">${change.change_type === 'removed' ? '−' : change.change_type === 'updated' ? '~' : '+'}</span><span class="act-copy"><span class="act-title">${esc(change.change_type[0].toUpperCase()+change.change_type.slice(1))} ${esc(change.title)}</span><span class="act-detail">${esc(providerLabel(change.source_provider))} → ${esc(providerLabel(change.destination_provider))} · ${esc(change.category || '')}</span>${change.previous || change.new ? `<span class="act-detail">${esc(change.previous || '')} → ${esc(change.new || '')}</span>` : ''}</span><span class="act-time">${esc(time)}</span></div>`;
+      }).join('');
     }
 
     function renderActivityRuns() {
@@ -8503,9 +9130,12 @@
       if (activityBound) return;
       activityBound = true;
       const search = el('activity-search');
-      if (search) search.addEventListener('input', () => { activityQuery = search.value; renderActivityRuns(); });
+      if (search) search.addEventListener('input', () => { activityQuery = search.value; renderActivityPage(); });
       const refresh = el('btn-activity-refresh');
-      if (refresh) refresh.addEventListener('click', () => loadActivityRuns(activityRuns.page || 1));
+      if (refresh) refresh.addEventListener('click', () => {
+        if (activityMode === 'changes') { activityChanges = []; setActivityMode('changes'); }
+        else loadActivityRuns(activityRuns.page || 1);
+      });
       const details = el('activity-logs-details');
       if (details) details.addEventListener('toggle', () => {
         if (details.open) { fetchProfileLogs(true); startProfileLogPolling(); }
@@ -8524,6 +9154,7 @@
     ];
     let issueFilter = 'all';
     let issuesBound = false;
+    let lastConflicts = [];
 
     // Every issue is built from a value the backend actually reported. Nothing
     // here is invented to fill the page out.
@@ -8565,6 +9196,19 @@
           actions: [{ label: 'Resolve mappings', handler: "focusIssuesPanel('unresolved')", primary: true }],
         });
       }
+      for (const conflict of lastConflicts.filter(row => row.resolution_state !== 'resolved')) {
+        const values = conflict.values || [];
+        issues.push({
+          kind: 'warnings', severity: 'warn',
+          title: `Conflict detected · ${conflict.title || 'Unknown title'}`,
+          body: values.map(value => `${providerLabel(value.provider)}: ${value.status}`).join(' · '),
+          actions: values.map(value => ({
+            label: `Use ${providerLabel(value.provider)}`,
+            handler: `resolveProviderConflict('${escAttr(conflict.conflict_id)}','${escAttr(value.provider)}')`,
+            primary: true,
+          })),
+        });
+      }
 
       if (profile.sync_error) {
         issues.push({
@@ -8593,11 +9237,12 @@
         // A run the safety guard stopped is a decision the user has to make, so
         // it is an issue rather than a log line.
         for (const blocked of (result.blocked_removals || [])) {
+          const blockedIndex = (result.blocked_removals || []).indexOf(blocked);
           issues.push({
             kind: 'warnings', severity: 'warn',
             title: 'Unusually large removal was paused',
             body: `${blocked.category ? PAIR_CATEGORY_LABELS[blocked.category] || blocked.category : 'A category'} on ${esc(brand(pair.target).label)} would have lost ${blocked.removals} of ${blocked.target_size} items (${blocked.percent}%). Nothing was deleted.`,
-            actions: [{ label: 'Review in settings', handler: "switchView('sync')" }],
+            actions: [{ label: 'Review changes', handler: `reviewBlockedRemoval('${escAttr(pair.pair_id)}', ${blockedIndex})`, primary: true }],
           });
         }
       }
@@ -8616,6 +9261,53 @@
           <div class="actions-bar">${actions}</div>
         </div>
       </div>`;
+    }
+
+    async function reviewBlockedRemoval(pairId, blockedIndex) {
+      const profile = lastDashboardProfile || {};
+      const result = (profile.last_pair_results || {})[pairId] || {};
+      const blocked = (result.blocked_removals || [])[blockedIndex];
+      if (!blocked) { showToast('This review is no longer available.', true, false); return; }
+      const items = Array.isArray(blocked.items) ? blocked.items : [];
+      const titles = items.map(item => `${item.title || 'Unknown'}${item.year ? ` (${item.year})` : ''}`);
+      const proceed = await confirmDialog({
+        title: `${blocked.removals} removals`,
+        body: `Review the real proposed removal set. ${blocked.removals} of ${blocked.target_size} items (${blocked.percent}%) would be removed.`,
+        detail: titles.length ? titles.join(' · ') : 'The older blocked run did not persist item details; run a new preview to review it.',
+        confirmLabel: 'Continue anyway', destructive: true,
+      });
+      if (!proceed) return;
+      const confirmed = await confirmDialog({
+        title: 'Continue this synchronization?',
+        body: `${blocked.removals} items will be removed.`,
+        detail: 'This bypass applies only to this synchronization attempt.',
+        confirmLabel: 'Continue sync', destructive: true,
+      });
+      if (!confirmed) return;
+      const response = await apiPost('/api/profile/pairs/run', {
+        pair_id: pairId, dry_run: false, background: false,
+        bypass_large_removal_guard: true,
+      });
+      if (!response.ok) { showToast(formatApiError(response.data, 'Could not continue the sync.'), true, false); return; }
+      showToast('Synchronization completed with the one-time bypass.', false, true);
+      _forceStatusRefresh();
+    }
+
+    async function resolveProviderConflict(conflictId, winner) {
+      const conflict = lastConflicts.find(row => row.conflict_id === conflictId);
+      const choice = (conflict && (conflict.values || []).find(row => row.provider === winner)) || {};
+      const confirmed = await confirmDialog({
+        title: `Resolve conflict for ${(conflict && conflict.title) || 'this title'}?`,
+        body: `Use ${providerLabel(winner)} (${choice.status || choice.normalized_value || ''}) and synchronize that comparable membership state to the other writable providers.`,
+        detail: 'Only watchlist versus collection membership is normalized; provider-specific status nuances are not overwritten.',
+        confirmLabel: `Use ${providerLabel(winner)}`,
+      });
+      if (!confirmed) return;
+      const result = await apiPost('/api/profile/conflicts/resolve', { conflict_id: conflictId, winner });
+      if (!result.ok) { showToast(formatApiError(result.data, 'Conflict resolution failed.'), true, false); return; }
+      showToast('Conflict resolved and synchronized.', false, true);
+      await fetchConflicts();
+      renderAttentionPanel(lastDashboardProfile);
     }
 
     function renderAttentionPanel(profile) {
@@ -8937,7 +9629,39 @@
       notifySettings.enabled = !!enabled;
       saveJson(NOTIFY_KEY, notifySettings);
       renderNotificationSettings();
+      renderServerNotifications(lastDashboardProfile);
     }
+
+    const SERVER_NOTIFY_EVENTS = [['sync_failed','Sync failed'],['auth_expired','Authentication expired'],['mapping_attention','Mapping requires attention'],['large_deletion_blocked','Large deletion blocked'],['first_sync_completed','First sync completed']];
+    function renderServerNotifications(profile) {
+      const host = el('server-notification-channels');
+      if (!host) return;
+      const saved = (profile && profile.notification_channels) || {};
+      host.innerHTML = ['discord','ntfy','gotify','webhook'].map(channel => {
+        const value = saved[channel] || {};
+        const label = {discord:'Discord',ntfy:'ntfy',gotify:'Gotify',webhook:'Generic webhook'}[channel];
+        const urlLabel = ['discord','webhook'].includes(channel) ? 'Webhook URL' : 'Server URL';
+        return `<div class="notification-channel"><div class="svc-card-head"><strong>${label}</strong><span class="svc-status ${value.configured ? 'svc-ok' : 'svc-muted'}"><span class="svc-dot"></span>${value.configured ? 'Configured' : 'Not configured'}</span></div><div class="form-row"><label>${urlLabel}</label><input type="url" id="notify-${channel}-url" value="${escAttr(value.server_url || '')}" placeholder="${value.secret_saved && ['discord','webhook'].includes(channel) ? 'Saved — enter only to replace' : 'https://…'}"></div>${channel === 'ntfy' ? `<div class="form-row"><label>Topic</label><input id="notify-ntfy-topic" value="${escAttr(value.topic || '')}"></div>` : ''}${['ntfy','gotify'].includes(channel) ? `<div class="form-row"><label>${channel === 'gotify' ? 'Application token' : 'Access token (optional)'}</label><input type="password" id="notify-${channel}-token" placeholder="${value.secret_saved ? 'Saved — blank keeps it' : ''}"></div>` : ''}<div class="notify-events">${SERVER_NOTIFY_EVENTS.map(([key,text]) => `<label><input type="checkbox" data-server-notify-event="${channel}:${key}" ${(value.events || ['sync_failed','large_deletion_blocked']).includes(key) ? 'checked' : ''}> ${text}</label>`).join('')}</div><div class="actions-bar"><button class="btn btn-sm" type="button" onclick="saveServerNotification('${channel}')">Save</button><button class="btn btn-sm" type="button" onclick="testServerNotification('${channel}')" ${value.configured ? '' : 'disabled'}>Send test notification</button></div></div>`;
+      }).join('');
+    }
+    async function saveServerNotification(channel) {
+      const events = Array.from(document.querySelectorAll(`[data-server-notify-event^="${channel}:"]:checked`)).map(node => node.dataset.serverNotifyEvent.split(':')[1]);
+      const payload = { channel, enabled: true, events };
+      const url = el(`notify-${channel}-url`).value.trim();
+      if (['discord','webhook'].includes(channel)) payload.url = url; else payload.server_url = url;
+      if (channel === 'ntfy') payload.topic = el('notify-ntfy-topic').value.trim();
+      if (['ntfy','gotify'].includes(channel)) payload.token = el(`notify-${channel}-token`).value.trim();
+      const result = await apiPost('/api/profile/notifications/save', payload);
+      if (!result.ok) { showToast(formatApiError(result.data, 'Could not save notification channel.'), true, false); return; }
+      showToast(`${channel} notifications saved.`, false, true);
+      renderServerNotifications(result.data.profile);
+    }
+    async function testServerNotification(channel) {
+      const result = await apiPost('/api/profile/notifications/test', { channel });
+      if (!result.ok) { showToast(formatApiError(result.data, 'Test notification failed.'), true, false); return; }
+      showToast('Test notification sent by the server.', false, true);
+    }
+    renderServerNotifications(lastDashboardProfile);
 
     function pushNotification(eventKey, title, body) {
       if (!notifySettings.enabled || !notifySettings.events[eventKey]) return;
@@ -9205,6 +9929,7 @@
         showToast('Test notification sent.', false, true);
       });
       renderNotificationSettings();
+      renderServerNotifications(lastDashboardProfile);
     }
 
     const draftCreds = loadJson(CREDS_KEY, {
@@ -9214,6 +9939,7 @@
       mdblist: { selected_lists: [] },
     });
       const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, simkl_reconcile_watched_history: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
+    enhanceConnectionCards();
     populateForm(draftCreds, draftOptions, {});
     const storedProfileId = localStorage.getItem(PROFILE_KEY);
     if (storedProfileId && !el('profile-id').value.trim()) {
@@ -9267,10 +9993,6 @@
     document.querySelectorAll('#view-settings select:not([data-theme-select]), #sync-settings select').forEach(select => {
       select.addEventListener('change', scheduleAutoSave);
     });
-
-    const SETTINGS_TABS = ['profile', 'appearance', 'connections', 'routes', 'schedule', 'notifications', 'danger', 'about'];
-    const SETTINGS_TAB_ALIASES = { lists: 'routes', behavior: 'routes', rules: 'routes', sync: 'routes', pairs: 'routes', stats: 'about', data: 'danger' };
-    let activeSettingsTab = 'profile';
 
     function showSettingsTab(tab) {
       const target = SETTINGS_TABS.includes(tab) ? tab : (SETTINGS_TAB_ALIASES[tab] || 'profile');

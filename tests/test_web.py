@@ -174,6 +174,102 @@ class WebTests(unittest.TestCase):
         response = self.client.post("/api/profile/connections/check", json={})
         self.assertEqual(response.status_code, 401)
 
+    def test_disconnect_connection_requires_session_and_known_source(self) -> None:
+        self.assertEqual(self.client.post(
+            "/api/profile/connections/disconnect", json={"provider": "trakt"},
+        ).status_code, 401)
+        profile = web._profile_store.create_profile(
+            "secret", _blank_credentials(), {"auto_sync": False, "media_types": ["movies"]},
+        )
+        self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"], "password": "secret",
+        })
+        self.assertEqual(self.client.post(
+            "/api/profile/connections/disconnect", json={"provider": "pmdb"},
+        ).status_code, 400)
+
+    def test_disconnect_connection_removes_auth_and_returns_refreshed_profile(self) -> None:
+        credentials = _blank_credentials()
+        credentials["simkl"] = {
+            "client_id": "simkl-client", "client_secret": "secret", "access_token": "token",
+            "selected_statuses": {"shows": ["watching"], "movies": [], "anime": []},
+        }
+        profile = web._profile_store.create_profile(
+            "secret", credentials, {"auto_sync": False, "media_types": ["shows"]},
+        )
+        self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"], "password": "secret",
+        })
+
+        response = self.client.post(
+            "/api/profile/connections/disconnect", json={"provider": "simkl"},
+        )
+        data = response.get_json()["profile"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(data["credentials"]["simkl"]["access_token_saved"])
+        self.assertEqual(data["credentials"]["simkl"]["selected_statuses"]["shows"], ["watching"])
+        private = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        self.assertEqual(private["credentials"]["simkl"]["access_token"], "")
+
+    def test_index_contains_production_connection_card_states_and_actions(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("CONNECTION_CARD_META", html)
+        self.assertIn("Advanced connection settings", html)
+        self.assertIn("Authentication required", html)
+        self.assertIn("Token expired", html)
+        self.assertIn("Connection failed", html)
+        self.assertIn("disconnectProvider(provider)", html)
+        self.assertIn("/api/profile/connections/disconnect", html)
+
+    def test_index_contains_five_step_real_onboarding_wizard(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="onboarding-dialog"', html)
+        self.assertIn("Step ${onboardingStep} of 5", html)
+        self.assertIn("/api/profile/onboarding/destination", html)
+        self.assertIn("restoreOnboardingProviderCards", html)
+        self.assertIn("intervalPresetOptions(21600, current)", html)
+        self.assertIn("onboardingReadyGraphHtml", html)
+        self.assertNotIn("Enter a profile password. Leave UUID blank", html)
+
+    @patch("web.check_connections")
+    def test_onboarding_destination_validates_and_creates_incomplete_profile(self, check_connections_mock) -> None:
+        check_connections_mock.return_value = [{
+            "provider": "pmdb", "status": "healthy", "code": "ok", "message": "checked",
+            "checked_at": "2026-08-23T12:00:00+00:00",
+            "capabilities": {"readable": True, "writable": True}, "identity": "", "recovery_action": "none",
+        }]
+
+        response = self.client.post("/api/profile/onboarding/destination", json={
+            "api_key": "pm-real-key", "password": "secret",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["created"])
+        self.assertFalse(data["profile"]["options"]["onboarding_completed"])
+        self.assertTrue(data["profile"]["credentials"]["pmdb"]["api_key_saved"])
+        private = web._profile_store.get_private_profile_by_id(data["profile"]["profile_id"])
+        self.assertEqual(private["credentials"]["pmdb"]["api_key"], "pm-real-key")
+        self.assertEqual(private["connection_health"]["pmdb"]["status"], "healthy")
+
+    @patch("web.check_connections")
+    def test_onboarding_destination_rejects_invalid_key_without_profile(self, check_connections_mock) -> None:
+        check_connections_mock.return_value = [{
+            "provider": "pmdb", "status": "error", "code": "auth_invalid", "message": "rejected",
+            "checked_at": "2026-08-23T12:00:00+00:00",
+            "capabilities": {"readable": False, "writable": False}, "identity": "", "recovery_action": "edit_credentials",
+        }]
+
+        response = self.client.post("/api/profile/onboarding/destination", json={
+            "api_key": "bad-key", "password": "secret",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(web._profile_store._profiles, {})
+
     @patch("web.check_connections")
     def test_connection_check_persists_only_saved_credential_results(self, check_connections_mock) -> None:
         credentials = _blank_credentials()
@@ -2542,6 +2638,44 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["total"], 3)
         titles = sorted(row["title"] for row in data["entries"])
         self.assertEqual(titles, ["Attack on Titan", "Inception", "Mononoke"])
+
+    def test_library_detail_exposes_persisted_provider_state(self) -> None:
+        profile_id, store = self._library_profile()
+        store.add("collection", [{
+            "media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan",
+            "simkl_id": 39687, "_syncmeta_source_provider": "simkl",
+            "_syncmeta_source_status": "completed",
+        }], source="pair")
+        data = self.client.post("/api/profile/library/entry", json={"key": "tmdb:tv:1429"}).get_json()
+        simkl = next(row for row in data["providers"] if row["provider"] == "simkl")
+        self.assertEqual(simkl["status"], "Completed")
+        self.assertEqual(simkl["provider_id"], "39687")
+
+    def test_item_activity_endpoint_returns_persisted_pair_changes(self) -> None:
+        profile_id, _ = self._library_profile()
+        web._profile_store.update_pair_last_results(profile_id, [{
+            "pair_id": "p", "source": "simkl", "target": "library",
+            "categories": [{"changes": [{"change_type": "added", "category": "watchlist", "title": "Dune", "media_type": "movie", "ids": {"tmdb": "693134"}}]}],
+        }])
+        response = self.client.post("/api/profile/activity/changes", json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["changes"][0]["title"], "Dune")
+
+    @patch("web.requests.post")
+    def test_server_notification_secret_is_masked_and_test_is_server_side(self, mock_post) -> None:
+        self._library_profile()
+        mock_post.return_value.raise_for_status.return_value = None
+        saved = self.client.post("/api/profile/notifications/save", json={
+            "channel": "discord", "url": "https://discord.example/secret",
+            "events": ["sync_failed"], "enabled": True,
+        })
+        self.assertEqual(saved.status_code, 200)
+        channel = saved.get_json()["profile"]["notification_channels"]["discord"]
+        self.assertTrue(channel["secret_saved"])
+        self.assertNotIn("url", channel)
+        tested = self.client.post("/api/profile/notifications/test", json={"channel": "discord"})
+        self.assertEqual(tested.status_code, 200)
+        mock_post.assert_called_once()
 
     def test_the_kind_filter_separates_anime_films_from_films(self) -> None:
         self._library_profile()

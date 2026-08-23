@@ -12,10 +12,13 @@ import re
 import secrets
 import threading
 import time
+from urllib.parse import urlparse
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from pathlib import Path
+
+import requests
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, make_response, redirect, render_template, request, url_for
@@ -74,6 +77,8 @@ from src.providers import (
     ALL_REMOVAL_MODES,
     ADAPTER_TYPES,
     CATEGORY_LABELS,
+    CATEGORY_COLLECTION,
+    CATEGORY_WATCHLIST,
     PAIR_MODE_LABELS,
     PROVIDER_LABELS,
     PROVIDER_ORDER,
@@ -1000,6 +1005,15 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             detailed_results=detailed_result_dicts,
             list_state=service.list_state if service is not None else None,
         )
+        if not dry_run:
+            if not profile.get("last_sync"):
+                _notify_profile_event(profile, "first_sync_completed", "Your first synchronization completed successfully.")
+            unresolved = sum(int(row.get("items_skipped_unresolved") or 0) for row in result_dicts)
+            if unresolved:
+                _notify_profile_event(profile, "mapping_attention", f"{unresolved} media mappings require attention.")
+            blocked = sum(len(row.get("blocked_removals") or []) for row in pair_result_dicts) if modes.get("pairs") else 0
+            if blocked:
+                _notify_profile_event(profile, "large_deletion_blocked", f"SyncMeta paused {blocked} unusually large removal operation(s).")
     except SyncCancelled:
         logger.info("Sync stopped for profile %s", profile_id[:8])
         _profile_store.record_sync_cancelled(profile_id, dry_run=dry_run, sync_modes=modes)
@@ -1014,6 +1028,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
             dry_run=dry_run,
             sync_modes=modes,
         )
+        _notify_profile_event(profile, "sync_failed", f"Synchronization failed: {exc}")
     finally:
         _log_profile_id.reset(log_token)
 
@@ -2629,6 +2644,63 @@ def api_profile_save():
     return _with_session_cookie(make_response(jsonify(response)), session_token)
 
 
+@app.route("/api/profile/onboarding/destination", methods=["POST"])
+def api_profile_onboarding_destination():
+    """Validate PublicMetaDB and establish the profile used by the wizard.
+
+    Normal profile saves intentionally require a configured source.  The
+    wizard cannot satisfy that invariant until its next step, so this endpoint
+    performs the one safe partial save it needs: a real, fixed-provider PMDB
+    check followed by creation (or update) of an incomplete profile.
+    """
+    body = request.get_json(silent=True) or {}
+    api_key = str(body.get("api_key") or "").strip()
+    if not api_key:
+        return _json_error("PublicMetaDB API key is required", 400)
+
+    credentials = normalize_credentials({"pmdb": {"api_key": api_key}})
+    check = check_connections(credentials, ["pmdb"])[0]
+    if check.get("status") != "healthy":
+        return _json_error(
+            "Your PublicMetaDB API key could not be validated.",
+            400,
+            provider="PublicMetaDB",
+            hint="Copy a fresh API key from PublicMetaDB and try again.",
+        )
+
+    profile_id = _current_profile_id()
+    try:
+        if profile_id:
+            private_profile = _profile_store.get_private_profile_by_id(profile_id)
+            options = copy.deepcopy(private_profile.get("options") or {})
+            options["onboarding_completed"] = False
+            profile = _profile_store.update_profile_by_id(profile_id, credentials, options)
+            session_token = _session_token()
+            created = False
+        else:
+            password = str(body.get("password") or "")
+            if not password:
+                return _json_error("Profile password is required", 400)
+            profile = _profile_store.create_profile(
+                password,
+                credentials,
+                {"auto_sync": False, "onboarding_completed": False},
+            )
+            profile_id = profile["profile_id"]
+            session_token = _session_store.create(profile_id)
+            created = True
+        _profile_store.record_connection_health(profile_id, [check])
+        profile = _profile_store.get_profile_by_id(profile_id, include_credentials=True)
+    except (KeyError, ValueError) as exc:
+        return _json_error(str(exc), 400)
+
+    return _with_session_cookie(make_response(jsonify({
+        "profile": profile,
+        "created": created,
+        "check": check,
+    })), session_token)
+
+
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
     # The profile filter is taken from the session, never from the query string.
@@ -2726,6 +2798,13 @@ def api_profile_connections_check():
         checks_by_provider.update({row["provider"]: row for row in fresh})
         if not has_draft:
             _profile_store.record_connection_health(profile_id, fresh)
+            for row in fresh:
+                if row.get("code") in {"auth_invalid", "permission_missing"}:
+                    _notify_profile_event(
+                        private_profile, "auth_expired",
+                        f"{PROVIDER_LABELS.get(row.get('provider'), row.get('provider'))} authentication expired or was revoked.",
+                        provider=str(row.get("provider") or ""),
+                    )
 
     checks = [checks_by_provider[provider] for provider in providers]
     all_health = dict(cached)
@@ -2738,6 +2817,24 @@ def api_profile_connections_check():
         profile_id=str(private_profile.get("profile_id") or ""),
     )
     return jsonify({"checks": checks, "readiness": readiness})
+
+
+@app.route("/api/profile/connections/disconnect", methods=["POST"])
+def api_profile_connections_disconnect():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider") or "").strip().lower()
+    if provider not in {"simkl", "trakt", "anilist", "mdblist"}:
+        return _json_error("Provider cannot be disconnected", 400)
+    try:
+        profile = _profile_store.disconnect_provider(profile_id, provider)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    return _profile_response(profile, include_credentials=True)
 
 
 @app.route("/api/profile/sync/runs", methods=["POST"])
@@ -3062,6 +3159,125 @@ def api_profile_library_entries():
     })
 
 
+@app.route("/api/profile/activity/changes", methods=["POST"])
+def api_profile_activity_changes():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        limit = int(body.get("limit") or 250)
+    except (TypeError, ValueError):
+        limit = 250
+    return jsonify({"changes": _profile_store.get_item_activity(profile_id, limit=limit)})
+
+
+def _library_conflicts(profile_id: str) -> list[dict]:
+    """Compare only semantically equivalent membership domains.
+
+    Planning means watchlist membership. Completed/Watching/Paused/Dropped all
+    mean collection/status membership here; their finer provider meanings are
+    intentionally not compared because PMDB and MDBList cannot represent them.
+    """
+    conflicts = []
+    for entry in _library_store_for(profile_id).entries():
+        states = list((entry.get("provider_states") or {}).values())
+        comparable = []
+        for state in states:
+            status = str(state.get("status") or "")
+            normalized = "watchlist" if status == "Planning" else (
+                "collection" if status in {"Completed", "Watching", "Paused", "Dropped"} else ""
+            )
+            if normalized:
+                comparable.append({**state, "normalized_value": normalized})
+        if len({row["normalized_value"] for row in comparable}) < 2:
+            continue
+        conflicts.append({
+            "conflict_id": f"{entry.get('key')}:membership",
+            "library_key": entry.get("key"), "title": entry.get("title"),
+            "media_type": entry.get("media_type"), "ids": {
+                "tmdb": entry.get("tmdb_id"), "imdb": entry.get("imdb_id"),
+                "anilist": entry.get("anilist_id"), "mal": entry.get("mal_id"),
+            },
+            "normalized_field": "list_membership", "values": comparable,
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+            "resolution_state": "open",
+        })
+    return conflicts
+
+
+@app.route("/api/profile/conflicts", methods=["POST"])
+def api_profile_conflicts():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    profile = _current_private_profile() or {}
+    conflicts = _profile_store.replace_conflicts(profile_id, _library_conflicts(profile_id))
+    policy = str((profile.get("options") or {}).get("conflict_policy") or "never")
+    if policy != "never":
+        for conflict in conflicts:
+            if conflict.get("resolution_state") == "resolved":
+                continue
+            values = conflict.get("values") or []
+            winner = policy
+            if policy == "newest" and values:
+                winner = str(max(values, key=lambda row: str(row.get("last_synced") or "")).get("provider") or "")
+            if any(row.get("provider") == winner for row in values):
+                try:
+                    _apply_conflict_resolution(profile_id, profile, conflict, winner)
+                except Exception:
+                    logger.warning("Automatic conflict resolution failed", exc_info=True)
+        conflicts = _profile_store.get_private_profile_by_id(profile_id).get("conflicts") or conflicts
+    return jsonify({"conflicts": conflicts})
+
+
+def _apply_conflict_resolution(profile_id: str, profile: dict, conflict: dict, winner: str) -> dict:
+    chosen = next((row for row in conflict.get("values") or [] if row.get("provider") == winner), None)
+    if not chosen:
+        raise KeyError("provider choice")
+    store_entry = _library_store_for(profile_id).entry(str(conflict.get("library_key") or ""))
+    if not store_entry:
+        raise KeyError("library item")
+    category = CATEGORY_WATCHLIST if chosen["normalized_value"] == "watchlist" else CATEGORY_COLLECTION
+    adapters = _build_provider_adapters(_config_from_profile(profile), profile_id=profile_id)
+    failures = []
+    for value in conflict.get("values") or []:
+        provider = str(value.get("provider") or "")
+        if provider == winner or provider not in adapters:
+            continue
+        adapter = adapters[provider]
+        if category not in adapter.writable_categories():
+            failures.append(f"{adapter.label} cannot receive {category}")
+            continue
+        try:
+            adapter.add(category, [store_entry])
+        except Exception as exc:
+            failures.append(f"{adapter.label}: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    return _profile_store.resolve_conflict(profile_id, str(conflict.get("conflict_id") or ""), winner)
+
+
+@app.route("/api/profile/conflicts/resolve", methods=["POST"])
+def api_profile_conflicts_resolve():
+    profile_id = _current_profile_id()
+    profile = _current_private_profile()
+    if not profile_id or not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    conflict_id = str(body.get("conflict_id") or "")
+    winner = str(body.get("winner") or "").strip().lower()
+    conflicts = _profile_store.replace_conflicts(profile_id, _library_conflicts(profile_id))
+    conflict = next((row for row in conflicts if row.get("conflict_id") == conflict_id), None)
+    if not conflict or not any(row.get("provider") == winner for row in conflict.get("values") or []):
+        return _json_error("Conflict or provider choice not found", 404)
+    try:
+        resolved = _apply_conflict_resolution(profile_id, profile, conflict, winner)
+    except (KeyError, RuntimeError) as exc:
+        return _json_error(str(exc), 502)
+    return jsonify({"status": "resolved", "conflict": resolved})
+
+
 @app.route("/api/profile/library/entry", methods=["POST"])
 def api_profile_library_entry():
     """One title in full: its seasons, and which episodes are watched.
@@ -3097,6 +3313,22 @@ def api_profile_library_entry():
     tmdb_key = credentials["tmdb"]["api_key"]
     enriched, tmdb_error = _enrich_library_items([row], tmdb_key)
     row = enriched[0] if enriched else row
+
+    providers = list((entry.get("provider_states") or {}).values())
+    known = {str(provider.get("provider") or "") for provider in providers}
+    # Backward-compatible facts for libraries created before provider-state
+    # persistence. These rows say only what is known: that the source synced.
+    for source in entry.get("sources") or []:
+        provider = str(source or "").strip().lower()
+        if provider in {"simkl", "trakt", "anilist", "mdblist", "pmdb"} and provider not in known:
+            providers.append({
+                "provider": provider,
+                "label": {"simkl": "SIMKL", "trakt": "Trakt", "anilist": "AniList", "mdblist": "MDBList", "pmdb": "PublicMetaDB"}[provider],
+                "status": "Synced",
+                "provider_id": str(entry.get(f"{provider}_id") or ""),
+                "last_synced": entry.get("updated_at"),
+            })
+    providers.sort(key=lambda item: (item.get("provider") == "pmdb", str(item.get("label") or "")))
 
     seasons = []
     tmdb_id = entry.get("tmdb_id")
@@ -3171,6 +3403,7 @@ def api_profile_library_entry():
         "watched_total": len(watched),
         "tmdb_configured": bool(tmdb_key),
         "tmdb_error": tmdb_error,
+        "providers": providers,
     })
 
 
@@ -3547,6 +3780,179 @@ def api_profile_list_delete():
     return _profile_response(updated_profile, include_credentials=True)
 
 
+@app.route("/api/profile/data/reset-sync-state", methods=["POST"])
+def api_profile_data_reset_sync_state():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        return _profile_response(_profile_store.reset_sync_state_by_id(profile_id), include_credentials=True)
+    except RuntimeError as exc:
+        return _json_error(str(exc), 409)
+
+
+@app.route("/api/profile/data/clear-mappings", methods=["POST"])
+def api_profile_data_clear_mappings():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    include_manual = bool((request.get_json(silent=True) or {}).get("include_manual", False))
+    return _profile_response(
+        _profile_store.clear_mapping_cache_by_id(profile_id, include_manual=include_manual),
+        include_credentials=True,
+    )
+
+
+@app.route("/api/profile/data/disconnect-sources", methods=["POST"])
+def api_profile_data_disconnect_sources():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    return _profile_response(
+        _profile_store.disconnect_source_providers_by_id(profile_id), include_credentials=True,
+    )
+
+
+@app.route("/api/profile/data/delete-pmdb-lists", methods=["POST"])
+def api_profile_data_delete_pmdb_lists():
+    profile_id = _current_profile_id()
+    profile = _current_private_profile()
+    if not profile_id or not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    if profile.get("sync_running"):
+        return _json_error("Wait for the current sync to finish", 409)
+    client = PublicMetaDBClient(_config_from_profile(profile).pmdb)
+    deleted = 0
+    errors = []
+    for managed in list(profile.get("managed_lists") or []):
+        try:
+            list_id = str(managed.get("list_id") or "").strip()
+            if list_id and client.delete_list(list_id):
+                deleted += 1
+        except Exception as exc:
+            errors.append(str(exc))
+    if errors:
+        return _json_error(f"Deleted {deleted} lists; {len(errors)} failed: {errors[0]}", 502)
+    # Reset ownership so deleted lists are not presented as still managed.
+    with _profile_store._lock:
+        stored = _profile_store._get_profile_locked(profile_id)
+        stored["managed_lists"] = []
+        stored["last_results"] = []
+        _profile_store._save_locked()
+    return jsonify({"status": "deleted", "deleted": deleted})
+
+
+_NOTIFICATION_CHANNELS = {"discord", "ntfy", "gotify", "webhook"}
+_NOTIFICATION_EVENTS = {
+    "sync_failed", "auth_expired", "mapping_attention",
+    "large_deletion_blocked", "first_sync_completed",
+}
+
+
+def _notification_url(value: object, field: str) -> str:
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{field} must be an http or https URL")
+    return url.rstrip("/")
+
+
+def _send_notification(channel: str, settings: dict, payload: dict) -> None:
+    timeout = 10
+    message = str(payload.get("message") or "SyncMeta notification")
+    if channel == "discord":
+        response = requests.post(settings["url"], json={"content": f"**SyncMeta**\n{message}"}, timeout=timeout)
+    elif channel == "ntfy":
+        headers = {"Title": "SyncMeta", "Content-Type": "text/plain; charset=utf-8"}
+        if settings.get("token"):
+            headers["Authorization"] = f"Bearer {settings['token']}"
+        response = requests.post(f"{settings['server_url']}/{settings['topic']}", data=message.encode(), headers=headers, timeout=timeout)
+    elif channel == "gotify":
+        response = requests.post(
+            f"{settings['server_url']}/message",
+            params={"token": settings["token"]},
+            json={"title": "SyncMeta", "message": message, "priority": 5}, timeout=timeout,
+        )
+    else:
+        response = requests.post(settings["url"], json=payload, timeout=timeout)
+    response.raise_for_status()
+
+
+def _notify_profile_event(profile: dict, event: str, message: str, provider: str = "") -> None:
+    """Best-effort delivery; notification failure never changes sync outcome."""
+    payload = {
+        "event": event, "timestamp": datetime.now(timezone.utc).isoformat(),
+        "profile": str(profile.get("profile_id") or "")[:8],
+        "provider": str(provider or ""), "message": str(message or ""),
+    }
+    for channel, settings in (profile.get("notification_channels") or {}).items():
+        if not settings.get("enabled") or event not in (settings.get("events") or []):
+            continue
+        try:
+            _send_notification(channel, settings, payload)
+        except Exception as exc:
+            logger.warning("Could not send %s notification through %s: %s", event, channel, exc)
+
+
+@app.route("/api/profile/notifications/save", methods=["POST"])
+def api_profile_notifications_save():
+    profile_id = _current_profile_id()
+    profile = _current_private_profile()
+    if not profile_id or not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    channel = str(body.get("channel") or "").strip().lower()
+    if channel not in _NOTIFICATION_CHANNELS:
+        return _json_error("Unsupported notification channel", 400)
+    previous = (profile.get("notification_channels") or {}).get(channel) or {}
+    try:
+        settings = {
+            "enabled": bool(body.get("enabled", True)),
+            "events": sorted(set(body.get("events") or []) & _NOTIFICATION_EVENTS),
+        }
+        if channel in {"discord", "webhook"}:
+            settings["url"] = _notification_url(body.get("url") or previous.get("url"), "Webhook URL")
+        else:
+            settings["server_url"] = _notification_url(body.get("server_url") or previous.get("server_url"), "Server URL")
+        if channel == "ntfy":
+            settings["topic"] = str(body.get("topic") or previous.get("topic") or "").strip()
+            if not settings["topic"] or "/" in settings["topic"]:
+                raise ValueError("ntfy topic is required and cannot contain a slash")
+            settings["token"] = str(body.get("token") or previous.get("token") or "").strip()
+        elif channel == "gotify":
+            settings["token"] = str(body.get("token") or previous.get("token") or "").strip()
+            if not settings["token"]:
+                raise ValueError("Gotify application token is required")
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    return _profile_response(
+        _profile_store.update_notification_channel(profile_id, channel, settings),
+        include_credentials=True,
+    )
+
+
+@app.route("/api/profile/notifications/test", methods=["POST"])
+def api_profile_notifications_test():
+    profile = _current_private_profile()
+    if not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    channel = str((request.get_json(silent=True) or {}).get("channel") or "").strip().lower()
+    settings = (profile.get("notification_channels") or {}).get(channel)
+    if channel not in _NOTIFICATION_CHANNELS or not settings:
+        return _json_error("Configure and save this channel first", 400)
+    payload = {
+        "event": "test", "timestamp": datetime.now(timezone.utc).isoformat(),
+        "profile": str(profile.get("profile_id") or "")[:8], "provider": "",
+        "message": "Test notification — server-side notifications are working.",
+    }
+    try:
+        _send_notification(channel, settings, payload)
+    except requests.RequestException as exc:
+        logger.warning("Notification test failed for %s: %s", channel, exc)
+        return _json_error(f"Notification delivery failed: {exc}", 502)
+    return jsonify({"status": "sent", "channel": channel})
+
+
 @app.route("/api/profile/sync", methods=["POST"])
 def api_profile_sync():
     body = request.get_json(silent=True) or {}
@@ -3847,6 +4253,7 @@ def api_profile_pairs_run():
     body = request.get_json(silent=True) or {}
     pair_id = str(body.get("pair_id", "") or "").strip()
     dry_run = bool(body.get("dry_run", False))
+    bypass_guard = bool(body.get("bypass_large_removal_guard", False))
 
     try:
         private_profile = _profile_store.get_private_profile_by_id(profile_id)
@@ -3870,7 +4277,9 @@ def api_profile_pairs_run():
             _build_provider_adapters(config, profile_id=profile_id), dry_run=dry_run,
             managed_keys=activity_state.get("pair_managed_keys") or {},
             status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
-            guard_large_removals=config.sync.guard_large_removals,
+            # Authenticated and scoped to this one synchronous attempt. The
+            # profile setting remains untouched, so later runs are guarded.
+            guard_large_removals=config.sync.guard_large_removals and not bypass_guard,
             guard_removal_percent=config.sync.guard_removal_percent,
         )
         log_token = _log_profile_id.set(profile_id)

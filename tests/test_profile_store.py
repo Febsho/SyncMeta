@@ -83,6 +83,7 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(loaded["options"]["trakt_watched_history_interval_seconds"], 86400)
         self.assertEqual(loaded["options"]["trakt_resume_progress_interval_seconds"], 86400)
         self.assertFalse(loaded["options"]["auto_resume_sync"])
+        self.assertTrue(loaded["options"]["onboarding_completed"])
         self.assertFalse(loaded["options"]["delete_disabled_lists"])
         self.assertEqual(loaded["options"]["simkl_visibility"], "private")
         self.assertEqual(loaded["options"]["trakt_public_visibility"], "public")
@@ -90,10 +91,45 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(loaded["credentials"]["anilist"]["selected_statuses"], ["CURRENT", "COMPLETED"])
         self.assertEqual(loaded["credentials"]["mdblist"]["selected_lists"][0]["id"], 11)
         self.assertIsNotNone(loaded["next_sync_at"])
-        self.assertGreater(
-            datetime.fromisoformat(loaded["next_sync_at"]),
-            datetime.now(timezone.utc),
+        self.assertGreater(datetime.fromisoformat(loaded["next_sync_at"]), datetime.now(timezone.utc))
+
+    def test_notification_channels_are_encrypted_and_masked(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        public = self.store.update_notification_channel(profile_id, "discord", {
+            "enabled": True, "events": ["sync_failed"],
+            "url": "https://discord.example/secret-token",
+        })
+        raw = (Path(self.tmpdir.name) / "profiles.json").read_text(encoding="utf-8")
+        self.assertNotIn("secret-token", raw)
+        self.assertTrue(public["notification_channels"]["discord"]["configured"])
+        self.assertNotIn("url", public["notification_channels"]["discord"])
+
+    def test_pair_changes_create_activity_and_non_rollback_snapshot(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        self.store.update_pair_last_results(profile_id, [{
+            "pair_id": "route-1", "source": "simkl", "target": "pmdb",
+            "categories": [{"changes": [{
+                "change_type": "added", "category": "watchlist", "title": "Dune",
+                "media_type": "movie", "ids": {"tmdb": "693134"},
+                "previous": "absent", "new": "present",
+            }]}],
+        }])
+        private = self.store.get_private_profile_by_id(profile_id)
+        self.assertEqual(self.store.get_item_activity(profile_id)[0]["title"], "Dune")
+        self.assertFalse(private["change_snapshots"][0]["rollback_available"])
+
+    def test_onboarding_completion_flag_round_trips(self) -> None:
+        created = self.store.create_profile(
+            "secret", self.credentials, {**self.options, "onboarding_completed": False},
         )
+        self.assertFalse(created["options"]["onboarding_completed"])
+
+        updated = self.store.update_profile_by_id(
+            created["profile_id"], {}, {**created["options"], "onboarding_completed": True},
+        )
+        self.assertTrue(updated["options"]["onboarding_completed"])
 
     def test_legacy_pmdb_pipeline_is_migrated_to_normal_pairs_once(self) -> None:
         created = self.store.create_profile("secret", self.credentials, {
@@ -1013,6 +1049,39 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(health["status"], "healthy")
         self.assertNotIn("api_key", health)
         self.assertNotIn("upstream_payload", health)
+
+    def test_disconnect_provider_clears_auth_but_keeps_sync_selections(self) -> None:
+        credentials = {
+            **self.credentials,
+            "trakt": {
+                "client_id": "trakt-client",
+                "client_secret": "trakt-secret",
+                "access_token": "trakt-token",
+                "refresh_token": "trakt-refresh",
+                "access_token_expires_at": "2026-09-01T00:00:00+00:00",
+                "username": "viewer",
+                "sync_watchlist": True,
+                "sync_watchlist_movies": True,
+                "sync_watchlist_shows": False,
+                "selected_lists": [{"user": "viewer", "slug": "favorites", "name": "Favorites"}],
+            },
+        }
+        created = self.store.create_profile("pw", credentials, self.options)
+        self.store.record_connection_health(created["profile_id"], [{
+            "provider": "trakt", "status": "healthy", "code": "ok", "message": "ok",
+            "checked_at": "2026-08-23T10:00:00+00:00",
+            "capabilities": {"readable": True, "writable": True},
+        }])
+
+        public = self.store.disconnect_provider(created["profile_id"], "trakt")
+        private = self.store.get_private_profile_by_id(created["profile_id"])
+
+        self.assertFalse(public["credentials"]["trakt"]["access_token_saved"])
+        self.assertEqual(private["credentials"]["trakt"]["client_id"], "")
+        self.assertEqual(private["credentials"]["trakt"]["access_token"], "")
+        self.assertTrue(private["credentials"]["trakt"]["sync_watchlist_movies"])
+        self.assertEqual(private["credentials"]["trakt"]["selected_lists"][0]["slug"], "favorites")
+        self.assertNotIn("trakt", private["connection_health"])
 
 
 if __name__ == "__main__":

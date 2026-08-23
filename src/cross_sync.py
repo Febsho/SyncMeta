@@ -182,6 +182,7 @@ class PairCategoryStats:
     #: stopped. Reported rather than raised: nothing was deleted, and the user
     #: decides whether the run was right.
     blocked_removals: list[dict] = field(default_factory=list)
+    changes: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -196,6 +197,7 @@ class PairCategoryStats:
             "added_back": self.added_back,
             "removed_back": self.removed_back,
             "blocked_removals": [dict(entry) for entry in self.blocked_removals],
+            "changes": [dict(entry) for entry in self.changes],
             "errors": list(self.errors),
         }
 
@@ -565,7 +567,7 @@ class CrossSyncService:
             self._note_blocked(
                 pair, category, result,
                 removals=len(to_remove), target_size=len(target_by_key),
-                percent=percent, where=target.label,
+                percent=percent, where=target.label, items=to_remove,
             )
             to_remove = []
 
@@ -581,12 +583,17 @@ class CrossSyncService:
                 result.added = len(to_add)
             else:
                 try:
+                    write_items = [
+                        {**item, "_syncmeta_source_provider": source.key}
+                        for item in to_add
+                    ] if target.key == "library" else to_add
                     totals = target.add(
-                        category, to_add, target_list, **_add_kwargs(target, pair),
+                        category, write_items, target_list, **_add_kwargs(target, pair),
                     ) or {}
                     result.added = _total(totals, "added")
                     result.unmapped += _total(totals, "not_found")
-                    wrote_added = to_add
+                    wrote_added = to_add[:result.added]
+                    result.changes.extend(self._change_rows(wrote_added, "added", category))
                 except Exception as exc:
                     message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
@@ -603,7 +610,8 @@ class CrossSyncService:
                 try:
                     totals = target.remove(category, to_remove, target_list) or {}
                     result.removed = _total(totals, "deleted")
-                    wrote_removed = to_remove
+                    wrote_removed = to_remove[:result.removed]
+                    result.changes.extend(self._change_rows(wrote_removed, "removed", category))
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
@@ -727,6 +735,7 @@ class CrossSyncService:
             self._note_blocked(
                 pair, category, result,
                 removals=len(keys), target_size=size, percent=percent, where=label,
+                items=[(first_by_key if bucket == "first" else second_by_key)[key] for key in keys],
             )
             if bucket == "first":
                 blocked_first = set(keys)
@@ -758,8 +767,13 @@ class CrossSyncService:
                     # target_list belongs to the declared target only; writing
                     # back to the first service uses its own default list.
                     dest = "" if reverse else target_list
+                    source_adapter = second if reverse else first
+                    write_items = [
+                        {**item, "_syncmeta_source_provider": source_adapter.key}
+                        for item in items
+                    ] if verb == "add" and adapter.key == "library" else items
                     totals = (
-                        adapter.add(category, items, dest, **_add_kwargs(adapter, pair))
+                        adapter.add(category, write_items, dest, **_add_kwargs(adapter, pair))
                         if verb == "add"
                         else adapter.remove(category, items, dest)
                     ) or {}
@@ -818,16 +832,48 @@ class CrossSyncService:
             return False, percent
         return percent > self._guard_removal_percent, percent
 
+    @staticmethod
+    def _change_rows(items: list[dict], change_type: str, category: str) -> list[dict]:
+        rows = []
+        for item in items or []:
+            ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+            rows.append({
+                "change_type": change_type, "category": category,
+                "title": str(item.get("title") or "Unknown"),
+                "media_type": str(item.get("media_type") or ""),
+                "ids": {key: value for key, value in {
+                    "tmdb": item.get("tmdb_id") or ids.get("tmdb"),
+                    "imdb": item.get("imdb_id") or ids.get("imdb"),
+                    "anilist": item.get("anilist_id") or ids.get("anilist"),
+                    "mal": item.get("mal_id") or ids.get("mal"),
+                }.items() if value},
+                "previous": "present" if change_type == "removed" else "absent",
+                "new": "absent" if change_type == "removed" else "present",
+            })
+        return rows
+
     def _note_blocked(
         self, pair, category: str, result: PairCategoryStats,
         *, removals: int, target_size: int, percent: int, where: str,
+        items: list[dict] | None = None,
     ) -> None:
+        review_items = []
+        for item in items or []:
+            ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+            review_items.append({
+                "title": str(item.get("title") or "Unknown"),
+                "year": item.get("year"),
+                "media_type": str(item.get("media_type") or ""),
+                "tmdb_id": item.get("tmdb_id") or ids.get("tmdb"),
+                "imdb_id": item.get("imdb_id") or ids.get("imdb"),
+            })
         result.blocked_removals.append({
             "category": category,
             "removals": removals,
             "target_size": target_size,
             "percent": percent,
             "target": where,
+            "items": review_items,
         })
         logger.warning(
             "Pair %s: refusing to remove %d of %d %s items (%d%%) from %s — "

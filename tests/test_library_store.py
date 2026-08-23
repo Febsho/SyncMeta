@@ -80,6 +80,16 @@ class LibraryStoreTests(unittest.TestCase):
         reopened = LibraryStore(self.store.path)
         self.assertEqual(len(reopened.fetch(CATEGORY_WATCHLIST)), 1)
 
+    def test_provider_status_is_persisted_for_library_inspector(self) -> None:
+        self.store.add(CATEGORY_COLLECTION, [self._aot(
+            simkl_id=39687,
+            _syncmeta_source_provider="simkl",
+            _syncmeta_source_status="completed",
+        )], source="pair")
+        state = LibraryStore(self.store.path).entries()[0]["provider_states"]["simkl"]
+        self.assertEqual(state["status"], "Completed")
+        self.assertEqual(state["provider_id"], "39687")
+
     def test_two_seasons_of_one_anime_become_one_entry(self) -> None:
         self.store.add(CATEGORY_WATCHLIST, [
             self._aot(season=1, anilist_id=16498),

@@ -42,6 +42,17 @@ SECTION_WATCHLIST = "watchlist"
 SECTION_COLLECTION = "collection"
 ALL_SECTIONS = (SECTION_WATCHLIST, SECTION_COLLECTION)
 
+_PROVIDER_LABELS = {
+    "simkl": "SIMKL", "trakt": "Trakt", "anilist": "AniList",
+    "mdblist": "MDBList", "pmdb": "PublicMetaDB",
+}
+_STATUS_LABELS = {
+    "completed": "Completed", "watching": "Watching",
+    "plantowatch": "Planning", "planning": "Planning",
+    "plan_to_watch": "Planning", "hold": "Paused", "paused": "Paused",
+    "dropped": "Dropped",
+}
+
 
 def series_key(item: dict) -> str:
     """Identity of an item's *series*, not of one season of it.
@@ -157,6 +168,7 @@ class LibraryStore:
             "seasons": {},
             "watched": {},
             "sources": [],
+            "provider_states": {},
             "added_at": time.time(),
             "updated_at": time.time(),
         }
@@ -202,6 +214,44 @@ class LibraryStore:
                         record[field] = value
         entry["updated_at"] = time.time()
 
+    @staticmethod
+    def _remember_provider_state(entry: dict, item: dict, source: str, section: str) -> bool:
+        """Persist the provider facts already present on a sync item.
+
+        This deliberately records the source response while it is available;
+        the Library inspector must not guess a remote state later or make the
+        browser re-query connected services. Older rows without this metadata
+        continue to render from their real ``sources`` list as "Synced".
+        """
+        provider = str(item.get("_syncmeta_source_provider") or source or "").strip().lower()
+        if provider not in _PROVIDER_LABELS:
+            return False
+        ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+        provider_id = item.get(f"{provider}_id") or ids.get(provider)
+        if provider == "pmdb":
+            provider_id = item.get("pmdb_item_id") or provider_id or item.get("tmdb_id") or ids.get("tmdb")
+        raw_status = str(
+            item.get("_syncmeta_source_status") or item.get("status") or ""
+        ).strip().lower()
+        status = _STATUS_LABELS.get(raw_status)
+        if not status:
+            status = "Watched" if section == "history" else (
+                "Planning" if section == SECTION_WATCHLIST else "Synced"
+            )
+        timestamp = item.get("updated_at") or item.get("last_updated") or time.time()
+        state = {
+            "provider": provider,
+            "label": _PROVIDER_LABELS[provider],
+            "status": status,
+            "provider_id": str(provider_id or "").strip(),
+            "last_synced": timestamp,
+        }
+        states = entry.setdefault("provider_states", {})
+        if states.get(provider) == state:
+            return False
+        states[provider] = state
+        return True
+
     def add(self, section: str, items: list[dict], source: str = "") -> dict:
         """Put ``items`` into ``section``. Returns add/skip counts."""
         section = str(section or "").strip().lower()
@@ -209,6 +259,7 @@ class LibraryStore:
             return {"added": 0, "not_found": len(items or []), "batches": 0}
         added = 0
         skipped = 0
+        changed = False
         with self._lock:
             for item in items or []:
                 key = series_key(item)
@@ -220,13 +271,15 @@ class LibraryStore:
                     entry = self._blank(key, item)
                     self._items[key] = entry
                 self._merge_identity(entry, item)
+                changed = self._remember_provider_state(entry, item, source, section) or changed
                 sections = entry.setdefault("sections", {})
                 if section not in sections:
                     sections[section] = time.time()
                     added += 1
                 if source and source not in entry.setdefault("sources", []):
                     entry["sources"].append(source)
-            if added or skipped:
+                    changed = True
+            if added or skipped or changed:
                 self._save_locked()
         return {"added": added, "not_found": skipped, "batches": 1 if items else 0}
 
@@ -253,6 +306,7 @@ class LibraryStore:
         """Record plays. A movie is stored as ``0x0`` so it has one slot."""
         added = 0
         skipped = 0
+        changed = False
         with self._lock:
             for item in items or []:
                 key = series_key(item)
@@ -264,6 +318,7 @@ class LibraryStore:
                     entry = self._blank(key, item)
                     self._items[key] = entry
                 self._merge_identity(entry, item)
+                changed = self._remember_provider_state(entry, item, source, "history") or changed
                 if entry.get("media_type") == "movie":
                     slot = "0x0"
                 else:
@@ -289,7 +344,8 @@ class LibraryStore:
                     added += 1
                 if source and source not in entry.setdefault("sources", []):
                     entry["sources"].append(source)
-            if added or skipped:
+                    changed = True
+            if added or skipped or changed:
                 self._save_locked()
         return {"added": added, "not_found": skipped, "batches": 1 if items else 0}
 

@@ -896,6 +896,8 @@ def normalize_profile_options(options: dict | None) -> dict:
         # so a stored 0 or 900 cannot disable or trivialise the check.
         "guard_large_removals": bool(raw.get("guard_large_removals", True)),
         "guard_removal_percent": min(100, max(1, _coerce_int(raw.get("guard_removal_percent"), 20))),
+        "conflict_policy": str(raw.get("conflict_policy") or "never").strip().lower()
+        if str(raw.get("conflict_policy") or "never").strip().lower() in {"never", "newest", "simkl", "trakt", "pmdb"} else "never",
         "media_types": media_types,
         "auto_sync": bool(raw.get("auto_sync", True)),
         "interval_seconds": interval_seconds,
@@ -925,6 +927,10 @@ def normalize_profile_options(options: dict | None) -> dict:
         "trakt_personal_visibility": _normalize_visibility(raw.get("trakt_personal_visibility"), "private"),
         "trakt_public_visibility": _normalize_visibility(raw.get("trakt_public_visibility"), "public"),
         "mdblist_visibility": _normalize_visibility(raw.get("mdblist_visibility"), "public"),
+        # New profiles created by the setup wizard opt out explicitly until
+        # its final step.  Profiles from before the wizard therefore remain
+        # complete and are never surprised by onboarding after an upgrade.
+        "onboarding_completed": bool(raw.get("onboarding_completed", True)),
         "simkl_sync_to_pmdb_watchlist": bool(raw.get("simkl_sync_to_pmdb_watchlist", False)),
         "trakt_sync_to_pmdb_watchlist": bool(raw.get("trakt_sync_to_pmdb_watchlist", False)),
         "anilist_sync_to_pmdb_watchlist": bool(raw.get("anilist_sync_to_pmdb_watchlist", False)),
@@ -1069,6 +1075,11 @@ class ProfileStore:
             "manual_resolution_cache": copy.deepcopy(raw_profile.get("manual_resolution_cache", {})) if isinstance(raw_profile.get("manual_resolution_cache"), dict) else {},
             "manual_list_additions": copy.deepcopy(raw_profile.get("manual_list_additions", {})) if isinstance(raw_profile.get("manual_list_additions"), dict) else {},
             "connection_health": _normalize_connection_health(raw_profile.get("connection_health")),
+            "notification_channels": self._cipher.decrypt(raw_profile["notification_channels_encrypted"])
+            if str(raw_profile.get("notification_channels_encrypted") or "").strip() else {},
+            "item_activity": copy.deepcopy(raw_profile.get("item_activity", [])) if isinstance(raw_profile.get("item_activity"), list) else [],
+            "conflicts": copy.deepcopy(raw_profile.get("conflicts", [])) if isinstance(raw_profile.get("conflicts"), list) else [],
+            "change_snapshots": copy.deepcopy(raw_profile.get("change_snapshots", [])) if isinstance(raw_profile.get("change_snapshots"), list) else [],
         }
 
     def _save_locked(self) -> None:
@@ -1123,6 +1134,10 @@ class ProfileStore:
             "manual_resolution_cache": copy.deepcopy(profile.get("manual_resolution_cache", {})),
             "manual_list_additions": copy.deepcopy(profile.get("manual_list_additions", {})),
             "connection_health": _normalize_connection_health(profile.get("connection_health")),
+            "notification_channels_encrypted": self._cipher.encrypt(profile.get("notification_channels") or {}),
+            "item_activity": copy.deepcopy(profile.get("item_activity", []))[:1000],
+            "conflicts": copy.deepcopy(profile.get("conflicts", []))[:250],
+            "change_snapshots": copy.deepcopy(profile.get("change_snapshots", []))[:25],
         }
 
     def _load_credentials(self, raw_profile: dict) -> dict:
@@ -1463,6 +1478,17 @@ class ProfileStore:
                 ]),
             },
             "connection_health": _normalize_connection_health(profile.get("connection_health")),
+            "notification_channels": {
+                key: {
+                    "enabled": bool((channel or {}).get("enabled")),
+                    "events": list((channel or {}).get("events") or []),
+                    "server_url": str((channel or {}).get("server_url") or ""),
+                    "topic": str((channel or {}).get("topic") or ""),
+                    "configured": bool((channel or {}).get("url") or (channel or {}).get("server_url")),
+                    "secret_saved": bool((channel or {}).get("url") or (channel or {}).get("token")),
+                }
+                for key, channel in (profile.get("notification_channels") or {}).items()
+            },
         }
         if include_credentials:
             result["credentials"] = public_credentials(profile.get("credentials", {}))
@@ -1616,6 +1642,10 @@ class ProfileStore:
             "manual_resolution_cache": {},
             "manual_list_additions": {},
             "connection_health": {},
+            "notification_channels": {},
+            "item_activity": [],
+            "conflicts": [],
+            "change_snapshots": [],
         }
 
         with self._lock:
@@ -2305,6 +2335,8 @@ class ProfileStore:
             stored = profile.get("last_pair_results")
             merged = dict(stored) if isinstance(stored, dict) else {}
             now = utc_now_iso()
+            activity = list(profile.get("item_activity") or [])
+            snapshot_changes = []
             for result in results or []:
                 if not isinstance(result, dict):
                     continue
@@ -2315,8 +2347,70 @@ class ProfileStore:
                 entry["timestamp"] = now
                 entry["dry_run"] = bool(dry_run)
                 merged[pair_id] = entry
+                run_id = str(profile.get("sync_job_id") or f"pair:{now}")
+                for category in result.get("categories") or []:
+                    for change in category.get("changes") or []:
+                        activity.insert(0, {
+                            "run_id": run_id, "timestamp": now,
+                            "source_provider": str(result.get("source") or ""),
+                            "destination_provider": str(result.get("target") or ""),
+                            **copy.deepcopy(change),
+                        })
+                        snapshot_changes.append({
+                            "source_provider": str(result.get("source") or ""),
+                            "destination_provider": str(result.get("target") or ""),
+                            **copy.deepcopy(change),
+                        })
             profile["last_pair_results"] = merged
+            if not dry_run:
+                profile["item_activity"] = activity[:1000]
+                if snapshot_changes:
+                    snapshots = list(profile.get("change_snapshots") or [])
+                    snapshots.insert(0, {
+                        "run_id": str(profile.get("sync_job_id") or f"pair:{now}"),
+                        "timestamp": now, "changes": snapshot_changes,
+                        # We have a complete inverse description, but provider
+                        # APIs differ on deletion/history reversibility. Until a
+                        # capability-specific executor proves every operation
+                        # safe, rollback remains deliberately hidden.
+                        "rollback_available": False,
+                        "rollback_reason": "Provider reversibility has not been proven for every change.",
+                    })
+                    profile["change_snapshots"] = snapshots[:25]
             self._save_locked()
+
+    def get_item_activity(self, profile_id: str, limit: int = 200) -> list[dict]:
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            return copy.deepcopy((profile.get("item_activity") or [])[:max(1, min(1000, int(limit)))])
+
+    def replace_conflicts(self, profile_id: str, conflicts: list[dict]) -> list[dict]:
+        """Persist a deduplicated snapshot while retaining prior resolutions."""
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            prior = {str(row.get("conflict_id")): row for row in profile.get("conflicts") or []}
+            merged = []
+            for row in conflicts or []:
+                item = copy.deepcopy(row)
+                old = prior.get(str(item.get("conflict_id"))) or {}
+                if old.get("resolution_state") == "resolved":
+                    item.update({key: old.get(key) for key in ("resolution_state", "resolved_at", "winner")})
+                merged.append(item)
+            profile["conflicts"] = merged[:250]
+            self._save_locked()
+            return copy.deepcopy(profile["conflicts"])
+
+    def resolve_conflict(self, profile_id: str, conflict_id: str, winner: str) -> dict:
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            conflict = next((row for row in profile.get("conflicts") or [] if row.get("conflict_id") == conflict_id), None)
+            if not conflict:
+                raise KeyError(conflict_id)
+            conflict["resolution_state"] = "resolved"
+            conflict["resolved_at"] = utc_now_iso()
+            conflict["winner"] = winner
+            self._save_locked()
+            return copy.deepcopy(conflict)
 
     def update_pair_managed_keys(self, profile_id: str, managed_keys: dict) -> None:
         """Persist which target keys each pair owns, for the managed removal mode.
@@ -2499,6 +2593,65 @@ class ProfileStore:
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
 
+    def reset_sync_state_by_id(self, profile_id: str) -> dict:
+        """Clear derived synchronization state without touching connections."""
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            if profile.get("sync_running"):
+                raise RuntimeError("Cannot reset state while a sync is in progress")
+            profile["activity_state"] = _normalize_activity_state(None)
+            profile["list_state"] = {}
+            profile["last_pair_results"] = {}
+            profile["pair_sync_schedule"] = {}
+            profile["last_sync"] = None
+            profile["last_history_sync"] = None
+            profile["last_resume_sync"] = None
+            profile["sync_status"] = "Synchronization state reset"
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
+    def clear_mapping_cache_by_id(self, profile_id: str, *, include_manual: bool = False) -> dict:
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            profile["resolution_cache"] = dict(profile.get("manual_resolution_cache") or {})
+            profile["failed_resolution_cache"] = {}
+            if include_manual:
+                profile["manual_resolution_cache"] = {}
+                profile["anime_manual_overrides"] = {}
+                profile["anime_review_decisions"] = {}
+                profile["resolution_cache"] = {}
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
+    def disconnect_source_providers_by_id(self, profile_id: str) -> dict:
+        """Disconnect sources while preserving PMDB destination and TMDB metadata."""
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            credentials = normalize_credentials(profile.get("credentials"))
+            defaults = normalize_credentials({})
+            for provider in ("simkl", "trakt", "anilist", "mdblist"):
+                credentials[provider] = defaults[provider]
+            profile["credentials"] = credentials
+            profile["connection_health"] = {
+                key: value for key, value in (profile.get("connection_health") or {}).items()
+                if key in {"pmdb", "tmdb"}
+            }
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
+    def update_notification_channel(self, profile_id: str, channel: str, settings: dict) -> dict:
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            channels = copy.deepcopy(profile.get("notification_channels") or {})
+            channels[str(channel)] = copy.deepcopy(settings)
+            profile["notification_channels"] = channels
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
     def record_connection_health(self, profile_id: str, checks: list[dict]) -> dict:
         """Persist sanitized connection results for the profile dashboard."""
         with self._lock:
@@ -2515,6 +2668,42 @@ class ProfileStore:
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return copy.deepcopy(merged)
+
+    def disconnect_provider(self, profile_id: str, provider: str) -> dict:
+        """Remove one provider's authentication without deleting sync choices.
+
+        Credential merging deliberately treats blank secrets as "keep the saved
+        value", so disconnecting must be an explicit store operation.  Status
+        selections and selected lists remain in place for a later reconnect.
+        """
+        auth_fields = {
+            "simkl": ("client_id", "client_secret", "access_token"),
+            "trakt": (
+                "client_id", "client_secret", "access_token", "refresh_token",
+                "access_token_expires_at", "username",
+            ),
+            "anilist": ("username", "client_id", "client_secret", "access_token"),
+            "mdblist": (
+                "api_key", "client_id", "client_secret", "access_token",
+                "refresh_token", "access_token_expires_at",
+            ),
+        }
+        normalized_provider = str(provider or "").strip().lower()
+        if normalized_provider not in auth_fields:
+            raise ValueError("Provider cannot be disconnected")
+
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            credentials = normalize_credentials(profile.get("credentials"))
+            for field in auth_fields[normalized_provider]:
+                credentials[normalized_provider][field] = ""
+            profile["credentials"] = credentials
+            health = _normalize_connection_health(profile.get("connection_health"))
+            health.pop(normalized_provider, None)
+            profile["connection_health"] = health
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
 
     def _authenticate_locked(self, profile_id: str, password: str) -> dict:
         profile = self._get_profile_locked(profile_id)

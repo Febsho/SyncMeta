@@ -1411,6 +1411,8 @@ class RemovalGuardTests(unittest.TestCase):
         blocked = category.blocked_removals[0]
         self.assertEqual(blocked["removals"], 39)
         self.assertEqual(blocked["target_size"], 40)
+        self.assertEqual(len(blocked["items"]), 39)
+        self.assertEqual(blocked["items"][0]["title"], "Film 1")
         self.assertEqual(target.removed, [])
         # And it rides out on the payload the dashboard reads.
         self.assertEqual(len(result.to_dict()["blocked_removals"]), 1)
@@ -1421,6 +1423,8 @@ class RemovalGuardTests(unittest.TestCase):
         self.assertEqual(category.removed, 2)
         self.assertEqual(category.blocked_removals, [])
         self.assertTrue(target.removed)
+        self.assertEqual(len(category.changes), 2)
+        self.assertTrue(all(row["change_type"] == "removed" for row in category.changes))
 
     def test_small_lists_are_exempt(self):
         # Removing 2 of 3 is 67% and entirely ordinary; the guard must not speak.
