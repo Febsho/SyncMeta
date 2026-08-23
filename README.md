@@ -48,16 +48,17 @@ creates or reuses, rather than being flattened into Trakt Collection.
 
 | Service | Reads | Writes |
 |---|---|---|
-| SIMKL | Watch statuses for shows, movies and anime; watch history | yes |
-| Trakt | Watchlist, collection, history, your lists, liked lists, resume | yes |
+| SIMKL | Watch statuses for shows, movies and anime; watch history; resume | Watchlist, history and collection |
+| Trakt | Watchlist, collection, history, your lists, liked lists, resume | Watchlist, history, collection and personal lists |
 | AniList | Lists by status | only with an access token |
 | MDBList | Your lists and public lists, watchlist, collection, watch history | yes, with an API key or OAuth |
-| PublicMetaDB | Watchlist and lists | yes |
-| Library (local) | Watchlist, collection, watch history | yes, always |
+| PublicMetaDB | Watchlist, lists, collection, watch history and resume | the same |
+| Library (local) | All titles, watchlist, collection, watch history and resume | the same, always |
 
-**Watch history and resume progress.** Optional and off by default. Watch
-history and resume progress can come from SIMKL or Trakt. History is
-manual by default, resume can run automatically.
+**Watch history and resume progress.** Both are normal pair categories. Resume
+can be read from SIMKL, Trakt, PublicMetaDB or Library, and written to
+PublicMetaDB or Library. The pair editor only offers directions that both ends
+actually support.
 
 **MDBList OAuth.** An API key is enough to read. To sync *into* MDBList — its
 watchlist, collection, watch history, or one of your static lists — create an app

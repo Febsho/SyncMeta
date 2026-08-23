@@ -167,6 +167,7 @@ class LibraryStore:
             "sections": {},
             "seasons": {},
             "watched": {},
+            "resume": {},
             "sources": [],
             "provider_states": {},
             "added_at": time.time(),
@@ -296,7 +297,7 @@ class LibraryStore:
                     deleted += 1
                 # An entry with no sections and no watch history is not "in" the
                 # library any more; keeping it would make removals invisible.
-                if not entry.get("sections") and not entry.get("watched"):
+                if not entry.get("sections") and not entry.get("watched") and not entry.get("resume"):
                     self._items.pop(key, None)
             if deleted:
                 self._save_locked()
@@ -363,7 +364,79 @@ class LibraryStore:
                     slot = _episode_key(item.get("season"), item.get("episode"))
                 if slot and watched.pop(slot, None) is not None:
                     deleted += 1
-                if not entry.get("sections") and not entry.get("watched"):
+                if not entry.get("sections") and not entry.get("watched") and not entry.get("resume"):
+                    self._items.pop(entry["key"], None)
+            if deleted:
+                self._save_locked()
+        return {"deleted": deleted}
+
+    def save_resume(self, items: list[dict], source: str = "") -> dict:
+        """Upsert continue-watching positions at movie/episode granularity."""
+        added = 0
+        skipped = 0
+        changed = False
+        with self._lock:
+            for item in items or []:
+                key = series_key(item)
+                if not key:
+                    skipped += 1
+                    continue
+                entry = self._items.get(key)
+                if entry is None:
+                    entry = self._blank(key, item)
+                    self._items[key] = entry
+                self._merge_identity(entry, item)
+                changed = self._remember_provider_state(entry, item, source, "resume") or changed
+                if entry.get("media_type") == "movie":
+                    slot = "0x0"
+                else:
+                    slot = _episode_key(item.get("season"), item.get("episode"))
+                if slot is None:
+                    skipped += 1
+                    continue
+                try:
+                    position_ms = max(0, int(item.get("position_ms") or 0))
+                    runtime_ms = max(0, int(item.get("runtime_ms") or 0))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                previous = (entry.get("resume") or {}).get(slot)
+                comparable = {
+                    "position_ms": position_ms,
+                    "runtime_ms": runtime_ms,
+                    "progress": item.get("progress"),
+                }
+                previous_comparable = {
+                    key: (previous or {}).get(key) for key in comparable
+                }
+                if previous_comparable != comparable:
+                    value = {
+                        **comparable,
+                        "updated_at": item.get("updated_at") or time.time(),
+                    }
+                    entry.setdefault("resume", {})[slot] = value
+                    added += 1
+                    changed = True
+                if source and source not in entry.setdefault("sources", []):
+                    entry["sources"].append(source)
+                    changed = True
+            if added or skipped or changed:
+                self._save_locked()
+        return {"added": added, "not_found": skipped, "batches": 1 if items else 0}
+
+    def remove_resume(self, items: list[dict]) -> dict:
+        deleted = 0
+        with self._lock:
+            for item in items or []:
+                entry = self._items.get(series_key(item))
+                if not entry:
+                    continue
+                slot = "0x0" if entry.get("media_type") == "movie" else _episode_key(
+                    item.get("season"), item.get("episode")
+                )
+                if slot and (entry.get("resume") or {}).pop(slot, None) is not None:
+                    deleted += 1
+                if not entry.get("sections") and not entry.get("watched") and not entry.get("resume"):
                     self._items.pop(entry["key"], None)
             if deleted:
                 self._save_locked()
@@ -409,6 +482,20 @@ class LibraryStore:
                         item["watched_at"] = watched_at
                         out.append(item)
                 return out
+            if section == "resume":
+                out = []
+                for entry in self._items.values():
+                    for slot, state in (entry.get("resume") or {}).items():
+                        season, _, episode = slot.partition("x")
+                        if entry.get("media_type") == "movie":
+                            item = self._as_sync_item(entry)
+                        else:
+                            item = self._as_sync_item(entry, int(season), int(episode))
+                        item.update(state or {})
+                        out.append(item)
+                return out
+            if section == "all":
+                return [self._as_sync_item(entry) for entry in self._items.values()]
             return [
                 self._as_sync_item(entry)
                 for entry in self._items.values()
@@ -435,4 +522,6 @@ class LibraryStore:
                     out["by_section"][section] = out["by_section"].get(section, 0) + 1
                 if entry.get("watched"):
                     out["by_section"]["history"] = out["by_section"].get("history", 0) + 1
+                if entry.get("resume"):
+                    out["by_section"]["resume"] = out["by_section"].get("resume", 0) + 1
             return out

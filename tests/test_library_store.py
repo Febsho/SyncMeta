@@ -11,7 +11,13 @@ from src.media_kind import (
     classify,
     matches_filter,
 )
-from src.providers import CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_WATCHLIST, LibraryAdapter
+from src.providers import (
+    CATEGORY_COLLECTION,
+    CATEGORY_HISTORY,
+    CATEGORY_RESUME,
+    CATEGORY_WATCHLIST,
+    LibraryAdapter,
+)
 
 
 class MediaKindTests(unittest.TestCase):
@@ -176,6 +182,23 @@ class LibraryStoreTests(unittest.TestCase):
         self.assertEqual(counts["by_kind"][KIND_ANIME_MOVIE], 1)
         self.assertEqual(counts["by_kind"][KIND_MOVIE], 1)
 
+    def test_resume_progress_round_trips_and_updates(self) -> None:
+        first = self._aot(season=1, episode=3, position_ms=12_000, runtime_ms=24_000)
+        later = {**first, "position_ms": 18_000}
+        self.assertEqual(self.store.save_resume([first])["added"], 1)
+        self.assertEqual(self.store.save_resume([first])["added"], 0)
+        self.assertEqual(self.store.save_resume([later])["added"], 1)
+        rows = LibraryStore(self.store.path).fetch("resume")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position_ms"], 18_000)
+
+    def test_resume_keeps_an_otherwise_empty_entry_until_removed(self) -> None:
+        item = self._aot(season=1, episode=3, position_ms=12_000, runtime_ms=24_000)
+        self.store.save_resume([item])
+        self.assertEqual(len(self.store.fetch("all")), 1)
+        self.store.remove_resume([item])
+        self.assertEqual(self.store.entries(), [])
+
     def test_a_corrupt_file_starts_empty_rather_than_crashing(self) -> None:
         self.store.path.write_text("{ not json", encoding="utf-8")
         self.assertEqual(LibraryStore(self.store.path).entries(), [])
@@ -193,7 +216,7 @@ class LibraryAdapterTests(unittest.TestCase):
     def test_it_reads_and_writes_every_category(self) -> None:
         self.assertEqual(
             set(self.adapter.writable_categories()),
-            {CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION},
+            {CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME},
         )
 
     def test_it_is_always_writable(self) -> None:
@@ -217,6 +240,16 @@ class LibraryAdapterTests(unittest.TestCase):
     def test_an_empty_selection_means_the_default(self) -> None:
         self.adapter.add(CATEGORY_WATCHLIST, [{"media_type": "tv", "tmdb_id": "1", "title": "x"}])
         self.assertEqual(len(self.adapter.fetch(CATEGORY_WATCHLIST, [])), 1)
+
+    def test_all_titles_source_includes_every_library_section(self) -> None:
+        self.adapter.add(CATEGORY_COLLECTION, [{"media_type": "movie", "tmdb_id": "2", "title": "x"}])
+        self.assertEqual(len(self.adapter.fetch(CATEGORY_WATCHLIST, ["section:all"])), 1)
+
+    def test_resume_writes_go_through_resume_state(self) -> None:
+        item = {"media_type": "tv", "tmdb_id": "1429", "season": 1, "episode": 3,
+                "title": "AoT", "position_ms": 12_000, "runtime_ms": 24_000}
+        self.adapter.add(CATEGORY_RESUME, [item])
+        self.assertEqual(self.adapter.fetch(CATEGORY_RESUME)[0]["position_ms"], 12_000)
 
     def test_history_writes_go_through_watched_state(self) -> None:
         self.adapter.add(CATEGORY_HISTORY, [

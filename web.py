@@ -4431,11 +4431,11 @@ def api_profile_pairs_save():
                 f"Pair {index + 1}: {target_type.label} does not support writable custom lists",
                 400, pair_index=index,
             )
-        if pair.target_list and any(
-            category not in target_type.target_list_categories for category in pair.categories
+        if pair.target_list and not any(
+            category in target_type.target_list_categories for category in pair.categories
         ):
             return _json_error(
-                f"Pair {index + 1}: the selected custom list cannot receive every selected category",
+                f"Pair {index + 1}: the selected custom list cannot receive any selected category",
                 400, pair_index=index,
             )
         normalized.append(pair.to_dict())

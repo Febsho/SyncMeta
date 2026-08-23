@@ -26,13 +26,17 @@ logger = logging.getLogger(__name__)
 CATEGORY_WATCHLIST = "watchlist"
 CATEGORY_HISTORY = "history"
 CATEGORY_COLLECTION = "collection"
+CATEGORY_RESUME = "resume"
 
-ALL_CATEGORIES = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+ALL_CATEGORIES = (
+    CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME,
+)
 
 CATEGORY_LABELS = {
     CATEGORY_WATCHLIST: "Watchlist / Plan to Watch",
     CATEGORY_HISTORY: "Watch History",
     CATEGORY_COLLECTION: "Completed / Collection",
+    CATEGORY_RESUME: "Resume Progress",
 }
 
 # ── Removal modes ──────────────────────────────────────────────────────────
@@ -453,7 +457,7 @@ class ProviderAdapter:
 class TraktAdapter(ProviderAdapter):
     key = "trakt"
     label = "Trakt"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = True
@@ -550,6 +554,8 @@ class TraktAdapter(ProviderAdapter):
             return list(self._client.get_watched_history() or [])
         if category == CATEGORY_COLLECTION:
             return list(self._client.get_collection() or [])
+        if category == CATEGORY_RESUME:
+            return list(self._client.get_playback_progress() or [])
         return self._unsupported(category, "read")
 
     def _automatic_simkl_destinations(self, target_list: str) -> list[tuple[str, str]]:
@@ -696,7 +702,7 @@ class TraktAdapter(ProviderAdapter):
 class SimklAdapter(ProviderAdapter):
     key = "simkl"
     label = "SIMKL"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = False
@@ -744,6 +750,8 @@ class SimklAdapter(ProviderAdapter):
         # history endpoint.
         if category == CATEGORY_HISTORY:
             return list(self._client.get_watched_history() or [])
+        if category == CATEGORY_RESUME:
+            return list(self._client.get_playback_progress() or [])
 
         selected = self._selected_statuses(category, source_lists)
         if selected:
@@ -930,8 +938,8 @@ class AniListAdapter(ProviderAdapter):
 class PmdbAdapter(ProviderAdapter):
     key = "pmdb"
     label = "PublicMetaDB"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
@@ -1132,6 +1140,18 @@ class PmdbAdapter(ProviderAdapter):
             return out
         if category == CATEGORY_COLLECTION:
             return self._pmdb_collection_items(source_lists)
+        if category == CATEGORY_RESUME:
+            out = []
+            for entry in self._client.get_resume_points() or []:
+                normalized = self._normalize_pmdb_entry(entry)
+                if not normalized:
+                    continue
+                for field in ("season", "episode", "position_ms", "runtime_ms", "progress"):
+                    if entry.get(field) is not None:
+                        normalized[field] = entry[field]
+                normalized["resume_id"] = entry.get("id") or entry.get("resume_id")
+                out.append(normalized)
+            return out
         return self._unsupported(category, "read")
 
     def target_lists(self) -> list[dict]:
@@ -1217,6 +1237,28 @@ class PmdbAdapter(ProviderAdapter):
                 self._client.add_items_to_list_batch(list_id, payload)
                 totals["added"] += len(payload)
             return totals
+        if category == CATEGORY_RESUME:
+            payload = []
+            for item in items:
+                tmdb_id = str(item.get("tmdb_id") or "").strip()
+                if not tmdb_id.isdigit():
+                    totals["not_found"] += 1
+                    continue
+                row = {
+                    "tmdb_id": int(tmdb_id),
+                    "media_type": item.get("media_type") or "movie",
+                    "position_ms": int(item.get("position_ms") or 0),
+                    "runtime_ms": int(item.get("runtime_ms") or 0),
+                }
+                if item.get("season") is not None:
+                    row["season"] = int(item["season"])
+                if item.get("episode") is not None:
+                    row["episode"] = int(item["episode"])
+                payload.append(row)
+            if payload:
+                self._client.save_resume_points_batch(payload)
+                totals["added"] += len(payload)
+            return totals
         return self._unsupported(category, "write")
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
@@ -1262,6 +1304,15 @@ class PmdbAdapter(ProviderAdapter):
                     continue
                 self._client.remove_item_from_list(list_id, str(pmdb_item_id))
                 totals["deleted"] += 1
+            return totals
+        if category == CATEGORY_RESUME:
+            for item in items:
+                resume_id = item.get("resume_id") or item.get("id")
+                if not resume_id:
+                    totals["not_found"] += 1
+                    continue
+                if self._client.delete_resume_point(str(resume_id)):
+                    totals["deleted"] += 1
             return totals
         return self._unsupported(category, "remove from")
 
@@ -1507,8 +1558,8 @@ class LibraryAdapter(ProviderAdapter):
 
     key = "library"
     label = "Library"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     supports_list_selection = True
     # Named lists inside the library would be a second grouping on top of the
     # sections, with no provider on the other side able to address them.
@@ -1526,9 +1577,11 @@ class LibraryAdapter(ProviderAdapter):
 
     def list_sources(self) -> list[dict]:
         return [
+            {"key": "section:all", "label": "Library — all titles", "category": CATEGORY_WATCHLIST, "kind": "list"},
             {"key": "section:watchlist", "label": "Library watchlist", "category": CATEGORY_WATCHLIST},
             {"key": "section:collection", "label": "Library collection", "category": CATEGORY_COLLECTION},
             {"key": "section:history", "label": "Library watch history", "category": CATEGORY_HISTORY},
+            {"key": "section:resume", "label": "Library resume progress", "category": CATEGORY_RESUME},
         ]
 
     @staticmethod
@@ -1542,6 +1595,8 @@ class LibraryAdapter(ProviderAdapter):
         selected = [str(value).strip() for value in (source_lists or []) if str(value).strip()]
         if selected:
             wanted = f"section:{category}"
+            if category == CATEGORY_WATCHLIST and "section:all" in selected:
+                return "all"
             return category if wanted in selected else None
         return category
 
@@ -1566,6 +1621,8 @@ class LibraryAdapter(ProviderAdapter):
             return self._unsupported(category, "write")
         if category == CATEGORY_HISTORY:
             return self._store.mark_watched(items, source="pair")
+        if category == CATEGORY_RESUME:
+            return self._store.save_resume(items, source="pair")
         if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
             return self._store.add(category, items, source="pair")
         return self._unsupported(category, "write")
@@ -1575,6 +1632,8 @@ class LibraryAdapter(ProviderAdapter):
             return self._unsupported(category, "remove from")
         if category == CATEGORY_HISTORY:
             return self._store.unmark_watched(items)
+        if category == CATEGORY_RESUME:
+            return self._store.remove_resume(items)
         if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
             return self._store.remove(category, items)
         return self._unsupported(category, "remove from")

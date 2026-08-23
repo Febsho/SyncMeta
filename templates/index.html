@@ -1234,7 +1234,15 @@
 
         <!-- Which services feed which destination, drawn from the saved pairs. -->
         <div class="panel" id="sync-graph-panel">
-          <div class="panel-header"><span>Sync graph</span><span class="history-time" id="sync-graph-meta"></span></div>
+          <div class="panel-header">
+            <span>Sync graph</span>
+            <span class="actions-bar">
+              <span class="history-time" id="sync-graph-meta"></span>
+              <button class="btn btn-sm" id="btn-sync-graph-toggle" type="button"
+                      aria-expanded="true" aria-controls="sync-graph-body"
+                      onclick="toggleSyncGraph()">Hide</button>
+            </span>
+          </div>
           <div class="panel-body" id="sync-graph-body"><div class="empty">Sign in to see your connected services.</div></div>
         </div>
         <div class="panel hidden" id="provider-detail-panel">
@@ -1977,7 +1985,8 @@
                   </div>
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Resume Progress</div>
-                    <div class="settings-group-desc">Resume is not shown as an everything-to-everything route yet because the connected services do not expose compatible read and write APIs for it. It will return when SyncMeta can offer it as a real compatible route instead of a PMDB-only special case.</div>
+                    <div class="settings-group-desc">Resume progress is a normal route category wherever both ends expose compatible playback APIs. Trakt and SIMKL can provide it; PublicMetaDB and Library can store it.</div>
+                    <button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure resume routes</button>
                   </div>
                 </div>
               </div>
@@ -4217,7 +4226,7 @@
     // Driven entirely off /status: the public profile already carries both the
     // pair definitions (options.sync_pairs) and their last outcomes, so showing
     // them here costs no extra request.
-    const PAIR_CATEGORY_LABELS = { watchlist: 'Watchlist', collection: 'Collection', history: 'History' };
+    const PAIR_CATEGORY_LABELS = { watchlist: 'Watchlist', collection: 'Collection', history: 'History', resume: 'Resume Progress' };
     // The dashboard renders before the pair editor has ever been opened, so it
     // cannot rely on pairsState.providers for names.
     const PROVIDER_DASH_LABELS = {
@@ -8560,6 +8569,32 @@
     // ── Sync graph ────────────────────────────────────────────────────────
 
     let graphSelectedProvider = '';
+    const SYNC_GRAPH_VISIBLE_KEY = 'syncmeta.syncGraphVisible';
+
+    function setSyncGraphVisible(visible, remember = true) {
+      const body = el('sync-graph-body');
+      const button = el('btn-sync-graph-toggle');
+      if (!body || !button) return;
+      body.classList.toggle('hidden', !visible);
+      button.textContent = visible ? 'Hide' : 'Show';
+      button.setAttribute('aria-expanded', visible ? 'true' : 'false');
+      if (remember) {
+        try { localStorage.setItem(SYNC_GRAPH_VISIBLE_KEY, visible ? '1' : '0'); } catch (_) {}
+      }
+    }
+
+    function toggleSyncGraph() {
+      const body = el('sync-graph-body');
+      setSyncGraphVisible(!!body && body.classList.contains('hidden'));
+    }
+
+    function restoreSyncGraphVisibility() {
+      let visible = true;
+      try { visible = localStorage.getItem(SYNC_GRAPH_VISIBLE_KEY) !== '0'; } catch (_) {}
+      setSyncGraphVisible(visible, false);
+    }
+
+    restoreSyncGraphVisibility();
 
     function profilePairs(profile) {
       const pairs = ((profile || {}).options || {}).sync_pairs;
@@ -10413,6 +10448,8 @@
       // written into one — SIMKL and AniList have no writable custom lists.
       const targetProvider = pairsState.providers.find(p => p.key === pair.target);
       if (!targetProvider || !targetProvider.has_target_lists) return '';
+      if (!(pair.categories || []).some(category =>
+        (targetProvider.target_list_categories || []).includes(category))) return '';
       ensurePairTargetLists(pair.target);
       const targetLists = pairTargetListsByProvider[pair.target] || [];
       return `
@@ -10800,6 +10837,9 @@
           if (input.checked) categories.add(input.dataset.pairCategory);
           else categories.delete(input.dataset.pairCategory);
           pair.categories = Array.from(categories);
+          const target = pairsState.providers.find(provider => provider.key === pair.target);
+          if (pair.target_list && target && !(pair.categories || []).some(category =>
+            (target.target_list_categories || []).includes(category))) pair.target_list = '';
           // Which lists are offered depends on the categories, so this one card
           // has to be rebuilt.
           renderPairCard(index);
@@ -11300,8 +11340,13 @@
           return automatic ? `${automatic} of ${enabled.length} scheduled` : (enabled.length ? 'all routes manual' : 'no routes configured');
         },
         activity: () => {
-          const count = (pairsState.pairs || []).filter(pair => pair.enabled !== false && (pair.categories || []).includes('history')).length;
-          return count ? `${count} history route${count === 1 ? '' : 's'}` : 'history uses routes';
+          const enabled = (pairsState.pairs || []).filter(pair => pair.enabled !== false);
+          const history = enabled.filter(pair => (pair.categories || []).includes('history')).length;
+          const resume = enabled.filter(pair => (pair.categories || []).includes('resume')).length;
+          const parts = [];
+          if (history) parts.push(`${history} history`);
+          if (resume) parts.push(`${resume} resume`);
+          return parts.length ? `${parts.join(' · ')} route${history + resume === 1 ? '' : 's'}` : 'history and resume use routes';
         },
       };
       for (const [key, build] of Object.entries(summaries)) {

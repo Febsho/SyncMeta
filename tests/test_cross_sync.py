@@ -13,6 +13,7 @@ from src.cross_sync import CrossSyncService
 from src.providers import (
     CATEGORY_COLLECTION,
     CATEGORY_HISTORY,
+    CATEGORY_RESUME,
     CATEGORY_WATCHLIST,
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
@@ -80,6 +81,58 @@ class FakeAdapter(ProviderAdapter):
 
 def _movie(tmdb_id: str, title: str = "Film") -> dict:
     return {"title": title, "media_type": "movie", "tmdb_id": tmdb_id, "ids": {"tmdb": tmdb_id}}
+
+
+def _resume(tmdb_id: str, position_ms: int, runtime_ms: int = 100_000) -> dict:
+    return {**_movie(tmdb_id), "position_ms": position_ms, "runtime_ms": runtime_ms}
+
+
+class ResumePairTests(unittest.TestCase):
+    def test_changed_progress_upserts_an_existing_item(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [_resume("1", 60_000)]},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [_resume("1", 20_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        result = CrossSyncService({"trakt": source, "library": target}).run_pair(
+            _pair(target="library", categories=[CATEGORY_RESUME])
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(target.added[0][1][0]["position_ms"], 60_000)
+
+    def test_rounding_within_one_second_does_not_rewrite(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [_resume("1", 20_500)]},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [_resume("1", 20_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        result = CrossSyncService({"trakt": source, "library": target}).run_pair(
+            _pair(target="library", categories=[CATEGORY_RESUME])
+        )
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.categories[0].skipped_existing, 1)
+
+    def test_two_way_resume_never_rewinds_the_further_side(self) -> None:
+        first = FakeAdapter(
+            "library", {CATEGORY_RESUME: [_resume("1", 70_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        second = FakeAdapter(
+            "pmdb", {CATEGORY_RESUME: [_resume("1", 30_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        result = CrossSyncService({"library": first, "pmdb": second}).run_pair(
+            _pair(source="library", target="pmdb", mode="two_way", categories=[CATEGORY_RESUME])
+        )
+        self.assertEqual(result.added, 1)
+        self.assertFalse(first.added)
+        self.assertEqual(second.added[0][1][0]["position_ms"], 70_000)
 
 
 def _pair(**overrides) -> SyncPair:
@@ -1076,6 +1129,9 @@ class PmdbCollectionTargetTests(unittest.TestCase):
             self.added = []
             self.removed = []
             self.items = {}
+            self.resume = []
+            self.saved_resume = []
+            self.deleted_resume = []
 
         def find_list_by_name(self, name):
             return self.existing if self.existing and self.existing.get("name") == name else None
@@ -1100,11 +1156,43 @@ class PmdbCollectionTargetTests(unittest.TestCase):
         def find_list_by_type(self, _list_type):
             return None
 
+        def get_resume_points(self):
+            return list(self.resume)
+
+        def save_resume_points_batch(self, payload):
+            self.saved_resume.extend(payload)
+            return {"results": []}
+
+        def delete_resume_point(self, resume_id):
+            self.deleted_resume.append(str(resume_id))
+            return True
+
     def test_collection_is_a_declared_read_write_capability(self) -> None:
         from src.providers import PmdbAdapter
         self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.reads)
         self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.writes)
         self.assertIn(CATEGORY_COLLECTION, PmdbAdapter.target_list_categories)
+
+    def test_resume_is_a_declared_read_write_capability(self) -> None:
+        from src.providers import PmdbAdapter
+        self.assertIn(CATEGORY_RESUME, PmdbAdapter.reads)
+        self.assertIn(CATEGORY_RESUME, PmdbAdapter.writes)
+
+    def test_resume_points_round_trip_through_pmdb_adapter(self) -> None:
+        from src.providers import PmdbAdapter
+        client = self.FakePmdbClient()
+        client.resume = [{
+            "id": "resume-1", "tmdb_id": 42, "media_type": "movie",
+            "title": "Film", "position_ms": 20_000, "runtime_ms": 100_000,
+        }]
+        adapter = PmdbAdapter(client)
+
+        rows = adapter.fetch(CATEGORY_RESUME)
+        adapter.add(CATEGORY_RESUME, [{**rows[0], "position_ms": 30_000}])
+        adapter.remove(CATEGORY_RESUME, rows)
+
+        self.assertEqual(client.saved_resume[0]["position_ms"], 30_000)
+        self.assertEqual(client.deleted_resume, ["resume-1"])
 
     def test_default_collection_read_never_creates_a_list(self) -> None:
         from src.providers import PmdbAdapter

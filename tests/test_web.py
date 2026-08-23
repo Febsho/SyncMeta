@@ -130,7 +130,9 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('id="opt-auto-resume-sync"', html)
         self.assertNotIn('id="opt-resume-interval-seconds"', html)
         self.assertIn("History is a normal route category.", html)
-        self.assertIn("Resume is not shown as an everything-to-everything route yet", html)
+        self.assertIn("Resume progress is a normal route category", html)
+        self.assertIn('id="btn-sync-graph-toggle"', html)
+        self.assertIn("SYNC_GRAPH_VISIBLE_KEY", html)
         self.assertIn('id="activity-cards"', html)
         self.assertIn("Sync Watch History", html)
         self.assertIn("Clear PMDB History", html)
@@ -1034,7 +1036,12 @@ class WebTests(unittest.TestCase):
         self.assertTrue(by_key["pmdb"]["configured"])
         self.assertFalse(by_key["trakt"]["configured"])
         self.assertIn("watchlist", by_key["pmdb"]["writes"])
-        self.assertEqual([c["key"] for c in data["categories"]], ["watchlist", "history", "collection"])
+        self.assertEqual(
+            [c["key"] for c in data["categories"]],
+            ["watchlist", "history", "collection", "resume"],
+        )
+        self.assertIn("resume", by_key["pmdb"]["reads"])
+        self.assertIn("resume", by_key["pmdb"]["writes"])
         self.assertEqual(data["removal_modes"][0]["key"], "additive")
 
     def test_saving_a_pair_round_trips(self) -> None:
@@ -2844,7 +2851,7 @@ class WebTests(unittest.TestCase):
         library = next(p for p in data["providers"] if p["key"] == "library")
         self.assertTrue(library["configured"])
         self.assertEqual(
-            set(library["writes"]), {"watchlist", "history", "collection"},
+            set(library["writes"]), {"watchlist", "history", "collection", "resume"},
         )
 
     def test_status_summary_omits_verbose_error_arrays(self) -> None:

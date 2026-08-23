@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .providers import (
+    CATEGORY_RESUME,
     MODE_ONE_WAY,
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
@@ -142,7 +143,12 @@ class ReadCache:
             return base
 
         removed_keys = {_key(item) for item in (removed or [])}
+        added_keys = {_key(item) for item in (added or [])}
         kept = [item for item in current if _key(item) not in removed_keys]
+        # `add` is an upsert for mutable categories such as resume progress.
+        # Replace the cached old value instead of retaining two rows with the
+        # same identity until the next full provider read.
+        kept = [item for item in kept if _key(item) not in added_keys]
         kept.extend(added or [])
         self._entries[key] = kept
 
@@ -409,6 +415,11 @@ class CrossSyncService:
         transparently routed to one managed personal list per SIMKL status.
         """
         requested = str(getattr(pair, "target_list", "") or "").strip()
+        # A pair may combine a named-list category with account-level mutable
+        # state. The named destination applies only where it makes sense;
+        # history and resume always use the provider's native account endpoint.
+        if category not in ("watchlist", "collection"):
+            return ""
         if pair.source == "simkl" and pair.target == "trakt":
             if category in ("watchlist", "history"):
                 return ""
@@ -558,7 +569,11 @@ class CrossSyncService:
             item = enrich_identity(raw_item)
             target_by_key.setdefault(self._comparison_key(item, target_list), item)
 
-        to_add = [item for key, item in source_by_key.items() if key not in target_by_key]
+        to_add = [
+            item for key, item in source_by_key.items()
+            if key not in target_by_key
+            or (category == CATEGORY_RESUME and not self._resume_matches(item, target_by_key[key]))
+        ]
         result.skipped_existing = len(source_by_key) - len(to_add)
 
         to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
@@ -720,6 +735,22 @@ class CrossSyncService:
 
         add_to_second = [first_by_key[k] for k in only_first - drop_from_first]
         add_to_first = [second_by_key[k] for k in only_second - drop_from_second]
+        differing_shared: set[str] = set()
+        if category == CATEGORY_RESUME:
+            for key in first_keys & second_keys:
+                first_item = first_by_key[key]
+                second_item = second_by_key[key]
+                if self._resume_matches(first_item, second_item):
+                    continue
+                differing_shared.add(key)
+                # Resume has no portable cross-provider modification timestamp.
+                # The furthest playback position is the least destructive
+                # deterministic conflict rule: a sync must never rewind either
+                # service because its route happened to run second.
+                if self._resume_score(first_item) >= self._resume_score(second_item):
+                    add_to_second.append(first_item)
+                else:
+                    add_to_first.append(second_item)
         # A blocked side keeps its items: they are neither deleted here nor
         # re-added to the other service, so the run is a no-op for them and the
         # next run can act on the same state once the user has decided.
@@ -743,7 +774,7 @@ class CrossSyncService:
                 blocked_second = set(keys)
         remove_from_first = [first_by_key[k] for k in drop_from_first - blocked_first]
         remove_from_second = [second_by_key[k] for k in drop_from_second - blocked_second]
-        result.skipped_existing = len(first_keys & second_keys)
+        result.skipped_existing = len((first_keys & second_keys) - differing_shared)
 
         self._set_status(
             f"{pair.display_name()}: {len(add_to_second)}→{second.label}, "
@@ -817,6 +848,45 @@ class CrossSyncService:
             self._managed_keys.setdefault(pair.pair_id, {})[category] = ordered
             result.managed_keys = ordered
         return result
+
+    @staticmethod
+    def _resume_score(item: dict) -> tuple[float, int]:
+        """Comparable progress score, preferring percentage then position."""
+        try:
+            position = max(0, int(item.get("position_ms") or 0))
+        except (TypeError, ValueError):
+            position = 0
+        try:
+            runtime = max(0, int(item.get("runtime_ms") or 0))
+        except (TypeError, ValueError):
+            runtime = 0
+        try:
+            progress = float(item.get("progress")) / 100.0
+        except (TypeError, ValueError):
+            progress = 0.0
+        ratio = position / runtime if runtime else progress
+        return (ratio, position)
+
+    @classmethod
+    def _resume_matches(cls, first: dict, second: dict) -> bool:
+        """Treat sub-second rounding differences as the same resume point."""
+        def _number(item, field):
+            try:
+                return max(0, int(item.get(field) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        first_position = _number(first, "position_ms")
+        second_position = _number(second, "position_ms")
+        first_runtime = _number(first, "runtime_ms")
+        second_runtime = _number(second, "runtime_ms")
+        return (
+            abs(first_position - second_position) <= 1000
+            and (
+                not first_runtime or not second_runtime
+                or abs(first_runtime - second_runtime) <= 1000
+            )
+        )
 
     def _guard_blocks(self, removals: int, target_size: int) -> tuple[bool, int]:
         """Would deleting `removals` of `target_size` items trip the guard?
