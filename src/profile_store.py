@@ -299,6 +299,7 @@ def _configured_sources_for_profile(profile: dict) -> list[str]:
         and (
             any(credentials["simkl"]["selected_statuses"].get(media_type) for media_type in ["shows", "movies", "anime"])
             or options["activity_history_source"] == "simkl"
+            or options["activity_resume_source"] == "simkl"
         )
     ):
         sources.append("simkl")
@@ -682,24 +683,19 @@ def _normalize_activity_source(value: object, simkl_enabled: bool, trakt_enabled
     return "off"
 
 
-def _normalize_resume_source(value: object, trakt_enabled: bool) -> str:
+def _normalize_resume_source(value: object, simkl_enabled: bool, trakt_enabled: bool) -> str:
     """Resolve the resume source, honouring an explicit "off".
 
-    Trakt is the only supported resume source — "simkl" is legacy and is
-    deliberately dropped to "off" (there is a test pinning that). But *only* an
-    unset value may fall back to Trakt: this previously treated every
-    non-"trakt" value the same, so a Trakt-connected user who chose "Off" in the
-    resume dropdown had it silently switched back on and kept syncing resume
-    progress they had turned off. Same rule as the list selections — a linked
-    service must not re-enable itself over the user's choice.
+    Both SIMKL and Trakt expose playback progress. An explicit "off" must stay
+    off; only an unset value may fall back to a legacy provider boolean.
     """
     candidate = str(value or "").strip().lower()
-    if candidate == "trakt":
-        return "trakt"
+    if candidate in {"simkl", "trakt"}:
+        return candidate
     if candidate == "off":
         return "off"
-    # Unset (new profile, or a legacy value like "simkl"): default to Trakt when
-    # it is connected, otherwise nothing to resume from.
+    if simkl_enabled:
+        return "simkl"
     return "trakt" if trakt_enabled else "off"
 
 
@@ -861,7 +857,7 @@ def normalize_profile_options(options: dict | None) -> dict:
     try:
         resume_progress_interval_seconds = int(resume_interval_raw)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Trakt resume progress interval must be a whole number of seconds") from exc
+        raise ValueError("Resume progress interval must be a whole number of seconds") from exc
 
     if resume_progress_interval_seconds < MIN_RESUME_SYNC_INTERVAL_SECONDS:
         resume_progress_interval_seconds = MIN_RESUME_SYNC_INTERVAL_SECONDS
@@ -886,6 +882,7 @@ def normalize_profile_options(options: dict | None) -> dict:
     )
     resume_source = _normalize_resume_source(
         raw.get("activity_resume_source"),
+        bool(raw.get("simkl_sync_resume_progress", False)),
         bool(raw.get("trakt_sync_resume_progress", False)),
     )
 

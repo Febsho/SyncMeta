@@ -328,16 +328,29 @@ class PendingPkceStore:
     def __init__(self, ttl_seconds: int = 900):
         self._ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
-        self._pending: dict[str, tuple[str, str, str, float]] = {}
+        self._pending: dict[str, tuple[str, str, str, str, str, float]] = {}
 
-    def put(self, flow_id: str, verifier: str, redirect_uri: str, profile_id: str = "") -> None:
+    def put(
+        self,
+        flow_id: str,
+        verifier: str,
+        redirect_uri: str,
+        profile_id: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+    ) -> None:
         with self._lock:
             self._prune_locked()
             self._pending[flow_id] = (
-                verifier, redirect_uri, str(profile_id or ""), time.time() + self._ttl_seconds,
+                verifier,
+                redirect_uri,
+                str(profile_id or ""),
+                str(client_id or ""),
+                str(client_secret or ""),
+                time.time() + self._ttl_seconds,
             )
 
-    def take(self, flow_id: str) -> tuple[str, str] | None:
+    def take(self, flow_id: str) -> tuple[str, str, str, str, str] | None:
         """Single use: an authorization code may only be exchanged once."""
         flow_id = str(flow_id or "").strip()
         if not flow_id:
@@ -347,8 +360,8 @@ class PendingPkceStore:
             entry = self._pending.pop(flow_id, None)
         if not entry:
             return None
-        verifier, redirect_uri, _profile_id, _expires = entry
-        return verifier, redirect_uri
+        verifier, redirect_uri, profile_id, client_id, client_secret, _expires = entry
+        return verifier, redirect_uri, profile_id, client_id, client_secret
 
     def clear_profile(self, profile_id: str) -> None:
         """Discard unfinished authorization flows for a deleted profile."""
@@ -622,6 +635,8 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
             simkl_sync_watched_history=modes["history"] and options["activity_history_source"] == "simkl",
             simkl_history_anime_only=bool(options.get("simkl_history_anime_only", False)),
             simkl_reconcile_watched_history=bool(options.get("simkl_reconcile_watched_history", False)),
+            simkl_sync_resume_progress=modes["resume"] and options["activity_resume_source"] == "simkl",
+            simkl_resume_use_next_up_fallback=bool(options.get("simkl_resume_use_next_up_fallback", False)),
             trakt_sync_watched_history=modes["history"] and options["activity_history_source"] == "trakt",
             anilist_sync_watched_history=modes["history"] and options["activity_history_source"] == "anilist",
             simkl_history_cursor=str(activity_state.get("simkl_history_cursor", "") or "").strip(),
@@ -656,6 +671,7 @@ def _configured_sources(config: AppConfig) -> list[str]:
         and (
             any(config.simkl.selected_statuses.get(media_type) for media_type in ["shows", "movies", "anime"])
             or config.sync.simkl_sync_watched_history
+            or config.sync.simkl_sync_resume_progress
         )
     ):
         sources.append("simkl")
@@ -1966,7 +1982,38 @@ def _compress_response(response):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    callback = None
+    oauth_code = str(request.args.get("code", "")).strip()
+    oauth_error = str(request.args.get("error", "")).strip()
+    if oauth_code or oauth_error:
+        flow_id = request.cookies.get(MDBLIST_FLOW_COOKIE_NAME) or ""
+        returned_state = str(request.args.get("state", "")).strip()
+        pending = _mdblist_pkce_store.take(flow_id)
+        if oauth_error:
+            description = str(request.args.get("error_description", "")).strip()
+            callback = {
+                "ok": False,
+                "error": description or oauth_error or "MDBList authorization was declined.",
+            }
+        elif returned_state and returned_state != flow_id:
+            callback = {"ok": False, "error": "MDBList returned an invalid authorization state."}
+        elif not pending:
+            callback = {
+                "ok": False,
+                "error": "That MDBList authorization has expired. Press Connect again.",
+            }
+        else:
+            try:
+                callback = {"ok": True, **_exchange_mdblist_authorization(oauth_code, pending)}
+            except Exception as exc:
+                logger.exception("MDBList callback token exchange failed")
+                callback = {"ok": False, "error": f"MDBList authentication failed: {exc}"}
+
+        response = make_response(render_template("index.html", mdblist_callback=callback))
+        response.headers["Cache-Control"] = "no-store"
+        return _clear_mdblist_flow_cookie(response)
+
+    return render_template("index.html", mdblist_callback=None)
 
 
 @app.route("/healthz", methods=["GET"])
@@ -2243,6 +2290,63 @@ def api_anilist_auth_check():
     return jsonify({"status": "approved", "access_token": access_token, "saved": saved})
 
 
+def _exchange_mdblist_authorization(
+    code: str,
+    pending: tuple[str, str, str, str, str],
+    client_id: str = "",
+    client_secret: str = "",
+) -> dict:
+    """Exchange one pending MDBList flow and persist it when still signed in."""
+    verifier, redirect_uri, flow_profile_id, flow_client_id, flow_client_secret = pending
+    client_id = str(client_id or flow_client_id).strip()
+    client_secret = str(client_secret or flow_client_secret).strip()
+    if not client_id:
+        raise ValueError("MDBList client ID is required")
+    if not client_secret:
+        raise ValueError("MDBList client secret is required")
+
+    client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
+    payload = client.exchange_code_for_token(code, verifier, redirect_uri)
+    access_token = str(payload.get("access_token", "")).strip()
+    if not access_token:
+        raise ValueError("MDBList did not return an access token")
+
+    expires_at = ""
+    try:
+        expires_in = int(payload.get("expires_in") or 0)
+        if expires_in > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    except (TypeError, ValueError):
+        pass
+
+    refresh_token = str(payload.get("refresh_token", "")).strip()
+    current_profile_id = _current_profile_id() or ""
+    profile_id = flow_profile_id if flow_profile_id == current_profile_id else ""
+    saved = False
+    if profile_id:
+        try:
+            _profile_store.update_mdblist_auth(
+                profile_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                access_token_expires_at=expires_at,
+            )
+            saved = True
+        except KeyError:
+            pass
+
+    result = {"status": "approved", "saved": saved, "scope": payload.get("scope", "")}
+    if not saved:
+        result.update({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "access_token_expires_at": expires_at,
+        })
+    return result
+
+
 @app.route("/api/mdblist/auth/start", methods=["POST"])
 def api_mdblist_auth_start():
     """Begin the MDBList PKCE flow and return the authorize URL."""
@@ -2271,11 +2375,18 @@ def api_mdblist_auth_start():
     # The verifier never goes to the browser: it is the proof that the code
     # being exchanged belongs to the request that started this flow. Only the
     # opaque flow id travels, in an http-only cookie.
-    _mdblist_pkce_store.put(flow_id, verifier, redirect_uri, profile_id=profile_id)
+    _mdblist_pkce_store.put(
+        flow_id,
+        verifier,
+        redirect_uri,
+        profile_id=profile_id,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
 
     client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
     return _with_mdblist_flow_cookie(jsonify({
-        "authorize_url": client.build_authorize_url(redirect_uri, challenge),
+        "authorize_url": client.build_authorize_url(redirect_uri, challenge, state=flow_id),
         "redirect_uri": redirect_uri,
     }), flow_id)
 
@@ -2300,8 +2411,6 @@ def api_mdblist_auth_check():
     if not client_secret:
         return _json_error("MDBList client secret is required", 400)
 
-    profile_id = _current_profile_id() or ""
-
     pending = _mdblist_pkce_store.take(request.cookies.get(MDBLIST_FLOW_COOKIE_NAME) or "")
     if not pending:
         return _json_error(
@@ -2309,11 +2418,10 @@ def api_mdblist_auth_check():
             provider="MDBList",
             hint="Press Connect again to start a fresh authorization.",
         )
-    verifier, redirect_uri = pending
-
     try:
-        client = MdbListClient(MdbListConfig(client_id=client_id, client_secret=client_secret))
-        payload = client.exchange_code_for_token(code, verifier, redirect_uri)
+        result = _exchange_mdblist_authorization(
+            code, pending, client_id=client_id, client_secret=client_secret,
+        )
     except Exception as exc:
         logger.exception("MDBList token exchange failed")
         return _json_error(
@@ -2322,47 +2430,7 @@ def api_mdblist_auth_check():
             hint="The code is single-use and short-lived — start the connect flow again if in doubt.",
         )
 
-    access_token = str(payload.get("access_token", "")).strip()
-    if not access_token:
-        return _json_error("MDBList did not return an access token", 400, provider="MDBList")
-
-    expires_at = ""
-    try:
-        expires_in = int(payload.get("expires_in") or 0)
-        if expires_in > 0:
-            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-    except (TypeError, ValueError):
-        expires_at = ""
-
-    refresh_token = str(payload.get("refresh_token", "")).strip()
-
-    # Persisted immediately when there is a profile to persist to: the code is
-    # single-use, so losing it to an unsaved form would mean starting the whole
-    # flow over. Without a session there is nowhere to write yet, so the tokens
-    # go back to the browser to be submitted with the profile — the same shape
-    # as Trakt's device check, and the reason this endpoint no longer 401s.
-    saved = False
-    if profile_id:
-        try:
-            _profile_store.update_mdblist_auth(
-                profile_id,
-                client_id=client_id,
-                client_secret=client_secret,
-                access_token=access_token,
-                refresh_token=refresh_token,
-                access_token_expires_at=expires_at,
-            )
-            saved = True
-        except KeyError:
-            saved = False
-
-    response = {"status": "approved", "saved": saved, "scope": payload.get("scope", "")}
-    if not saved:
-        response["access_token"] = access_token
-        response["refresh_token"] = refresh_token
-        response["access_token_expires_at"] = expires_at
-
-    return _clear_mdblist_flow_cookie(jsonify(response))
+    return _clear_mdblist_flow_cookie(jsonify(result))
 
 
 @app.route("/api/trakt/device/start", methods=["POST"])

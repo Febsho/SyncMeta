@@ -4,6 +4,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 os.environ["DISABLE_PROFILE_SCHEDULER"] = "1"
 
@@ -222,6 +223,24 @@ class WebTests(unittest.TestCase):
         self.assertIn("Connection failed", html)
         self.assertIn("disconnectProvider(provider)", html)
         self.assertIn("/api/profile/connections/disconnect", html)
+        self.assertIn('<option value="simkl">SIMKL</option>', html)
+        self.assertIn("add('Lists');\n        add('Watchlist');\n        add('Watch History');\n        add('Resume Progress');", html)
+
+    def test_simkl_resume_source_reaches_runtime_config(self) -> None:
+        credentials = _blank_credentials()
+        credentials["simkl"].update({"client_id": "cid", "access_token": "token"})
+
+        config = web._config_from_profile({
+            "credentials": credentials,
+            "options": {
+                "media_types": ["shows", "movies", "anime"],
+                "activity_resume_source": "simkl",
+            },
+        }, sync_modes={"lists": False, "resume": True})
+
+        self.assertTrue(config.sync.simkl_sync_resume_progress)
+        self.assertFalse(config.sync.trakt_sync_resume_progress)
+        self.assertIn("simkl", web._configured_sources(config))
 
     def test_index_contains_five_step_real_onboarding_wizard(self) -> None:
         html = self.client.get("/").get_data(as_text=True)
@@ -664,6 +683,39 @@ class WebTests(unittest.TestCase):
         self.assertIn(web.MDBLIST_FLOW_COOKIE_NAME, cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertNotIn("code_verifier", str(data))
+        self.assertTrue(parse_qs(urlparse(data["authorize_url"]).query).get("state", [""])[0])
+
+    @patch("web.MdbListClient.exchange_code_for_token")
+    def test_mdblist_redirect_callback_finishes_auth_automatically(self, exchange) -> None:
+        exchange.return_value = {
+            "access_token": "mdb-token", "refresh_token": "mdb-refresh", "expires_in": 2592000,
+        }
+        profile = self._make_bare_profile()
+        self.client.post(
+            "/api/profile/login",
+            json={"profile_id": profile["profile_id"], "password": "secret"},
+        )
+        started = self.client.post("/api/mdblist/auth/start", json={
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "redirect_uri": "http://localhost/",
+        }).get_json()
+        state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
+
+        response = self.client.get(f"/?code=returned-code&state={state}")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"ok": true', html)
+        self.assertIn('"saved": true', html)
+        self.assertNotIn('id="mdblist-auth-code"', html)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        exchange.assert_called_once()
+        self.assertEqual(exchange.call_args.args[0], "returned-code")
+        stored = web._profile_store.get_private_profile_by_id(
+            profile["profile_id"]
+        )["credentials"]["mdblist"]
+        self.assertEqual(stored["access_token"], "mdb-token")
 
     @patch("web.MdbListClient.exchange_code_for_token")
     def test_mdblist_auth_without_a_session_returns_the_tokens(self, exchange) -> None:

@@ -696,7 +696,7 @@ class ProfileStoreTests(unittest.TestCase):
         loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
         self.assertEqual(loaded["options"]["activity_resume_source"], "trakt")
 
-    def test_normalize_profile_options_drops_legacy_simkl_resume_source(self) -> None:
+    def test_simkl_resume_source_round_trips(self) -> None:
         created = self.store.create_profile("secret", self.credentials, {
             **self.options,
             "activity_resume_source": "simkl",
@@ -704,7 +704,8 @@ class ProfileStoreTests(unittest.TestCase):
 
         loaded = self.store.get_profile(created["profile_id"], "secret", include_credentials=True)
 
-        self.assertEqual(loaded["options"]["activity_resume_source"], "off")
+        self.assertEqual(loaded["options"]["activity_resume_source"], "simkl")
+        self.assertTrue(loaded["options"]["simkl_sync_resume_progress"])
 
     def test_simkl_watched_state_reconciliation_round_trips(self) -> None:
         created = self.store.create_profile("secret", self.credentials, {

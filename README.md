@@ -56,7 +56,7 @@ creates or reuses, rather than being flattened into Trakt Collection.
 | Library (local) | Watchlist, collection, watch history | yes, always |
 
 **Watch history and resume progress.** Optional and off by default. Watch
-history can come from SIMKL or Trakt; resume progress is Trakt only. History is
+history and resume progress can come from SIMKL or Trakt. History is
 manual by default, resume can run automatically.
 
 **MDBList OAuth.** An API key is enough to read. To sync *into* MDBList — its

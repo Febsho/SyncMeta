@@ -1023,6 +1023,8 @@ class SyncService:
 
         if self._config.sync.simkl_sync_watched_history:
             stats.append(self._sync_simkl_watched_history())
+        if self._config.sync.simkl_sync_resume_progress:
+            stats.append(self._sync_simkl_resume_progress())
 
         return stats
 
@@ -2111,17 +2113,41 @@ class SyncService:
         )
 
     def _sync_trakt_resume_progress(self) -> SyncStats:
+        return self._sync_provider_resume_progress(
+            provider_key="trakt",
+            provider_name="Trakt",
+            fetch_progress=self._trakt.get_playback_progress,
+            remap_item=self._remap_trakt_anime_episode,
+        )
+
+    def _sync_simkl_resume_progress(self) -> SyncStats:
+        return self._sync_provider_resume_progress(
+            provider_key="simkl",
+            provider_name="SIMKL",
+            fetch_progress=lambda: self._simkl.get_playback_progress(
+                include_next_up_fallback=self._config.sync.simkl_resume_use_next_up_fallback,
+            ),
+            remap_item=self._remap_simkl_anime_history_item,
+        )
+
+    def _sync_provider_resume_progress(
+        self,
+        provider_key: str,
+        provider_name: str,
+        fetch_progress,
+        remap_item,
+    ) -> SyncStats:
         stats = SyncStats(
             list_name="",
-            display_name="Trakt Resume Progress",
-            source_name="Trakt",
-            row_key=self._make_row_key("trakt", "resume_progress", "resume", {"mode": "resume"}),
+            display_name=f"{provider_name} Resume Progress",
+            source_name=provider_name,
+            row_key=self._make_row_key(provider_key, "resume_progress", "resume", {"mode": "resume"}),
             row_type="resume",
         )
-        self._set_status("Fetching Trakt playback progress")
+        self._set_status(f"Fetching {provider_name} playback progress")
         try:
-            items = self._trakt.get_playback_progress()
-        except TraktAuthenticationError as exc:
+            items = fetch_progress()
+        except Exception as exc:
             self._record_error(stats, "fetch", str(exc))
             return stats
         stats.items_fetched = len(items)
@@ -2138,7 +2164,7 @@ class SyncService:
                         # ≥80% — PMDB dev guidance: do not submit as a resume point
                         # (which would show "80% in progress"). Submit as watched so
                         # PMDB marks it completed with no leftover progress entry.
-                        resolved = self._resolve_activity_item(item)
+                        resolved = remap_item(self._resolve_activity_item(item))
                         if resolved.get("tmdb_id"):
                             effectively_watched_items.append(resolved)
                             logger.debug(
@@ -2151,7 +2177,7 @@ class SyncService:
                 except (TypeError, ValueError):
                     pass
             item = self._resolve_activity_item(item)
-            item = self._remap_trakt_anime_episode(item)
+            item = remap_item(item)
             key = self._resume_key(item)
             if not key:
                 stats.items_skipped_unresolved += 1
@@ -2164,7 +2190,7 @@ class SyncService:
             return stats
 
         if effectively_watched_items:
-            self._set_status("Writing near-complete Trakt items as watched to PublicMetaDB")
+            self._set_status(f"Writing near-complete {provider_name} items as watched to PublicMetaDB")
             existing_watched = {}
             try:
                 existing_watched = self._count_watched_history_identities(self._pmdb.get_watched_history())
@@ -2183,7 +2209,7 @@ class SyncService:
                     filtered_effective,
                     existing_watched,
                     stats,
-                    "Writing near-complete Trakt items as watched",
+                    f"Writing near-complete {provider_name} items as watched",
                 )
 
         if not normalized_items:
@@ -2246,7 +2272,7 @@ class SyncService:
             completed_items,
             existing_watched_counts,
             stats,
-            status_message="Writing Trakt completed playback items to PublicMetaDB",
+            status_message=f"Writing {provider_name} completed playback items to PublicMetaDB",
             total_source=len(normalized_items),
         )
 
@@ -2256,7 +2282,7 @@ class SyncService:
         for chunk in self._chunked(payloads, 50):
             self._check_cancelled()
             try:
-                self._set_status("Writing Trakt resume progress to PublicMetaDB")
+                self._set_status(f"Writing {provider_name} resume progress to PublicMetaDB")
                 response = self._pmdb.save_resume_points_batch(chunk) or {}
                 payloads_by_key = {self._resume_key(item): item for item in chunk}
                 saved_count = 0
@@ -3812,7 +3838,10 @@ class SyncService:
                     or config.sync.trakt_sync_watched_history
                     or config.sync.anilist_sync_watched_history
                 ) if config else False,
-                "resume": bool(config.sync.trakt_sync_resume_progress) if config else False,
+                "resume": bool(
+                    config.sync.simkl_sync_resume_progress
+                    or config.sync.trakt_sync_resume_progress
+                ) if config else False,
             }
         else:
             raw = sync_modes

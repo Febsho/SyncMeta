@@ -29,7 +29,7 @@ class StubSimklClient:
             {"tmdb_id": 802, "media_type": "tv", "simkl_type": "anime", "season": 1, "episode": 3, "watched_at": "2026-04-01T13:00:00Z", "title": "SIMKL Episode"},
         ]
 
-    def get_playback_progress(self) -> list[dict]:
+    def get_playback_progress(self, include_next_up_fallback: bool = False) -> list[dict]:
         return [
             {"tmdb_id": 803, "media_type": "movie", "position_ms": 1_200_000, "runtime_ms": 3_600_000, "progress": 33.3, "title": "SIMKL Resume Movie"},
         ]
@@ -1221,6 +1221,38 @@ class SyncServiceTests(unittest.TestCase):
             "runtime_ms": 3_600_000,
         }])
         self.assertEqual(watched_stats.history_cursor, "2026-04-01T13:00:00Z")
+
+    def test_syncs_simkl_resume_progress_when_enabled(self) -> None:
+        config = AppConfig(
+            simkl=SimklConfig(
+                client_id="simkl-client",
+                access_token="simkl-token",
+                selected_statuses={"shows": [], "movies": [], "anime": []},
+            ),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                dry_run=False,
+                media_types=["shows", "movies", "anime"],
+                simkl_sync_resume_progress=True,
+            ),
+        )
+        service = SyncService(config, sync_modes={"lists": False, "resume": True})
+        pmdb = StubPMDBClient()
+        service._simkl = StubSimklClient()
+        service._matcher = StubMatcher()
+        service._pmdb = pmdb
+
+        stats = service._sync_simkl_resume_progress()
+
+        self.assertEqual(stats.source_name, "SIMKL")
+        self.assertEqual(stats.items_fetched, 1)
+        self.assertEqual(stats.items_added, 1)
+        self.assertEqual(pmdb.resume_batches, [[{
+            "tmdb_id": 803,
+            "media_type": "movie",
+            "position_ms": 1_200_000,
+            "runtime_ms": 3_600_000,
+        }]])
 
     def test_trakt_resume_progress_marks_ge80_percent_as_watched(self) -> None:
         config = AppConfig(

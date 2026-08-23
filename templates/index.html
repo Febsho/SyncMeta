@@ -1708,21 +1708,6 @@
                     <button class="btn btn-sm" id="btn-mdblist-auth" onclick="startMdbListAuth()">Connect MDBList</button>
                     <span class="actions-meta" id="mdblist-auth-status">Enter your client ID and secret, then connect.</span>
                   </div>
-                  <div class="auth-box hidden" id="mdblist-auth-box">
-                    <div class="actions-meta">Authorize on MDBList, then paste the code from the address bar.</div>
-                    <div class="actions-bar" style="margin-top:8px">
-                      <button class="btn btn-sm" type="button" onclick="openMdbListVerification()">Open MDBList</button>
-                      <button class="btn btn-sm" type="button" onclick="copyMdbListAuthUrl()">Copy Link</button>
-                    </div>
-                    <div class="form-row" style="margin-top:8px;margin-bottom:0">
-                      <label for="mdblist-auth-code">Code from MDBList</label>
-                      <input type="text" id="mdblist-auth-code" class="mono" placeholder="Paste the code here" autocomplete="off">
-                    </div>
-                    <div class="actions-bar" style="margin-top:8px">
-                      <button class="btn btn-sm btn-primary" type="button" id="btn-mdblist-auth-finish" onclick="finishMdbListAuth()">Finish Connecting</button>
-                      <button class="btn btn-sm btn-ghost" type="button" onclick="cancelMdbListAuth()">Cancel</button>
-                    </div>
-                  </div>
                   <div class="connection-health" id="connection-health-mdblist"><div class="connection-health-copy"><strong>Not checked</strong><span>Test this saved connection.</span></div><button class="btn btn-sm" type="button" onclick="testConnections('mdblist')">Test</button></div>
                 </div>
               </div>
@@ -2019,6 +2004,7 @@
                       <label for="opt-activity-resume-source">Source</label>
                       <select id="opt-activity-resume-source">
                         <option value="off">Off</option>
+                        <option value="simkl">SIMKL</option>
                         <option value="trakt">Trakt</option>
                       </select>
                     </div>
@@ -2419,8 +2405,10 @@
 
     // ── MDBList OAuth (authorization code + PKCE) ──────────────────────────
     // MDBList requires PKCE, so the verifier is generated and held server-side
-    // for the length of the flow; the browser only ever sees the authorize URL.
-    let mdblistAuthUrl = '';
+    // for the length of the flow. MDBList redirects back here with the code and
+    // the server exchanges it before rendering this page again.
+    const MDBLIST_CALLBACK = {{ mdblist_callback|default(none)|tojson }};
+    const MDBLIST_CALLBACK_CREDS_KEY = 'syncmeta_mdblist_callback_credentials';
 
     function setMdbListAuthStatus(message, isError) {
       const node = el('mdblist-auth-status');
@@ -2449,10 +2437,22 @@
           setMdbListAuthStatus(formatApiError(result.data, 'Could not start MDBList auth.'), true);
           return;
         }
-        mdblistAuthUrl = result.data.authorize_url || '';
-        el('mdblist-auth-box').classList.remove('hidden');
-        setMdbListAuthStatus('Authorize on MDBList, then paste the code below.', false);
-        openMdbListVerification();
+        const authorizeUrl = result.data.authorize_url || '';
+        if (!authorizeUrl) {
+          setMdbListAuthStatus('MDBList did not return an authorization URL.', true);
+          return;
+        }
+        setMdbListAuthStatus('Opening MDBList — approve access to return here automatically.', false);
+        // The same tab returns after authorization. Preserve unsaved first-time
+        // setup credentials for that one navigation, then remove them below.
+        try {
+          sessionStorage.setItem(MDBLIST_CALLBACK_CREDS_KEY, JSON.stringify({
+            client_id: clientId,
+            client_secret: el('mdblist-client-secret').value.trim(),
+          }));
+        } catch {}
+        window.location.assign(authorizeUrl);
+        return;
       } catch {
         setMdbListAuthStatus('Network error while starting MDBList auth.', true);
       } finally {
@@ -2460,76 +2460,41 @@
       }
     }
 
-    function openMdbListVerification() {
-      if (mdblistAuthUrl) window.open(mdblistAuthUrl, '_blank', 'noopener');
-    }
-
-    async function copyMdbListAuthUrl() {
-      if (!mdblistAuthUrl) return;
+    function applyMdbListCallback(callback) {
+      if (!callback) return;
+      window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash || ''}`);
       try {
-        await navigator.clipboard.writeText(mdblistAuthUrl);
-        showToast('Copied MDBList authorization link', false, true);
+        const callbackCreds = JSON.parse(sessionStorage.getItem(MDBLIST_CALLBACK_CREDS_KEY) || '{}');
+        if (callbackCreds.client_id) el('mdblist-client-id').value = String(callbackCreds.client_id);
+        if (callbackCreds.client_secret) el('mdblist-client-secret').value = String(callbackCreds.client_secret);
+        sessionStorage.removeItem(MDBLIST_CALLBACK_CREDS_KEY);
       } catch {
-        showToast('Could not copy the link', true);
+        try { sessionStorage.removeItem(MDBLIST_CALLBACK_CREDS_KEY); } catch {}
       }
-    }
-
-    function cancelMdbListAuth() {
-      mdblistAuthUrl = '';
-      el('mdblist-auth-code').value = '';
-      el('mdblist-auth-box').classList.add('hidden');
-      setMdbListAuthStatus('Enter your client ID and secret, then connect.', false);
-    }
-
-    async function finishMdbListAuth() {
-      const btn = el('btn-mdblist-auth-finish');
-      const code = el('mdblist-auth-code').value.trim();
-      if (!code) {
-        setMdbListAuthStatus('Paste the code MDBList showed you.', true);
+      if (!callback.ok) {
+        setMdbListAuthStatus(callback.error || 'MDBList authentication failed.', true);
+        showToast(callback.error || 'MDBList authentication failed.', true, false);
         return;
       }
-      if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
-      try {
-        const result = await apiPost('/api/mdblist/auth/check', {
-          client_id: el('mdblist-client-id').value.trim(),
-          client_secret: el('mdblist-client-secret').value.trim(),
-          code: code,
-        });
-        if (!result.ok) {
-          setMdbListAuthStatus(formatApiError(result.data, 'MDBList authentication failed.'), true);
-          return;
-        }
-        // Stored server-side the moment the exchange succeeded, because the
-        // code is single-use; reflect that so it reads like any saved secret.
-        // With no profile yet there was nowhere to store it, so the tokens come
-        // back here instead and ride along on the next save.
-        if (!result.data.saved && result.data.access_token) {
-          mdblistPendingAuth = {
-            access_token: result.data.access_token,
-            refresh_token: result.data.refresh_token || '',
-            access_token_expires_at: result.data.access_token_expires_at || '',
-          };
-        }
-        secretState.mdblist = Object.assign({}, secretState.mdblist, {
-          access_token_saved: true, client_secret_saved: true,
-        });
-        el('mdblist-auth-box').classList.add('hidden');
-        el('mdblist-auth-code').value = '';
-        mdblistAuthUrl = '';
-        setMdbListAuthStatus(result.data.saved
-          ? 'MDBList connected. You can now sync into MDBList.'
-          : 'MDBList connected. Save the profile to keep it.', false);
-        updateDots();
-        showToast(result.data.saved ? 'MDBList connected.' : 'MDBList connected. Save the profile.', false, true);
-        saveDraft();
-        // Writability changed, so the pair editor's capability report is stale.
-        fetchPairs();
-        if (sessionProfileId) testConnections('mdblist');
-      } catch {
-        setMdbListAuthStatus('Network error while finishing MDBList auth.', true);
-      } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Finish Connecting'; }
+      if (!callback.saved && callback.access_token) {
+        mdblistPendingAuth = {
+          access_token: callback.access_token,
+          refresh_token: callback.refresh_token || '',
+          access_token_expires_at: callback.access_token_expires_at || '',
+        };
       }
+      secretState.mdblist = Object.assign({}, secretState.mdblist, {
+        access_token_saved: true,
+        client_secret_saved: true,
+      });
+      setMdbListAuthStatus(callback.saved
+        ? 'MDBList connected. You can now sync in both directions.'
+        : 'MDBList connected. Save the profile to keep it.', false);
+      updateDots();
+      showToast(callback.saved ? 'MDBList connected.' : 'MDBList connected. Save the profile.', false, true);
+      saveDraft();
+      fetchPairs();
+      if (sessionProfileId) testConnections('mdblist');
     }
 
     function setAniListAuthStatus(message, isError) {
@@ -2686,20 +2651,22 @@
     }
 
     function onboardingChoice(provider, value, label, checked, kind) {
-      const historyHandler = kind === 'history' ? 'onchange="onboardingSelectHistory(this)"' : '';
-      return `<label class="onboarding-check"><input type="checkbox" data-onboarding-provider="${escAttr(provider)}" data-onboarding-value="${escAttr(value)}" data-onboarding-kind="${escAttr(kind || 'category')}" ${checked ? 'checked' : ''} ${historyHandler}><span>${esc(label)}</span></label>`;
+      const exclusiveHandler = ['history', 'resume'].includes(kind)
+        ? `onchange="onboardingSelectExclusive(this, '${kind}')"`
+        : '';
+      return `<label class="onboarding-check"><input type="checkbox" data-onboarding-provider="${escAttr(provider)}" data-onboarding-value="${escAttr(value)}" data-onboarding-kind="${escAttr(kind || 'category')}" ${checked ? 'checked' : ''} ${exclusiveHandler}><span>${esc(label)}</span></label>`;
     }
 
-    function onboardingSelectHistory(node) {
+    function onboardingSelectExclusive(node, kind) {
       if (!node.checked) return;
-      document.querySelectorAll('[data-onboarding-kind="history"]').forEach(other => { if (other !== node) other.checked = false; });
+      document.querySelectorAll(`[data-onboarding-kind="${kind}"]`).forEach(other => { if (other !== node) other.checked = false; });
     }
 
     function renderOnboardingDataChoices() {
       const options = gatherOptions();
       const cards = [];
-      if (providerHasCredential('simkl')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">SIMKL</div>${onboardingChoice('simkl', 'movies', 'Movies', !!simklSelectedStatuses.movies.length)}${onboardingChoice('simkl', 'shows', 'TV Shows', !!simklSelectedStatuses.shows.length)}${onboardingChoice('simkl', 'anime', 'Anime', !!simklSelectedStatuses.anime.length)}${onboardingChoice('simkl', 'history', 'Watch History', options.activity_history_source === 'simkl', 'history')}</section>`);
-      if (providerHasCredential('trakt')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">Trakt</div>${onboardingChoice('trakt', 'watchlist', 'Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked)}${onboardingChoice('trakt', 'history', 'Watch History', options.activity_history_source === 'trakt', 'history')}${onboardingChoice('trakt', 'resume', 'Resume Progress', options.activity_resume_source === 'trakt')}</section>`);
+      if (providerHasCredential('simkl')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">SIMKL</div>${onboardingChoice('simkl', 'movies', 'Movies', !!simklSelectedStatuses.movies.length)}${onboardingChoice('simkl', 'shows', 'TV Shows', !!simklSelectedStatuses.shows.length)}${onboardingChoice('simkl', 'anime', 'Anime', !!simklSelectedStatuses.anime.length)}${onboardingChoice('simkl', 'history', 'Watch History', options.activity_history_source === 'simkl', 'history')}${onboardingChoice('simkl', 'resume', 'Resume Progress', options.activity_resume_source === 'simkl', 'resume')}</section>`);
+      if (providerHasCredential('trakt')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">Trakt</div>${onboardingChoice('trakt', 'watchlist', 'Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked)}${onboardingChoice('trakt', 'history', 'Watch History', options.activity_history_source === 'trakt', 'history')}${onboardingChoice('trakt', 'resume', 'Resume Progress', options.activity_resume_source === 'trakt', 'resume')}</section>`);
       if (providerHasCredential('anilist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">AniList</div>${onboardingChoice('anilist', 'PLANNING', 'Planning', anilistSelectedStatuses.includes('PLANNING'))}${onboardingChoice('anilist', 'CURRENT', 'Watching', anilistSelectedStatuses.includes('CURRENT'))}${onboardingChoice('anilist', 'COMPLETED', 'Completed', anilistSelectedStatuses.includes('COMPLETED'))}${onboardingChoice('anilist', 'history', 'Watch History', options.activity_history_source === 'anilist', 'history')}</section>`);
       if (providerHasCredential('mdblist')) cards.push(`<section class="onboarding-choice-card"><div class="onboarding-choice-title">MDBList</div>${onboardingChoice('mdblist', 'lists', `Selected lists (${mdblistSelectedLists.length})`, mdblistSelectedLists.length > 0)}${mdblistSelectedLists.length ? '' : '<div class="catalog-note">Choose lists in the MDBList connection card first.</div>'}</section>`);
       return cards.join('') || '<div class="empty">Connect at least one source before choosing data.</div>';
@@ -2769,10 +2736,10 @@
         const watchlist = checked('trakt', 'watchlist');
         el('trakt-watchlist-movies-toggle').checked = watchlist;
         el('trakt-watchlist-shows-toggle').checked = watchlist;
-        el('opt-activity-resume-source').value = checked('trakt', 'resume') ? 'trakt' : 'off';
       }
       const history = ['simkl', 'trakt', 'anilist'].find(provider => checked(provider, 'history')) || 'off';
       el('opt-activity-history-source').value = history;
+      el('opt-activity-resume-source').value = ['simkl', 'trakt'].find(provider => checked(provider, 'resume')) || 'off';
       renderSimklStatuses();
       renderAniListStatuses();
       renderActivityOptionVisibility();
@@ -3438,7 +3405,7 @@
 
     const CONNECTION_CARD_META = {
       pmdb: { short: 'PM', color: '#34d399', description: 'Destination for synchronized lists, watch history and resume progress. It can also participate in compatible provider routes.' },
-      simkl: { short: 'SK', color: '#fbbf24', description: 'Synchronize movies, TV shows, anime and watch history from your SIMKL account.' },
+      simkl: { short: 'SK', color: '#fbbf24', description: 'Synchronize lists, watchlists, watch history and resume progress for movies, TV shows and anime.' },
       trakt: { short: 'TK', color: '#ef4444', description: 'Synchronize watchlists, collections, custom lists, watch history and resume progress.' },
       anilist: { short: 'AL', color: '#7c6df7', description: 'Synchronize planning, watching and completed anime from a public or authenticated AniList account.' },
       mdblist: { short: 'MD', color: '#38bdf8', description: 'Read MDBList lists with an API key, or connect with OAuth to synchronize in both directions.' },
@@ -3523,15 +3490,15 @@
       if (provider === 'pmdb') {
         add('Lists'); add('Watch History'); add('Resume Progress');
       } else if (provider === 'simkl') {
-        add('Movies', !!(simklSelectedStatuses.movies || []).length);
-        add('TV Shows', !!(simklSelectedStatuses.shows || []).length);
-        add('Anime', !!(simklSelectedStatuses.anime || []).length);
-        add('Watch History', options.activity_history_source === 'simkl');
+        add('Lists');
+        add('Watchlist');
+        add('Watch History');
+        add('Resume Progress');
       } else if (provider === 'trakt') {
-        add('Watchlist', el('trakt-watchlist-movies-toggle').checked || el('trakt-watchlist-shows-toggle').checked);
-        add('Lists', traktSelectedLists.length > 0 || traktSyncAllLikedLists);
-        add('Watch History', options.activity_history_source === 'trakt');
-        add('Resume Progress', options.activity_resume_source === 'trakt');
+        add('Lists');
+        add('Watchlist');
+        add('Watch History');
+        add('Resume Progress');
       } else if (provider === 'anilist') {
         add('Anime Lists', anilistSelectedStatuses.length > 0);
         add('Watch History', options.activity_history_source === 'anilist');
@@ -9947,6 +9914,7 @@
       sessionProfileId = storedProfileId;
       renderQuickSetupVisibility();
     }
+    applyMdbListCallback(MDBLIST_CALLBACK);
     credentialsHydrated = false;
     resumeSimklPinState();
     resumeTraktDeviceState();
@@ -11429,7 +11397,7 @@
           const resume = el('opt-activity-resume-source').value;
           const parts = [];
           if (history !== 'off') parts.push(`history from ${history === 'simkl' ? 'SIMKL' : 'Trakt'}`);
-          if (resume !== 'off') parts.push('resume from Trakt');
+          if (resume !== 'off') parts.push(`resume from ${resume === 'simkl' ? 'SIMKL' : 'Trakt'}`);
           return parts.length ? parts.join(' · ') : 'off';
         },
       };
