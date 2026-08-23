@@ -610,6 +610,8 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
         sync=SyncConfig(
             remove_missing=options["remove_missing"],
             delete_disabled_lists=options["delete_disabled_lists"],
+            guard_large_removals=bool(options.get("guard_large_removals", True)),
+            guard_removal_percent=int(options.get("guard_removal_percent", 20) or 20),
             dry_run=dry_run,
             media_types=options["media_types"],
             simkl_sync_watched_history=modes["history"] and options["activity_history_source"] == "simkl",
@@ -970,6 +972,8 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 managed_keys=(profile.get("activity_state") or {}).get("pair_managed_keys") or {},
                 cancel_requested_callback=lambda: _profile_store.is_sync_cancel_requested(profile_id),
                 status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
+                guard_large_removals=config.sync.guard_large_removals,
+                guard_removal_percent=config.sync.guard_removal_percent,
             )
             pair_results = pair_service.run_pairs(pairs)
             pair_result_dicts = [
@@ -2990,6 +2994,13 @@ def _library_entry_row(entry: dict) -> dict:
         "kind": entry.get("kind") or "show",
         "media_type": entry.get("media_type") or "tv",
         "tmdb_id": entry.get("tmdb_id"),
+        # Provider ids ride along so the Library can show how one title exists
+        # across services — that view is the whole point of a debugging browser,
+        # and it previously had only the TMDB id to work with.
+        "imdb_id": entry.get("imdb_id"),
+        "anilist_id": entry.get("anilist_id"),
+        "mal_id": entry.get("mal_id"),
+        "anidb_id": entry.get("anidb_id"),
         "sections": sorted((entry.get("sections") or {}).keys()),
         "sources": list(entry.get("sources") or []),
         "watched_count": len(watched),
@@ -3859,6 +3870,8 @@ def api_profile_pairs_run():
             _build_provider_adapters(config, profile_id=profile_id), dry_run=dry_run,
             managed_keys=activity_state.get("pair_managed_keys") or {},
             status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
+            guard_large_removals=config.sync.guard_large_removals,
+            guard_removal_percent=config.sync.guard_removal_percent,
         )
         log_token = _log_profile_id.set(profile_id)
         try:
@@ -3974,6 +3987,37 @@ def api_profile_unresolved_auto_resolve():
         }), 404
 
     return jsonify(_apply_unresolved_resolution(profile_id, private_profile, cache_key, target_item, tmdb_id))
+
+
+@app.route("/api/profile/anime/mappings", methods=["POST"])
+def api_profile_anime_mappings():
+    """The manual anime mappings this profile has confirmed."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        items = _profile_store.list_anime_mappings(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    return jsonify({"items": items})
+
+
+@app.route("/api/profile/anime/mappings/delete", methods=["POST"])
+def api_profile_anime_mappings_delete():
+    """Forget one manual mapping; automatic matching applies again next run."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    cache_key = str((request.get_json(silent=True) or {}).get("cache_key", "")).strip()
+    if not cache_key:
+        return _json_error("cache_key is required", 400)
+    try:
+        items = _profile_store.remove_anime_mapping(profile_id, cache_key)
+    except KeyError:
+        return _json_error("That mapping is not saved for this profile", 404)
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    return jsonify({"items": items})
 
 
 @app.route("/api/profile/unresolved/dismiss", methods=["POST"])

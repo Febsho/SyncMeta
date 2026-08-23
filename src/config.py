@@ -99,6 +99,11 @@ class PublicMetaDBConfig:
 class SyncConfig:
     remove_missing: bool = False
     delete_disabled_lists: bool = False
+    #: Refuse a sync-pair removal that would take out more than
+    #: `guard_removal_percent` of a target list. Defaults on: a run that empties
+    #: a list is far more often a half-read source than a real user deletion.
+    guard_large_removals: bool = True
+    guard_removal_percent: int = 20
     dry_run: bool = False
     interval_minutes: int = 0
     media_types: list[str] = field(default_factory=lambda: ["shows", "movies", "anime"])
@@ -452,6 +457,13 @@ def _apply_config_file(cfg: AppConfig, data: dict) -> None:
         cfg.sync.remove_missing = sync["remove_missing"]
     if "delete_disabled_lists" in sync and not os.getenv("SYNC_DELETE_DISABLED_LISTS"):
         cfg.sync.delete_disabled_lists = sync["delete_disabled_lists"]
+    if "guard_large_removals" in sync:
+        cfg.sync.guard_large_removals = bool(sync["guard_large_removals"])
+    if "guard_removal_percent" in sync:
+        try:
+            cfg.sync.guard_removal_percent = min(100, max(1, int(sync["guard_removal_percent"])))
+        except (TypeError, ValueError):
+            pass
     if "dry_run" in sync and not os.getenv("SYNC_DRY_RUN"):
         cfg.sync.dry_run = sync["dry_run"]
     if "simkl_sync_watched_history" in sync and not os.getenv("SIMKL_SYNC_WATCHED_HISTORY"):

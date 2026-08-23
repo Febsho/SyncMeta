@@ -1381,3 +1381,77 @@ class MdbListProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class RemovalGuardTests(unittest.TestCase):
+    """A run that would empty a list is paused rather than performed.
+
+    A source that answers with far less than it holds — a half-read page, a
+    token that just expired, a provider outage — is indistinguishable from the
+    user having deleted everything, except by how much it would destroy.
+    """
+
+    @staticmethod
+    def _movies(count, offset=0):
+        return [_movie(str(1000 + i), f"Film {i}") for i in range(offset, offset + count)]
+
+    def _run(self, source_items, target_items, **service_kwargs):
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: source_items})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: target_items})
+        service = CrossSyncService({"trakt": source, "simkl": target}, **service_kwargs)
+        result = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+        return result, target
+
+    def test_large_removal_is_blocked_and_reported(self):
+        result, target = self._run(self._movies(1), self._movies(40))
+        category = result.categories[0]
+        self.assertEqual(category.removed, 0)
+        self.assertEqual(len(category.blocked_removals), 1)
+        blocked = category.blocked_removals[0]
+        self.assertEqual(blocked["removals"], 39)
+        self.assertEqual(blocked["target_size"], 40)
+        self.assertEqual(target.removed, [])
+        # And it rides out on the payload the dashboard reads.
+        self.assertEqual(len(result.to_dict()["blocked_removals"]), 1)
+
+    def test_ordinary_removal_still_happens(self):
+        result, target = self._run(self._movies(38), self._movies(40))
+        category = result.categories[0]
+        self.assertEqual(category.removed, 2)
+        self.assertEqual(category.blocked_removals, [])
+        self.assertTrue(target.removed)
+
+    def test_small_lists_are_exempt(self):
+        # Removing 2 of 3 is 67% and entirely ordinary; the guard must not speak.
+        result, _ = self._run(self._movies(1), self._movies(3))
+        self.assertEqual(result.categories[0].removed, 2)
+        self.assertEqual(result.categories[0].blocked_removals, [])
+
+    def test_guard_can_be_turned_off(self):
+        result, _ = self._run(self._movies(1), self._movies(40), guard_large_removals=False)
+        self.assertEqual(result.categories[0].removed, 39)
+        self.assertEqual(result.categories[0].blocked_removals, [])
+
+    def test_threshold_is_configurable(self):
+        result, _ = self._run(self._movies(30), self._movies(40), guard_removal_percent=10)
+        self.assertEqual(result.categories[0].removed, 0)
+        self.assertTrue(result.categories[0].blocked_removals)
+
+    def test_blocked_two_way_side_is_not_re_added_to_the_other(self):
+        """Two-way: a paused removal leaves those keys alone on both sides."""
+        first_items = self._movies(40)
+        first = FakeAdapter("trakt", {CATEGORY_WATCHLIST: first_items})
+        second = FakeAdapter("simkl", {CATEGORY_WATCHLIST: self._movies(1)})
+        managed = {"p1": {CATEGORY_WATCHLIST: [
+            item_key(enrich_identity(item)) for item in first_items
+        ]}}
+        service = CrossSyncService({"trakt": first, "simkl": second}, managed_keys=managed)
+        result = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED, mode="two_way"))
+        category = result.categories[0]
+        self.assertEqual(category.removed, 0)
+        self.assertTrue(category.blocked_removals)
+        self.assertEqual(second.added, [])
+        # The blocked keys stay in the agreed state, so the next run sees the
+        # same situation rather than treating them as never-synced.
+        self.assertEqual(len(category.managed_keys), 40)

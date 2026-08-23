@@ -119,14 +119,20 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("data-nav=\"mapping\"", html)
         self.assertIn("Activity Sync", html)
         self.assertIn("Sync watch history automatically in the background", html)
-        self.assertIn("Auto-Sync Every (Seconds)", html)
-        self.assertIn("Minimum 21600 s (6 h). Default 43200 s (12 h).", html)
-        self.assertIn("Minimum 86400 s (24 h). Only affects automatic history sync.", html)
+        # Intervals are chosen from a human-readable preset list; the raw
+        # seconds field is still there behind "Custom…", which is what
+        # gatherOptions/populateForm read.
+        self.assertIn("Watch history frequency", html)
+        self.assertIn("Sync frequency", html)
+        self.assertIn("Minimum every 6 hours; the default is every 12.", html)
+        self.assertIn("Minimum once a day. Only affects the automatic history sync.", html)
+        self.assertIn('id="opt-interval-seconds"', html)
+        self.assertIn("Every 12 hours", html)
         self.assertIn("Only import SIMKL anime watch history", html)
         self.assertIn('id="opt-activity-resume-source"', html)
         self.assertIn('id="opt-auto-resume-sync"', html)
         self.assertIn('id="opt-resume-interval-seconds"', html)
-        self.assertIn("Minimum 86400 s (24 h). Only affects automatic resume sync.", html)
+        self.assertIn("Minimum once a day. Only affects the automatic resume sync.", html)
         self.assertIn('id="activity-cards"', html)
         self.assertIn("Sync Watch History", html)
         self.assertIn("Clear PMDB History", html)
@@ -2765,6 +2771,110 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["profile"]["last_results"][0]["items_skipped_unresolved"], 0)
         self.assertEqual(data["profile"]["last_results"][0]["items_added"], 1)
         mock_add_item_to_list.assert_called_once_with("pmdb-list-1", 4567, "tv")
+
+    def test_index_uses_the_five_page_information_architecture(self) -> None:
+        """Overview / Activity / Library / Issues / Settings, and nothing else.
+
+        The six-view nav (Dashboard, Sync, Library, Logs, Stats, Settings) is
+        gone; everything it held moved into one of these five, so this also
+        pins the pieces that moved rather than being deleted.
+        """
+        html = self.client.get("/").get_data(as_text=True)
+        for nav in ("overview", "activity", "library", "issues", "settings"):
+            self.assertIn(f'data-nav="{nav}"', html)
+            self.assertIn(f'id="view-{nav}"', html)
+        for gone in ("dashboard", "sync", "logs", "stats"):
+            self.assertNotIn(f'data-nav="{gone}"', html)
+
+        # Moved, not removed: the pair editor and the legacy pipeline settings
+        # now live in Settings, the raw log console inside Activity, and the
+        # site stats in Settings → About.
+        self.assertIn('id="stab-routes"', html)
+        self.assertIn('id="stab-schedule"', html)
+        self.assertIn('id="stab-about"', html)
+        self.assertIn('id="pairs-list"', html)
+        self.assertIn('id="sync-settings"', html)
+        self.assertIn('id="profile-logs-body"', html)
+        self.assertIn('id="site-stats-cards"', html)
+        self.assertIn('id="anime-health-panel"', html)
+        self.assertIn('id="unresolved-body"', html)
+
+        # New surfaces, all of them driven from existing endpoints.
+        self.assertIn('id="health-pill"', html)
+        self.assertIn('id="sync-graph-body"', html)
+        self.assertIn('id="recent-activity-body"', html)
+        self.assertIn('id="attention-body"', html)
+        self.assertIn('id="activity-feed-body"', html)
+        self.assertIn('id="anime-mapping-body"', html)
+        self.assertIn('id="search-dialog"', html)
+        self.assertIn('id="confirm-dialog"', html)
+        self.assertIn('id="preview-dialog"', html)
+
+        # The primary actions keep their ids and their handlers.
+        self.assertIn('id="btn-sync"', html)
+        self.assertIn('id="btn-dry"', html)
+        self.assertIn('id="btn-stop"', html)
+        self.assertIn("Preview changes", html)
+        self.assertIn("Sync now", html)
+
+    def test_index_no_longer_uses_a_browser_confirm_dialog(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn("if (!confirm(", html)
+        self.assertIn("function confirmDialog(", html)
+
+    def test_manual_anime_mappings_are_listed_and_removable(self) -> None:
+        """A confirmed mapping is already persisted and reused; these endpoints
+        only make it reviewable, and undoable."""
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        private_profile = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        private_profile["anime_manual_overrides"] = {
+            "anime-1": {"tmdb_id": 1429, "title": "Attack on Titan", "media_type": "tv", "saved_at": "2026-01-01T00:00:00Z"},
+        }
+        private_profile["manual_resolution_cache"] = {"anime-1": 1429}
+        private_profile["resolution_cache"] = {"anime-1": 1429}
+        private_profile["anime_review_decisions"] = {"anime-1": "manual_map"}
+        web._profile_store._profiles[profile["profile_id"]] = private_profile
+
+        listed = self.client.post("/api/profile/anime/mappings", json={})
+        self.assertEqual(listed.status_code, 200)
+        items = listed.get_json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["cache_key"], "anime-1")
+        self.assertEqual(items[0]["tmdb_id"], 1429)
+
+        removed = self.client.post("/api/profile/anime/mappings/delete", json={"cache_key": "anime-1"})
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(removed.get_json()["items"], [])
+
+        # Every place the mapping lived has to be cleared together, or the
+        # resolver would keep applying an override the UI says is gone.
+        after = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        self.assertEqual(after["anime_manual_overrides"], {})
+        self.assertEqual(after["manual_resolution_cache"], {})
+        self.assertEqual(after["resolution_cache"], {})
+        self.assertEqual(after["anime_review_decisions"], {})
+
+    def test_removing_an_unknown_anime_mapping_is_a_404(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/anime/mappings/delete", json={"cache_key": "nope"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_anime_mapping_endpoints_require_a_session(self) -> None:
+        self.assertEqual(self.client.post("/api/profile/anime/mappings", json={}).status_code, 401)
+        self.assertEqual(
+            self.client.post("/api/profile/anime/mappings/delete", json={"cache_key": "x"}).status_code, 401)
+
+    def test_removal_guard_options_round_trip(self) -> None:
+        """The safety guard is a stored option, defaulted on and clamped."""
+        options = web.normalize_profile_options({"guard_removal_percent": 900})
+        self.assertTrue(options["guard_large_removals"])
+        self.assertEqual(options["guard_removal_percent"], 100)
+        options = web.normalize_profile_options({"guard_large_removals": False, "guard_removal_percent": "not a number"})
+        self.assertFalse(options["guard_large_removals"])
+        self.assertEqual(options["guard_removal_percent"], 20)
 
     @patch("src.fribb_client.lookup_by_anilist")
     @patch("web.PublicMetaDBClient.lookup_by_external_id_detailed")

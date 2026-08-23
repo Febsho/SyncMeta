@@ -56,6 +56,76 @@ pip install --ignore-installed blinker flask python-dotenv   # if flask/dotenv a
 
 **Frontend:** `templates/index.html` — single-page app, no build step, vanilla JS.
 
+**Information architecture — five destinations, not six views.** The nav is
+`Overview · Activity · Library · Issues · Settings`, plus a search button
+(Ctrl/Cmd+K) and a GitHub icon in `.nav-tools`. Nothing was deleted in the move;
+`switchView` keeps aliases (`dashboard`→overview, `sync`/`rules`/`lists`/
+`behavior`/`connections`/`stats`→settings, `logs`/`history`→activity,
+`mapping`→issues) so every old deep link and in-app call still lands somewhere
+sensible. Where the old views went:
+
+| Was | Now |
+|---|---|
+| Dashboard | **Overview** — health hero, three metric tiles, sync graph, pairs panel, recent activity, latest sync results |
+| Sync (pair editor + hidden pipeline cards) | **Settings → Sync routes** (`#stab-routes`) |
+| Schedule / history / resume options (were inside the hidden `#sync-settings`) | **Settings → Schedule & safety** (`#stab-schedule`) — `#pipe-schedule` and `#pipe-activity` were physically moved out of that hidden wrapper, which is why they are editable again |
+| Logs | **Activity**, inside a `<details class="tech-details">` disclosure |
+| Stats | **Settings → About** (`#stab-about`) |
+| Unresolved / errors / Anime Health | **Issues** |
+| Sync History panel | removed — the Activity page's Runs list is the same record, paginated server-side through `/api/profile/sync/runs`. `renderDashboard`'s history block is null-guarded rather than deleted |
+
+Input ids did not change anywhere, so `gatherOptions`/`gatherCreds`/
+`populateForm` and every existing handler are untouched by the move.
+
+**Nothing on these surfaces is synthesised.** Every number renders from
+`/status`, `/api/profile/sync/runs`, `/api/profile/unresolved` or
+`/api/profile/library/*`. Where a value has no backing datum the UI omits it:
+`metricValue(null)` prints `—`, a run's duration is only shown when `phase_timings`
+actually recorded one, and the search dialog reports an empty library rather than
+inventing rows. If a control cannot be wired to real behaviour it is not built —
+the conflict-resolution policy from the redesign brief was left out for exactly
+this reason, since no backend implements it.
+
+**Global health is a dot plus a phrase, never a colour.** `setHealthState` drives
+`#health-pill` through `healthy | running | attention | failed | auth | idle`.
+`renderHealthHero` ranks them: a running sync first, then a fatal `sync_error`,
+then a provider whose `connection_health` is `error`, then unresolved/error
+counts, then "nothing configured". A progress bar is drawn only when the pipeline
+reported a denominator.
+
+**The sync graph is drawn from the saved pairs, not from a picture of the app.**
+`renderSyncGraph` groups `options.sync_pairs` by target and draws one flow per
+destination; the bracket is an SVG stretched to the source count and is replaced
+by a short vertical rule below 860px, where the flow stacks. An edge's state
+folds the *connection* in: a green last run on a service whose token just expired
+still reads `✕ Authentication required`, because the route cannot work now.
+Clicking a node opens `#provider-detail-panel` — its routes, categories, last
+result and recovery button, all from the same payload.
+
+**Errors are translated, and the raw text is kept.** `friendlyError` maps
+provider/HTTP shapes ("Trakt … 401 … invalid_grant") to a consequence a user can
+act on, and `technicalDetailsHtml` puts the original inside a "Show technical
+details" disclosure. Call sites that know the provider prefix the message with
+its label first, since the patterns key on the provider name.
+
+**Dialogs, not `window.confirm`.** `confirmDialog({title, body, confirmLabel,
+destructive})` returns a promise, traps focus, closes on Escape and the backdrop,
+and restores focus to the opener. `openPreviewDialog` renders a finished dry run
+from `dry_run_preview` on the result rows — a dry run sets `pendingPreviewRun`,
+and `maybeOpenPreview` opens it once, keyed on `latest_run_id` so a repeated poll
+of the same completed run does not reopen it. "Apply changes" starts a real sync.
+
+**Intervals are presets; seconds are the storage format.**
+`installScheduleSelects` inserts a `<select>` in front of each seconds input and
+moves the input into a `.interval-custom` wrapper. The input keeps its id, so the
+form plumbing is unchanged; a stored value that is not a preset selects "Custom…"
+and reveals the raw field rather than being silently rounded.
+
+**Browser notifications only.** `notifySettings` lives in `localStorage`, asks for
+permission on enable, and fires from the status poll through `maybeNotify`, which
+keys each event on a signature so a repeated poll of the same state notifies once.
+No webhook channels are offered, because none is implemented server-side.
+
 **Visual language** (shared tokens in `:root`): surfaces are `--surface` on a
 `--line` hairline at 12px radius; a value is titled by a monospace uppercase
 overline (`--mono`, 10px, `.1em` tracking, `--label` colour) and set at **weight
@@ -171,6 +241,28 @@ value resolves to `private`, because publishing someone's watchlist over a typo
 is the one unacceptable failure; and a list that already exists is never
 re-flagged, so a pair writing into a list the user made private on Trakt does
 not make it public.
+
+**An unusually large removal is paused, not performed.** A source that answers
+with far less than it holds — a half-read page, a token that just expired, an
+outage — is indistinguishable from the user having deleted everything, except by
+how much it would destroy. `CrossSyncService` takes `guard_large_removals` /
+`guard_removal_percent` (from `SyncConfig`, defaulting on at 20%) and
+`_guard_blocks` refuses a removal over the threshold, recording it in
+`PairCategoryStats.blocked_removals` and surfacing it on the Issues page. Two
+things it must keep right: small lists are exempt (`_GUARD_MIN_TARGET_SIZE` /
+`_GUARD_MIN_REMOVALS` — removing 2 of 3 items is 67% and entirely ordinary, and
+pausing it would be noise); and in a two-way pair a blocked side's keys are
+excluded from the *adds* as well, and stay in the agreed managed set, so the run
+is a genuine no-op for them rather than the other service re-adding them.
+
+**Manual anime mappings are reviewable and undoable.** They were already
+persisted by `resolve_unresolved_item` and already reused by the matcher;
+`list_anime_mappings` / `remove_anime_mapping` (behind
+`/api/profile/anime/mappings` and `/api/profile/anime/mappings/delete`) only make
+them visible. Removal has to clear all four homes together —
+`manual_resolution_cache`, the live `resolution_cache`, `anime_manual_overrides`
+and the `anime_review_decisions` entry — or the UI would say the override is gone
+while the resolver kept applying it.
 
 **Sync pairs are additive by default.** `removal_mode` is `additive` (never deletes),
 `managed` (deletes only keys this pair previously wrote, so manual additions on

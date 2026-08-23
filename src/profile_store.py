@@ -828,6 +828,15 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
     return migrated
 
 
+def _coerce_int(value, fallback: int) -> int:
+    """Best-effort int for a tolerated setting — a bad value falls back rather
+    than refusing the whole save, since these are clamped anyway."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def normalize_profile_options(options: dict | None) -> dict:
     raw = options or {}
     interval_raw = raw.get("interval_seconds", DEFAULT_SYNC_INTERVAL_SECONDS)
@@ -883,6 +892,10 @@ def normalize_profile_options(options: dict | None) -> dict:
     return {
         "remove_missing": bool(raw.get("remove_missing", False)),
         "delete_disabled_lists": bool(raw.get("delete_disabled_lists", False)),
+        # Safety guard for sync pairs. On by default; the percentage is clamped
+        # so a stored 0 or 900 cannot disable or trivialise the check.
+        "guard_large_removals": bool(raw.get("guard_large_removals", True)),
+        "guard_removal_percent": min(100, max(1, _coerce_int(raw.get("guard_removal_percent"), 20))),
         "media_types": media_types,
         "auto_sync": bool(raw.get("auto_sync", True)),
         "interval_seconds": interval_seconds,
@@ -2109,6 +2122,63 @@ class ProfileStore:
                     profile["manual_list_additions"] = mla
             self._save_locked()
             return copy.deepcopy(profile["unresolved_items"])
+
+    def list_anime_mappings(self, profile_id: str) -> list[dict]:
+        """Manual anime mappings this profile has confirmed, newest first.
+
+        These are already persisted by resolve_unresolved_item and already
+        re-used by the matcher through manual_resolution_cache; this only makes
+        them visible so a user can review or undo one.
+        """
+        with self._lock:
+            normalized_id = self._normalize_profile_id(profile_id)
+            profile = self._profiles[normalized_id]
+            overrides = profile.get("anime_manual_overrides") or {}
+            rows = []
+            for cache_key, value in overrides.items():
+                if not isinstance(value, dict):
+                    continue
+                rows.append({
+                    "cache_key": str(cache_key),
+                    "tmdb_id": value.get("tmdb_id"),
+                    "title": value.get("title") or "",
+                    "media_type": value.get("media_type") or "",
+                    "saved_at": value.get("saved_at") or "",
+                })
+            rows.sort(key=lambda row: str(row.get("saved_at") or ""), reverse=True)
+            return rows
+
+    def remove_anime_mapping(self, profile_id: str, cache_key: str) -> list[dict]:
+        """Forget one manual mapping so automatic matching applies again.
+
+        The mapping lives in four places — the manual cache, the live resolution
+        cache the next sync reads, the override record, and the review decision.
+        Clearing only some of them would leave the override advertised in the UI
+        while the resolver kept applying it, so all four go together.
+        """
+        with self._lock:
+            normalized_id = self._normalize_profile_id(profile_id)
+            profile = self._profiles[normalized_id]
+            key = str(cache_key or "").strip()
+            if not key:
+                raise ValueError("cache_key is required")
+            overrides = dict(profile.get("anime_manual_overrides") or {})
+            if key not in overrides:
+                raise KeyError(key)
+            overrides.pop(key, None)
+            profile["anime_manual_overrides"] = overrides
+            manual = dict(profile.get("manual_resolution_cache") or {})
+            manual.pop(key, None)
+            profile["manual_resolution_cache"] = manual
+            live = dict(profile.get("resolution_cache") or {})
+            live.pop(key, None)
+            profile["resolution_cache"] = live
+            decisions = dict(profile.get("anime_review_decisions") or {})
+            if decisions.get(key) == "manual_map":
+                decisions.pop(key, None)
+            profile["anime_review_decisions"] = decisions
+            self._save_locked()
+            return self.list_anime_mappings(normalized_id)
 
     def dismiss_unresolved_item(self, profile_id: str, cache_key: str) -> list[dict]:
         """Remove an unresolved item without resolving it (user dismisses it)."""

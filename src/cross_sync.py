@@ -151,6 +151,13 @@ class ReadCache:
             self._entries.pop(key, None)
 
 
+#: A list has to be big enough, and lose enough, for a mass deletion to be
+#: surprising. Below these the guard stays silent — removing 2 of 3 items is a
+#: perfectly ordinary edit and pausing it would be noise.
+_GUARD_MIN_TARGET_SIZE = 10
+_GUARD_MIN_REMOVALS = 5
+
+
 @dataclass
 class PairCategoryStats:
     """Outcome of syncing one category of one pair."""
@@ -171,6 +178,10 @@ class PairCategoryStats:
     #: totals so one-way callers and the dashboard need no special case.
     added_back: int = 0
     removed_back: int = 0
+    #: Removals the safety guard refused to perform, one entry per side it
+    #: stopped. Reported rather than raised: nothing was deleted, and the user
+    #: decides whether the run was right.
+    blocked_removals: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -184,6 +195,7 @@ class PairCategoryStats:
             "cached_reads": self.cached_reads,
             "added_back": self.added_back,
             "removed_back": self.removed_back,
+            "blocked_removals": [dict(entry) for entry in self.blocked_removals],
             "errors": list(self.errors),
         }
 
@@ -217,6 +229,15 @@ class PairRunStats:
         return sum(c.cached_reads for c in self.categories)
 
     @property
+    def checked(self) -> int:
+        """Source items this run actually inspected, across every category."""
+        return sum(c.source_items for c in self.categories)
+
+    @property
+    def blocked_removals(self) -> list[dict]:
+        return [entry for c in self.categories for entry in c.blocked_removals]
+
+    @property
     def error_count(self) -> int:
         return len(self.errors) + sum(len(c.errors) for c in self.categories)
 
@@ -231,8 +252,10 @@ class PairRunStats:
             "dry_run": self.dry_run,
             "added": self.added,
             "removed": self.removed,
+            "checked": self.checked,
             "unmapped": self.unmapped,
             "cached_reads": self.cached_reads,
+            "blocked_removals": self.blocked_removals,
             "error_count": self.error_count,
             "categories": [c.to_dict() for c in self.categories],
             "errors": list(self.errors),
@@ -250,9 +273,21 @@ class CrossSyncService:
         managed_keys: dict | None = None,
         cancel_requested_callback=None,
         status_callback=None,
+        guard_large_removals: bool = True,
+        guard_removal_percent: int = 20,
     ):
         self._adapters = dict(adapters or {})
         self._dry_run = bool(dry_run)
+        # A run that would empty a list is far more often a provider hiccup — a
+        # half-read source, a revoked token that returned nothing — than a user
+        # deleting everything. Refusing it costs one paused run; performing it
+        # costs the list.
+        self._guard_large_removals = bool(guard_large_removals)
+        try:
+            percent = int(guard_removal_percent)
+        except (TypeError, ValueError):
+            percent = 20
+        self._guard_removal_percent = min(100, max(1, percent))
         # {pair_id: {category: [key, ...]}} — keys this pair has written before.
         self._managed_keys = {
             str(pair_id): {
@@ -525,6 +560,14 @@ class CrossSyncService:
         result.skipped_existing = len(source_by_key) - len(to_add)
 
         to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
+        blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
+        if blocked:
+            self._note_blocked(
+                pair, category, result,
+                removals=len(to_remove), target_size=len(target_by_key),
+                percent=percent, where=target.label,
+            )
+            to_remove = []
 
         self._set_status(
             f"{pair.display_name()}: {len(to_add)} to add, {len(to_remove)} to remove on {target.label}"
@@ -669,8 +712,28 @@ class CrossSyncService:
 
         add_to_second = [first_by_key[k] for k in only_first - drop_from_first]
         add_to_first = [second_by_key[k] for k in only_second - drop_from_second]
-        remove_from_first = [first_by_key[k] for k in drop_from_first]
-        remove_from_second = [second_by_key[k] for k in drop_from_second]
+        # A blocked side keeps its items: they are neither deleted here nor
+        # re-added to the other service, so the run is a no-op for them and the
+        # next run can act on the same state once the user has decided.
+        blocked_first: set = set()
+        blocked_second: set = set()
+        for keys, size, label, bucket in (
+            (drop_from_first, len(first_keys), first.label, "first"),
+            (drop_from_second, len(second_keys), second.label, "second"),
+        ):
+            blocked, percent = self._guard_blocks(len(keys), size)
+            if not blocked:
+                continue
+            self._note_blocked(
+                pair, category, result,
+                removals=len(keys), target_size=size, percent=percent, where=label,
+            )
+            if bucket == "first":
+                blocked_first = set(keys)
+            else:
+                blocked_second = set(keys)
+        remove_from_first = [first_by_key[k] for k in drop_from_first - blocked_first]
+        remove_from_second = [second_by_key[k] for k in drop_from_second - blocked_second]
         result.skipped_existing = len(first_keys & second_keys)
 
         self._set_status(
@@ -733,11 +796,49 @@ class CrossSyncService:
         # deleted. Recorded even when a write failed, since a partial result is
         # still closer to the truth than the previous run's snapshot.
         if not self._dry_run:
-            agreed = (first_keys | second_keys) - drop_from_first - drop_from_second
+            agreed = ((first_keys | second_keys)
+                      - (drop_from_first - blocked_first)
+                      - (drop_from_second - blocked_second))
             ordered = sorted(agreed)
             self._managed_keys.setdefault(pair.pair_id, {})[category] = ordered
             result.managed_keys = ordered
         return result
+
+    def _guard_blocks(self, removals: int, target_size: int) -> tuple[bool, int]:
+        """Would deleting `removals` of `target_size` items trip the guard?
+
+        Returns (blocked, percent). A small list is exempt: removing 2 of 3
+        items is 67% and entirely ordinary, so the guard only speaks for lists
+        big enough that a mass deletion is surprising.
+        """
+        if not self._guard_large_removals or removals <= 0 or target_size <= 0:
+            return False, 0
+        percent = round(removals * 100 / target_size)
+        if target_size < _GUARD_MIN_TARGET_SIZE or removals < _GUARD_MIN_REMOVALS:
+            return False, percent
+        return percent > self._guard_removal_percent, percent
+
+    def _note_blocked(
+        self, pair, category: str, result: PairCategoryStats,
+        *, removals: int, target_size: int, percent: int, where: str,
+    ) -> None:
+        result.blocked_removals.append({
+            "category": category,
+            "removals": removals,
+            "target_size": target_size,
+            "percent": percent,
+            "target": where,
+        })
+        logger.warning(
+            "Pair %s: refusing to remove %d of %d %s items (%d%%) from %s — "
+            "over the %d%% safety threshold; nothing was deleted",
+            pair.display_name(), removals, target_size, category, percent,
+            where, self._guard_removal_percent,
+        )
+        self._set_status(
+            f"{pair.display_name()}: paused an unusually large removal "
+            f"({removals} of {target_size} {category} items on {where})"
+        )
 
     def _items_to_remove(
         self, pair, category: str, source_by_key: dict, target_by_key: dict,
