@@ -11,6 +11,7 @@ from unittest.mock import patch
 from src.anilist_client import AniListClient
 from src.config import AniListConfig, SimklConfig, TraktConfig
 from src.mdblist_client import MdbListClient
+from src.providers import CATEGORY_HISTORY, PmdbAdapter
 from src.simkl_client import SimklClient
 from src.trakt_client import TraktClient
 
@@ -407,3 +408,81 @@ class EpisodeScopedHistoryTests(unittest.TestCase):
         }, "history")
         self.assertEqual([(r["season"], r["episode"]) for r in rows], [(1, 1), (1, 2)])
         self.assertEqual(rows[1]["watched_at"], "2024-01-02T00:00:00Z")
+
+
+class PmdbHistoryRemovalTests(unittest.TestCase):
+    """PublicMetaDB can remove watch history, and the adapter must let it.
+
+    `DELETE /api/external/watched` deletes every play matching a filter, and the
+    client has had `bulk_delete_watched` all along — but the adapter had no
+    history branch, so it fell through to "PublicMetaDB cannot remove from
+    'history'". `writes` advertised the capability, so a pair validated fine and
+    then failed partway through its first run.
+    """
+
+    class FakeClient:
+        def __init__(self, ok: bool = True):
+            self.ok = ok
+            self.calls: list[tuple] = []
+
+        def bulk_delete_watched(self, tmdb_id, media_type, season=None, episode=None):
+            self.calls.append((tmdb_id, media_type, season, episode))
+            return self.ok
+
+    def _adapter(self, ok: bool = True):
+        client = self.FakeClient(ok)
+        adapter = PmdbAdapter.__new__(PmdbAdapter)
+        adapter._client = client
+        return adapter, client
+
+    def test_an_episode_is_removed_by_its_own_coordinates(self) -> None:
+        adapter, client = self._adapter()
+        totals = adapter.remove(CATEGORY_HISTORY, [
+            {"tmdb_id": "1429", "media_type": "tv", "season": 1, "episode": 3},
+        ])
+        self.assertEqual(totals["deleted"], 1)
+        self.assertEqual(client.calls, [(1429, "tv", 1, 3)])
+
+    def test_a_movie_needs_no_coordinates(self) -> None:
+        adapter, client = self._adapter()
+        totals = adapter.remove(CATEGORY_HISTORY, [
+            {"tmdb_id": "496243", "media_type": "movie"},
+        ])
+        self.assertEqual(totals["deleted"], 1)
+        self.assertEqual(client.calls, [(496243, "movie", None, None)])
+
+    def test_a_show_naming_no_episode_is_refused(self) -> None:
+        # Without season/episode the same call wipes the show's entire watch
+        # history — the deleting counterpart of marking a whole show watched.
+        adapter, client = self._adapter()
+        totals = adapter.remove(CATEGORY_HISTORY, [
+            {"tmdb_id": "1429", "media_type": "tv"},
+        ])
+        self.assertEqual(totals["deleted"], 0)
+        self.assertEqual(totals["not_found"], 1)
+        self.assertEqual(client.calls, [])
+
+    def test_an_unusable_id_is_counted_not_sent(self) -> None:
+        adapter, client = self._adapter()
+        totals = adapter.remove(CATEGORY_HISTORY, [
+            {"tmdb_id": "", "media_type": "tv", "season": 1, "episode": 1},
+        ])
+        self.assertEqual(totals["not_found"], 1)
+        self.assertEqual(client.calls, [])
+
+    def test_a_row_the_server_did_not_have_is_not_counted_as_deleted(self) -> None:
+        adapter, _client = self._adapter(ok=False)
+        totals = adapter.remove(CATEGORY_HISTORY, [
+            {"tmdb_id": "1429", "media_type": "tv", "season": 1, "episode": 3},
+        ])
+        self.assertEqual(totals["deleted"], 0)
+        self.assertEqual(totals["not_found"], 1)
+
+    def test_it_no_longer_raises_unsupported(self) -> None:
+        adapter, _client = self._adapter()
+        try:
+            adapter.remove(CATEGORY_HISTORY, [
+                {"tmdb_id": "1429", "media_type": "tv", "season": 1, "episode": 3},
+            ])
+        except Exception as exc:  # pragma: no cover - the regression itself
+            self.fail(f"PublicMetaDB history removal still refused: {exc}")

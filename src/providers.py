@@ -250,15 +250,20 @@ def is_episode_scoped(item: dict) -> bool:
         return False
 
 
-def episode_scoped_history(items: list[dict]) -> tuple[list[dict], int]:
-    """Split history rows into the writable ones and a count of the rest."""
+def episode_scoped_history(items: list[dict], action: str = "write") -> tuple[list[dict], int]:
+    """Split history rows into the usable ones and a count of the rest.
+
+    The rule cuts both ways. Sent as a write, a bare show entry marks every
+    season watched; sent as a delete, it erases the show's entire watch history.
+    Either way the row names something far larger than what it meant.
+    """
     kept = [item for item in items or [] if is_episode_scoped(item)]
     dropped = len(items or []) - len(kept)
     if dropped:
         logger.warning(
             "Dropping %d history row(s) that name a show but no episode; "
-            "writing them would mark the whole show watched",
-            dropped,
+            "the %s would have covered the whole show",
+            dropped, action,
         )
     return kept, dropped
 
@@ -1538,6 +1543,40 @@ class PmdbAdapter(ProviderAdapter):
                     continue
                 self._client.remove_item_from_list(list_id, str(pmdb_item_id))
                 totals["deleted"] += 1
+            return totals
+        if category == CATEGORY_HISTORY:
+            # PublicMetaDB does support this — DELETE /api/external/watched
+            # removes every play matching a filter — so refusing it here made a
+            # pair that validated fine fail halfway through its first run.
+            #
+            # The unit removed is the *episode*, not one play, which is what
+            # every other provider does: Trakt's /sync/history/remove takes a
+            # seasons/episodes tree and clears each episode's plays outright.
+            # Deleting a single record would also leave the episode's rewatches
+            # behind, so the next run would find it still present and try again.
+            #
+            # A row that names a show but no episode is dropped rather than
+            # sent: without season/episode the same call wipes the show's entire
+            # watch history, which is the deleting counterpart of the bug that
+            # marked whole shows watched.
+            writable, dropped = episode_scoped_history(items, "delete")
+            totals["not_found"] += dropped
+            for item in writable:
+                tmdb_id = str(item.get("tmdb_id") or "").strip()
+                if not tmdb_id.isdigit():
+                    totals["not_found"] += 1
+                    continue
+                media_type = str(item.get("media_type") or "movie").strip().lower()
+                is_movie = media_type == "movie"
+                if self._client.bulk_delete_watched(
+                    int(tmdb_id),
+                    "movie" if is_movie else "tv",
+                    season=None if is_movie else item.get("season"),
+                    episode=None if is_movie else item.get("episode"),
+                ):
+                    totals["deleted"] += 1
+                else:
+                    totals["not_found"] += 1
             return totals
         if category == CATEGORY_RESUME:
             for item in items:

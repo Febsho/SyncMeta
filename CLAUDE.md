@@ -313,6 +313,23 @@ movie at `0x0`. A show play with no episode number is *dropped*, never guessed:
 inventing one claims episodes nobody watched, which is exactly what SIMKL's
 aggregate counts would produce. Season 0 is specials and is kept.
 
+**PublicMetaDB can remove watch history — the unit is the episode.**
+`DELETE /api/external/watched` deletes every play matching a filter, and
+`bulk_delete_watched` has always existed on the client, but `PmdbAdapter.remove`
+had no `CATEGORY_HISTORY` branch and fell through to `_unsupported`. Since
+`writes` advertised the capability, a pair validated fine and then failed
+mid-run with "PublicMetaDB cannot remove from 'history'". Removing the whole
+episode rather than one play record is deliberate and matches every other
+provider — Trakt's `/sync/history/remove` takes a seasons/episodes tree and
+clears each episode outright — and deleting a single record would leave that
+episode's rewatches behind for the next run to find and try again. The
+episode-scoped rule below applies in this direction too: a row naming a show but
+no episode would wipe that show's entire history, so it is dropped.
+
+When adding a category to an adapter's `writes`, implement **both** `add` and
+`remove`: the declaration is what pair validation trusts, so a missing branch
+does not surface until a real run is halfway done.
+
 **A history row that names no episode is never written to any service.** Trakt,
 SIMKL and MDBList all read a show entry carrying no `seasons` tree as *the whole
 show*, so flattening one watched episode to its series is not a smaller write —
