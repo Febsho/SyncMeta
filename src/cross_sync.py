@@ -219,6 +219,11 @@ class PairCategoryStats:
     removed: int = 0
     unmapped: int = 0
     skipped_existing: int = 0
+    #: Source items the *target* declined to store in this category — not a
+    #: failure and not an identity problem, so it is neither an error nor
+    #: `unmapped`. PublicMetaDB's native watchlist declines anything that is not
+    #: plan-to-watch, which is the case this exists for.
+    skipped_unsupported: int = 0
     errors: list[str] = field(default_factory=list)
     managed_keys: list[str] = field(default_factory=list)
     #: Provider reads this category answered from the batch cache instead of the
@@ -243,6 +248,7 @@ class PairCategoryStats:
             "removed": self.removed,
             "unmapped": self.unmapped,
             "skipped_existing": self.skipped_existing,
+            "skipped_unsupported": self.skipped_unsupported,
             "cached_reads": self.cached_reads,
             "added_back": self.added_back,
             "removed_back": self.removed_back,
@@ -479,6 +485,21 @@ class CrossSyncService:
         return requested
 
     @staticmethod
+    def _target_accepts(target, category: str, item: dict, target_list: str) -> bool:
+        accepts = getattr(target, "accepts", None)
+        if not callable(accepts):
+            return True
+        try:
+            return bool(accepts(category, item, target_list))
+        except Exception:
+            # A provider that cannot answer must not block the sync.
+            logger.warning(
+                "%s: accepts() failed for %s; allowing the item",
+                getattr(target, "label", "target"), category, exc_info=True,
+            )
+            return True
+
+    @staticmethod
     def _comparison_key(item: dict, target_list: str) -> str:
         """Use status-aware identity only for automatic SIMKL status lists."""
         base = item_key(item)
@@ -610,6 +631,13 @@ class CrossSyncService:
             if not has_portable_identity(item):
                 # Nothing portable to match on; count it rather than guessing.
                 result.unmapped += 1
+                continue
+            if not self._target_accepts(target, category, item, target_list):
+                # The target will not store this. It has to leave the source set
+                # too, not just be refused at the write: an item that stays here
+                # looks present to the diff, so a stale copy already on the
+                # target could never be recognised as stale and removed.
+                result.skipped_unsupported += 1
                 continue
             key = self._comparison_key(item, target_list)
             source_by_key.setdefault(key, item)

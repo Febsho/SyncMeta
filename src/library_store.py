@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 
 from .media_kind import KIND_ANIME, KIND_ANIME_MOVIE, classify, normalize_namespace
-from .providers import normalize_watched_at
+from .providers import PLANNED_FLAG, is_planned, normalize_watched_at
 
 logger = logging.getLogger(__name__)
 
@@ -249,9 +249,15 @@ class LibraryStore:
         ).strip().lower()
         status = _STATUS_LABELS.get(raw_status)
         if not status:
-            status = "Watched" if section == "history" else (
-                "Planning" if section == SECTION_WATCHLIST else "Synced"
-            )
+            if section == "history":
+                status = "Watched"
+            elif section == SECTION_WATCHLIST and is_planned(item):
+                # Only claim "Planning" when the source said so. Asserting it for
+                # everything in the watchlist section laundered curated lists —
+                # which carry no status at all — into plan-to-watch.
+                status = "Planning"
+            else:
+                status = "Synced"
         timestamp = item.get("updated_at") or item.get("last_updated") or time.time()
         state = {
             "provider": provider,
@@ -290,6 +296,15 @@ class LibraryStore:
                 if section not in sections:
                     sections[section] = time.time()
                     added += 1
+                if section == SECTION_WATCHLIST:
+                    # Remember whether the source actually meant plan-to-watch.
+                    # The Library is the hub, so anything it cannot answer here
+                    # is a question the next service downstream has to guess at
+                    # — and PMDB's watchlist guessed "yes" for everything.
+                    planned = is_planned(item)
+                    if planned is not None and entry.get("planned") is not True:
+                        entry["planned"] = planned
+                        changed = True
                 if source and source not in entry.setdefault("sources", []):
                     entry["sources"].append(source)
                     changed = True
@@ -308,6 +323,8 @@ class LibraryStore:
                     continue
                 if entry.get("sections", {}).pop(section, None) is not None:
                     deleted += 1
+                    if section == SECTION_WATCHLIST:
+                        entry.pop("planned", None)
                 # An entry with no sections and no watch history is not "in" the
                 # library any more; keeping it would make removals invisible.
                 if not entry.get("sections") and not entry.get("watched") and not entry.get("resume"):
@@ -552,11 +569,18 @@ class LibraryStore:
                 return out
             if section == "all":
                 return [self._as_sync_item(entry) for entry in self._items.values()]
-            return [
-                self._as_sync_item(entry)
-                for entry in self._items.values()
-                if section in (entry.get("sections") or {})
-            ]
+            out = []
+            for entry in self._items.values():
+                if section not in (entry.get("sections") or {}):
+                    continue
+                item = self._as_sync_item(entry)
+                if section == SECTION_WATCHLIST and entry.get("planned") is not None:
+                    # Pass the source's own answer on. An entry stored before
+                    # this existed carries no flag, and stays unknown rather
+                    # than being asserted either way.
+                    item[PLANNED_FLAG] = bool(entry.get("planned"))
+                out.append(item)
+            return out
 
     def entries(self) -> list[dict]:
         """Every stored entry, for the Library UI."""

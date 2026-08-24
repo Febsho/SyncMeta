@@ -546,6 +546,48 @@ quietly sync a second list), and a read never creates it — only a write does,
 since conjuring a Picks list on an account that never had one, just to report it
 empty, is the kind of side effect a source is not allowed to have.
 
+**PublicMetaDB's native watchlist is a plan-to-watch list, and only that.**
+Several unrelated things map onto `CATEGORY_WATCHLIST` because it is the only
+category that fits them — a curated MDBList list, a Trakt personal or liked
+list, PMDB's own Picks — but none of them means "plan to watch". Treating the
+category as if it did filled a real watchlist with 4,560 entries that mirrored
+the user's collection almost exactly.
+
+`providers.PLANNED_FLAG` is the answer: every adapter stamps each watchlist item
+with whether the list it came from actually means plan-to-watch — true for SIMKL
+`plantowatch`, AniList `PLANNING`, Trakt's own watchlist, MDBList's own
+`/watchlist` and PMDB's native watchlist; false for every curated or custom list.
+`is_planned` returns True/False/**None**, and None is load-bearing: an item
+stored before the flag existed, or produced by a third-party adapter, is accepted
+rather than silently dropped. Only an explicit False is refused.
+
+Three things this has to keep right:
+
+* **The refusal shapes the diff, not just the write.** `ProviderAdapter.accepts`
+  is consulted in `_run_category` *before* the source set is built, and refused
+  items are counted into `PairCategoryStats.skipped_unsupported`. Filtering only
+  at the write would leave the item in the source set looking present, so a
+  stale copy already on the target could never be recognised as stale — and the
+  entries the user wants gone could never be removed. `PmdbAdapter.add` filters
+  again anyway, so a direct adapter call cannot bypass it either.
+* **A named destination list is exempt.** `target_list` starting with `list:`, or
+  `picks`, means the user chose that list, and the plan-to-watch rule does not
+  apply there.
+* **The Library must not launder a curated list.** It is the hub, so what it
+  cannot answer the next service downstream has to guess at. It used to record
+  *any* watchlist-section item as "Planning" whether or not the source said so,
+  which is exactly how MDBList lists reached PMDB looking like plan-to-watch. It
+  now persists `entry["planned"]` from the flag, emits it on a watchlist read,
+  and clears it when the item leaves the watchlist section. Being planned on any
+  one source wins — the same title can sit in a curated list *and* genuinely be
+  planned elsewhere.
+
+Removing the entries that should never have been there is `removal_mode`'s job,
+not this rule's: `managed` deletes only keys the pair itself wrote, so anything
+added to PMDB by hand survives. The large-removal guard still applies, so a
+first cleanup run of thousands of entries is paused and reported rather than
+performed.
+
 **A destination list is only offered where the service supports one.**
 `supports_target_lists` is true for Trakt (`/users/{user}/lists/{slug}/items`) and
 PMDB, false for SIMKL and AniList (no writable custom lists) and MDBList (no

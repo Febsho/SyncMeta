@@ -98,6 +98,48 @@ VISIBILITY_LABELS = {
 }
 
 
+#: Marker an adapter puts on a watchlist item to say whether it is genuinely
+#: *planned* — something the user intends to watch — rather than merely a member
+#: of some list that happens to map onto the watchlist category.
+#:
+#: The two are not the same thing, and conflating them is what filled a
+#: PublicMetaDB watchlist with thousands of entries nobody planned to watch. A
+#: curated MDBList list, a Trakt personal list and PMDB's Picks all answer
+#: ``CATEGORY_WATCHLIST`` because that is the only category they fit, but none of
+#: them means "plan to watch". Only a real plan-to-watch source does: SIMKL
+#: ``plantowatch``, AniList ``PLANNING``, Trakt's own watchlist, MDBList's own
+#: ``/watchlist``, PMDB's native watchlist.
+PLANNED_FLAG = "_syncmeta_planned"
+
+#: Statuses that mean plan-to-watch, across the providers that name one.
+PLANNED_STATUSES = frozenset({
+    "plantowatch", "plan_to_watch", "plan-to-watch", "planning", "planned",
+})
+
+
+def mark_planned(items: list[dict], planned: bool) -> list[dict]:
+    """Stamp a batch of items with whether their source means plan-to-watch."""
+    return [{**item, PLANNED_FLAG: bool(planned)} for item in items or []]
+
+
+def is_planned(item: dict) -> bool | None:
+    """True, False, or None when the source never said.
+
+    None matters: an item stored before this flag existed, or produced by a
+    third-party adapter, must not be silently dropped. Only an explicit False —
+    a source that positively is not plan-to-watch — is refused.
+    """
+    if not isinstance(item, dict) or PLANNED_FLAG not in item:
+        return None
+    return bool(item.get(PLANNED_FLAG))
+
+
+def plan_to_watch_only(items: list[dict]) -> tuple[list[dict], int]:
+    """Split watchlist items into the plan-to-watch ones and a count of the rest."""
+    kept = [item for item in items or [] if is_planned(item) is not False]
+    return kept, len(items or []) - len(kept)
+
+
 def item_key(item: dict) -> str:
     """Return a stable cross-provider identity key for an item.
 
@@ -439,6 +481,16 @@ class ProviderAdapter:
         """Human-readable explanation when ``can_write()`` is False."""
         return ""
 
+    def accepts(self, category: str, item: dict, target_list: str = "") -> bool:
+        """Whether this target will actually store ``item`` in ``category``.
+
+        Declared rather than discovered after the fact, because it has to shape
+        the *diff*, not just the write: an item the target refuses must not sit
+        in the source set pretending to be present, or a stale entry the target
+        already holds could never be recognised as stale and removed.
+        """
+        return True
+
     def readable_categories(self) -> tuple[str, ...]:
         return self.reads
 
@@ -620,7 +672,8 @@ class TraktAdapter(ProviderAdapter):
                 items.append(item)
 
         if not selected or "watchlist" in selected:
-            _extend(self._client.get_watchlist())
+            # Trakt's own watchlist is the plan-to-watch list.
+            _extend(mark_planned(self._client.get_watchlist(), True))
         for key in selected:
             if not key.startswith("list:"):
                 continue
@@ -628,7 +681,8 @@ class TraktAdapter(ProviderAdapter):
             if "/" not in reference:
                 continue
             user, slug = reference.split("/", 1)
-            _extend(self._client.get_list_items(user, slug), key)
+            # A personal or liked list is a list, not an intention to watch.
+            _extend(mark_planned(self._client.get_list_items(user, slug), False), key)
         return items
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
@@ -827,10 +881,15 @@ class SimklAdapter(ProviderAdapter):
 
     def _fetch_status(self, status: str) -> list[dict]:
         out: list[dict] = []
+        planned = str(status or "").strip().lower() in PLANNED_STATUSES
         for media_type in self._media_types:
             grouped = self._client.get_status(status, [media_type]) or {}
             for item in grouped.get(media_type, []) or []:
-                out.append({**item, "_syncmeta_source_status": status})
+                out.append({
+                    **item,
+                    "_syncmeta_source_status": status,
+                    PLANNED_FLAG: planned,
+                })
         return out
 
     def fetch(self, category: str, source_lists: list[str] | None = None) -> list[dict]:
@@ -849,8 +908,13 @@ class SimklAdapter(ProviderAdapter):
             items: list[dict] = []
             seen: set[str] = set()
             for status, media_type in selected:
+                planned = str(status or "").strip().lower() in PLANNED_STATUSES
                 for item in self._client.get_status(status, [media_type]).get(media_type, []) or []:
-                    item = {**item, "_syncmeta_source_status": status}
+                    item = {
+                        **item,
+                        "_syncmeta_source_status": status,
+                        PLANNED_FLAG: planned,
+                    }
                     key = item_key(item)
                     if key in seen:
                         continue
@@ -1005,6 +1069,7 @@ class AniListAdapter(ProviderAdapter):
             items: list[dict] = []
             seen: set[str] = set()
             for status, _label, _category in self._STATUSES:
+                planned = status.strip().lower() in PLANNED_STATUSES
                 for item in self._client.get_status(status) or []:
                     if not selected_custom.intersection(item.get("anilist_custom_lists") or []):
                         continue
@@ -1012,7 +1077,7 @@ class AniListAdapter(ProviderAdapter):
                     if key in seen:
                         continue
                     seen.add(key)
-                    items.append(item)
+                    items.append({**item, PLANNED_FLAG: planned})
             return items
 
         by_status = {status: cat for status, _label, cat in self._STATUSES}
@@ -1026,18 +1091,22 @@ class AniListAdapter(ProviderAdapter):
             items: list[dict] = []
             seen: set[str] = set()
             for status in selected:
+                planned = status.strip().lower() in PLANNED_STATUSES
                 for item in self._client.get_status(status) or []:
                     key = item_key(item)
                     if key in seen:
                         continue
                     seen.add(key)
-                    items.append(item)
+                    items.append({**item, PLANNED_FLAG: planned})
             return items
 
         status = self._STATUS_FOR_CATEGORY.get(category)
         if not status:
             return self._unsupported(category, "read")
-        return list(self._client.get_status(status) or [])
+        return mark_planned(
+            self._client.get_status(status) or [],
+            status.strip().lower() in PLANNED_STATUSES,
+        )
 
     def add(
         self, category: str, items: list[dict], target_list: str = "",
@@ -1196,25 +1265,27 @@ class PmdbAdapter(ProviderAdapter):
 
     def _pmdb_watchlist_items(self, source_lists: list[str] | None) -> list[dict]:
         selected = [str(key) for key in (source_lists or []) if str(key).strip()]
-        list_ids: list[str] = []
+        # (list id, whether that list means plan-to-watch). Only the native
+        # watchlist does: Picks is a curated shelf and a custom list is a list.
+        list_ids: list[tuple[str, bool]] = []
         if not selected or "watchlist" in selected:
             native = self._watchlist_id()
             if native:
-                list_ids.append(native)
+                list_ids.append((native, True))
         # Picks is only read when it was actually asked for. Folding it into the
         # default would make every plain watchlist pair quietly sync a second
         # list the user never selected.
         if "picks" in selected:
             picks = self._picks_id()
             if picks:
-                list_ids.append(picks)
+                list_ids.append((picks, False))
         for key in selected:
             if key.startswith("list:"):
-                list_ids.append(key.split(":", 1)[1])
+                list_ids.append((key.split(":", 1)[1], False))
 
         items: list[dict] = []
         seen: set[str] = set()
-        for list_id in list_ids:
+        for list_id, planned in list_ids:
             for raw in self._client.get_list_items(list_id) or []:
                 normalized = self._normalize_pmdb_entry(raw)
                 if not normalized:
@@ -1223,7 +1294,7 @@ class PmdbAdapter(ProviderAdapter):
                 if key in seen:
                     continue
                 seen.add(key)
-                items.append(normalized)
+                items.append({**normalized, PLANNED_FLAG: planned})
         return items
 
     def _pmdb_collection_items(self, source_lists: list[str] | None) -> list[dict]:
@@ -1293,6 +1364,21 @@ class PmdbAdapter(ProviderAdapter):
             out.append({"key": f"list:{list_id}", "label": str(entry.get("name") or f"List {list_id}")})
         return out
 
+    def accepts(self, category: str, item: dict, target_list: str = "") -> bool:
+        """PublicMetaDB's native watchlist is a plan-to-watch list.
+
+        A named destination is exempt — there the user chose the list — but the
+        native watchlist takes only what a source actually declared as planned.
+        An item whose source never said either way is still accepted: it may
+        predate the flag, and dropping it would be the opposite failure.
+        """
+        destination = str(target_list or "").strip()
+        if category != CATEGORY_WATCHLIST:
+            return True
+        if destination.startswith("list:") or destination == "picks":
+            return True
+        return is_planned(item) is not False
+
     def add(
         self, category: str, items: list[dict], target_list: str = "",
         visibility: str = VISIBILITY_PRIVATE,
@@ -1319,9 +1405,25 @@ class PmdbAdapter(ProviderAdapter):
                 totals["added"] += len(payload)
             return totals
         if category == CATEGORY_WATCHLIST:
-            list_id = self._watchlist_id(visibility)
-            if not list_id:
-                totals["not_found"] = len(items)
+            # The native watchlist is a plan-to-watch list, so only plan-to-watch
+            # sources may write to it. Several things map onto this category
+            # without meaning it — a curated MDBList list, a Trakt personal list,
+            # Picks — and letting them through is what filled a watchlist with
+            # thousands of titles nobody planned to watch. An item whose source
+            # never declared either way is still allowed: it may predate the
+            # flag, and silently dropping it would be the opposite failure.
+            # A named destination list is exempt; there the user chose the list.
+            items, not_planned = plan_to_watch_only(items)
+            if not_planned:
+                logger.info(
+                    "PublicMetaDB watchlist: skipped %d item(s) that are not "
+                    "plan-to-watch; the native watchlist only takes planned items",
+                    not_planned,
+                )
+                totals["not_found"] += not_planned
+            list_id = self._watchlist_id(visibility) if items else None
+            if items and not list_id:
+                totals["not_found"] += len(items)
                 return totals
             payload = []
             for item in items:
@@ -1628,20 +1730,26 @@ class MdbListAdapter(ProviderAdapter):
         seen: set[str] = set()
 
         if self._wants_native(category, source_lists):
+            # MDBList's own /watchlist is a plan-to-watch list; /sync/collection
+            # and /sync/watched are not.
+            native_planned = category == CATEGORY_WATCHLIST
             for row in self._client.get_sync_items(category) or []:
                 key = item_key(row)
                 if key not in seen:
                     seen.add(key)
-                    items.append(row)
+                    items.append({**row, PLANNED_FLAG: native_planned})
 
         # History is account-level only: a curated list carries no watch dates,
         # so folding one in would invent history that never happened.
         if category != CATEGORY_HISTORY and (picked_lists or not selected):
+            # A curated list is a list. It answers both watchlist and collection
+            # because it has no watched/unwatched semantics — which is exactly
+            # why it cannot mean "plan to watch" either.
             for row in self._selected_items(picked_lists or None):
                 key = item_key(row)
                 if key not in seen:
                     seen.add(key)
-                    items.append(row)
+                    items.append({**row, PLANNED_FLAG: False})
         return items
 
     def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
