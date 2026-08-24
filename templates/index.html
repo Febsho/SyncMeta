@@ -8505,14 +8505,32 @@
     // the item counts the pair results report. Both are real counters written by
     // the pipeline; when neither has run yet the tile shows a dash, not a zero
     // dressed up as an achievement.
+    // Every pair is counted exactly once, and only pairs that still exist.
+    //
+    // A pair run writes its outcome to two places: a row in `last_results`
+    // whose `items_fetched` is the sum of its categories' `source_items`, and
+    // `last_pair_results[pair_id].checked`, which is that same sum. Adding both
+    // reported twice what the run actually looked at. And `last_pair_results`
+    // is keyed by pair id, so a pair the user has since deleted kept adding its
+    // old count on every render — which is what made this number climb after
+    // runs that changed nothing.
     function syncedItemTotal(profile, results) {
       let total = 0;
       let seen = false;
+      const counted = new Set();
       for (const row of results || []) {
         if (typeof row.items_fetched === 'number') { total += row.items_fetched; seen = true; }
+        if (row.pair_id) counted.add(String(row.pair_id));
       }
       const pairResults = (profile && profile.last_pair_results) || {};
+      const livePairs = new Set(
+        (((profile || {}).options || {}).sync_pairs || [])
+          .map(pair => String((pair || {}).pair_id || ''))
+          .filter(Boolean)
+      );
       for (const key of Object.keys(pairResults)) {
+        if (counted.has(key)) continue;
+        if (livePairs.size && !livePairs.has(key)) continue;
         const value = pairResults[key];
         if (value && typeof value.checked === 'number') { total += value.checked; seen = true; }
       }

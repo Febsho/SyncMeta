@@ -1087,3 +1087,67 @@ class ProfileStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PairResultPruningTests(unittest.TestCase):
+    """A deleted pair must stop contributing to the dashboard's totals.
+
+    `last_pair_results` is keyed by pair id and was never pruned, so a pair the
+    user removed kept reporting its old `checked` count for the life of the
+    profile. The Items-synced tile sums those counts, which is how it could only
+    ever climb — a run that changed nothing still rendered a bigger number than
+    the run before it.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.store = ProfileStore(Path(self._dir.name) / "profiles.json")
+        self.profile_id = self.store.create_profile("secret", {}, {})["profile_id"]
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _private(self) -> dict:
+        return self.store._profiles[self.store._normalize_profile_id(self.profile_id)]
+
+    def _save_pairs(self, *pair_ids: str) -> None:
+        self.store.update_sync_pairs(self.profile_id, [
+            {
+                "source": "library", "target": "pmdb",
+                "pair_id": pair_id, "categories": ["watchlist"],
+            }
+            for pair_id in pair_ids
+        ])
+
+    def _record(self, *pair_ids: str) -> None:
+        self.store.update_pair_last_results(self.profile_id, [
+            {
+                "pair_id": pair_id, "source": "library", "target": "pmdb",
+                "categories": [], "checked": 1000,
+            }
+            for pair_id in pair_ids
+        ])
+
+    def test_removing_a_pair_drops_its_last_result(self) -> None:
+        self._save_pairs("a", "b")
+        self._record("a", "b")
+        self._save_pairs("a")
+        self.assertEqual(sorted(self._private()["last_pair_results"]), ["a"])
+
+    def test_a_surviving_pair_keeps_its_last_result(self) -> None:
+        # Saving pairs must not wipe the outcomes still on screen.
+        self._save_pairs("a", "b")
+        self._record("a", "b")
+        self._save_pairs("a", "b", "c")
+        self.assertEqual(sorted(self._private()["last_pair_results"]), ["a", "b"])
+
+    def test_managed_keys_of_a_removed_pair_are_kept(self) -> None:
+        # Ownership bookkeeping, not display state: dropping it would silently
+        # turn a managed pair additive if the pair were re-added.
+        self._save_pairs("a", "b")
+        self.store.update_pair_managed_keys(
+            self.profile_id, {"b": {"watchlist": ["movie:tmdb:1"]}},
+        )
+        self._save_pairs("a")
+        managed = (self._private().get("activity_state") or {}).get("pair_managed_keys") or {}
+        self.assertIn("b", managed)

@@ -2314,6 +2314,24 @@ class ProfileStore:
                     ),
                 }
             profile["pair_sync_schedule"] = schedule
+            # Drop the last-run record of pairs that no longer exist. It is
+            # display state keyed by pair id, and nothing pruned it before, so a
+            # deleted pair kept contributing its "checked" count to the
+            # dashboard's Items-synced total forever — the number could only
+            # ever go up, however little the run actually did. The schedule
+            # above is rebuilt from the live pairs for the same reason.
+            #
+            # `pair_managed_keys` is deliberately *not* pruned here: it records
+            # what a pair previously wrote, and dropping it would silently turn
+            # a managed pair additive if the user removed and re-added it.
+            live_ids = {pair["pair_id"] for pair in normalized}
+            stored_results = profile.get("last_pair_results")
+            if isinstance(stored_results, dict):
+                profile["last_pair_results"] = {
+                    pair_id: entry
+                    for pair_id, entry in stored_results.items()
+                    if pair_id in live_ids
+                }
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
