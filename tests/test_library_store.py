@@ -299,3 +299,77 @@ class LibraryAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LibraryPlayTests(unittest.TestCase):
+    """The hub has to be able to answer "watched three times", not just "watched".
+
+    A slot holding one timestamp flattens every rewatch it is handed, so a
+    Library sitting between two services would quietly destroy the very thing
+    the pair was meant to carry across.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.store = LibraryStore(Path(self._dir.name) / "library.json")
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _play(self, watched_at: str, **extra) -> dict:
+        return {
+            "media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan",
+            "season": 1, "episode": 3, "watched_at": watched_at, **extra,
+        }
+
+    def _history_stamps(self) -> list[str]:
+        return [row["watched_at"] for row in self.store.fetch("history")]
+
+    def test_a_second_viewing_is_kept_beside_the_first(self) -> None:
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        result = self.store.mark_watched([self._play("2024-06-01T20:00:00Z")])
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(
+            self._history_stamps(),
+            ["2024-01-01T20:00:00Z", "2024-06-01T20:00:00Z"],
+        )
+
+    def test_the_same_play_arriving_twice_is_still_one_play(self) -> None:
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        result = self.store.mark_watched([self._play("2024-01-01T20:00:00.000+00:00")])
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(self._history_stamps(), ["2024-01-01T20:00:00Z"])
+
+    def test_a_presence_only_row_never_invents_a_viewing(self) -> None:
+        # A watched-state read carries no play date of its own; stamping "now"
+        # onto it and calling it a rewatch would grow the history every run.
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        result = self.store.mark_watched([self._play("")])
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(len(self._history_stamps()), 1)
+
+    def test_a_derived_row_never_counts_as_a_rewatch(self) -> None:
+        # AniList history is reconstructed from a progress count: its date is
+        # the entry's, not a play's, and it moves whenever the entry is touched.
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        result = self.store.mark_watched([
+            self._play("2025-05-05T00:00:00Z", cursor_exempt=True, anilist_derived=True),
+        ])
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(len(self._history_stamps()), 1)
+
+    def test_an_entry_stored_before_plays_existed_keeps_its_one_date(self) -> None:
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        self.store.entries()  # no-op; state is mutated directly below
+        for entry in self.store._items.values():
+            entry.pop("plays", None)
+        self.assertEqual(self._history_stamps(), ["2024-01-01T20:00:00Z"])
+        result = self.store.mark_watched([self._play("2024-06-01T20:00:00Z")])
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(len(self._history_stamps()), 2)
+
+    def test_unwatching_an_episode_clears_all_of_its_plays(self) -> None:
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")])
+        self.store.mark_watched([self._play("2024-06-01T20:00:00Z")])
+        self.store.unmark_watched([self._play("2024-01-01T20:00:00Z")])
+        self.assertEqual(self._history_stamps(), [])

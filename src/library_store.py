@@ -21,6 +21,13 @@ resolution worth doing.
 of its episodes are. Storing a set of ``(season, episode)`` pairs is what lets
 the Library answer which episodes are watched without inventing a completion
 percentage from a count, which is what made SIMKL's aggregate counts unusable.
+
+Each of those slots also keeps a ``plays`` list of every timestamp it was given,
+because "watched" and "watched three times" are different answers and the hub
+has to be able to give the second one. ``watched`` keeps the first date, which
+is what the coverage views read; ``plays`` is what a rewatch is carried out of
+here on. A row with no timestamp of its own only ever confirms presence — it is
+watched *state*, not a play — so it can never add a viewing.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ import time
 from pathlib import Path
 
 from .media_kind import KIND_ANIME, KIND_ANIME_MOVIE, classify, normalize_namespace
+from .providers import normalize_watched_at
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +175,11 @@ class LibraryStore:
             "sections": {},
             "seasons": {},
             "watched": {},
+            # Every viewing, not just the first: {slot: [timestamp, ...]}.
+            # `watched` keeps one date per episode because that is what the
+            # coverage views ask for; `plays` is what makes the Library able to
+            # carry a rewatch out to a service that records plays.
+            "plays": {},
             "resume": {},
             "sources": [],
             "provider_states": {},
@@ -330,6 +343,7 @@ class LibraryStore:
                         skipped += 1
                         continue
                 watched = entry.setdefault("watched", {})
+                plays = entry.setdefault("plays", {})
                 replacement = str(item.get("_syncmeta_replaces_episode") or "").strip()
                 if replacement and replacement != slot:
                     # Older SIMKL aggregate-history imports intentionally
@@ -338,17 +352,50 @@ class LibraryStore:
                     # slot they supersede so the next sync repairs existing
                     # libraries without touching unrelated watched episodes.
                     watched.pop(replacement, None)
+                    plays.pop(replacement, None)
+                reported = str(item.get("watched_at") or "").strip()
                 if slot not in watched:
-                    watched[slot] = str(item.get("watched_at") or "") or time.strftime(
+                    watched[slot] = reported or time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                     )
+                    plays[slot] = [watched[slot]]
                     added += 1
+                elif self._record_extra_play(plays, slot, watched[slot], item, reported):
+                    added += 1
+                    changed = True
                 if source and source not in entry.setdefault("sources", []):
                     entry["sources"].append(source)
                     changed = True
             if added or skipped or changed:
                 self._save_locked()
         return {"added": added, "not_found": skipped, "batches": 1 if items else 0}
+
+    @staticmethod
+    def _record_extra_play(plays: dict, slot: str, first_seen: str, item: dict, reported: str) -> bool:
+        """Record a rewatch of an episode the Library already has.
+
+        Two rules keep this from inventing history. A row carrying no timestamp
+        of its own is *presence* — a watched-state read, an AniList progress
+        count, a SIMKL aggregate — and says nothing about how many times the
+        episode was played, so it can only ever confirm what is already stored.
+        And a timestamp already on file is the same play arriving again, which
+        is what a re-read of the source looks like; only a genuinely new instant
+        is a second viewing.
+        """
+        if not reported or item.get("cursor_exempt") or item.get("anilist_derived"):
+            return False
+        known = plays.get(slot)
+        if not isinstance(known, list) or not known:
+            # An entry stored before plays existed: seed it from the one date
+            # it kept, so the first play is not double-counted as a rewatch.
+            known = [first_seen] if first_seen else []
+            plays[slot] = known
+        stamps = {normalize_watched_at(value) for value in known}
+        stamp = normalize_watched_at(reported)
+        if not stamp or stamp in stamps:
+            return False
+        known.append(reported)
+        return True
 
     def unmark_watched(self, items: list[dict]) -> dict:
         deleted = 0
@@ -363,6 +410,7 @@ class LibraryStore:
                 else:
                     slot = _episode_key(item.get("season"), item.get("episode"))
                 if slot and watched.pop(slot, None) is not None:
+                    (entry.get("plays") or {}).pop(slot, None)
                     deleted += 1
                 if not entry.get("sections") and not entry.get("watched") and not entry.get("resume"):
                     self._items.pop(entry["key"], None)
@@ -473,14 +521,22 @@ class LibraryStore:
             if section == "history":
                 out = []
                 for entry in self._items.values():
+                    stored_plays = entry.get("plays") or {}
                     for slot, watched_at in (entry.get("watched") or {}).items():
                         season, _, episode = slot.partition("x")
-                        if entry.get("media_type") == "movie":
-                            item = self._as_sync_item(entry)
-                        else:
-                            item = self._as_sync_item(entry, int(season), int(episode))
-                        item["watched_at"] = watched_at
-                        out.append(item)
+                        # One row per *play*. Emitting only the stored date would
+                        # make the Library flatten every rewatch it was given,
+                        # which is exactly what it exists not to do.
+                        stamps = stored_plays.get(slot)
+                        if not isinstance(stamps, list) or not stamps:
+                            stamps = [watched_at]
+                        for stamp in stamps:
+                            if entry.get("media_type") == "movie":
+                                item = self._as_sync_item(entry)
+                            else:
+                                item = self._as_sync_item(entry, int(season), int(episode))
+                            item["watched_at"] = stamp
+                            out.append(item)
                 return out
             if section == "resume":
                 out = []

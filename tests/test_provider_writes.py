@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from src.anilist_client import AniListClient
 from src.config import AniListConfig, SimklConfig, TraktConfig
+from src.mdblist_client import MdbListClient
 from src.simkl_client import SimklClient
 from src.trakt_client import TraktClient
 
@@ -306,3 +307,103 @@ class AniListWriteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpisodeScopedHistoryTests(unittest.TestCase):
+    """Watching one episode must never mark the whole show watched.
+
+    Every one of these services reads a show entry with no seasons tree as *the
+    entire show*. A history row that names only the series is therefore not a
+    smaller write, it is a much larger one: it claims every season the user has
+    never seen. Such a row is dropped and reported, never flattened and sent.
+    """
+
+    def test_trakt_history_drops_a_show_row_with_no_episode(self) -> None:
+        payload = TraktClient._build_sync_payload(
+            [_episode(None, None)], with_watched_at=True, episode_scoped=True,
+        )
+        self.assertNotIn("shows", payload)
+        self.assertEqual(payload["_dropped"], 1)
+
+    def test_trakt_history_keeps_the_episodes_beside_a_dropped_row(self) -> None:
+        payload = TraktClient._build_sync_payload(
+            [_episode(None, None), _episode(1, 3)],
+            with_watched_at=True, episode_scoped=True,
+        )
+        seasons = payload["shows"][0]["seasons"]
+        self.assertEqual([e["number"] for e in seasons[0]["episodes"]], [3])
+        self.assertEqual(payload["_dropped"], 1)
+
+    def test_trakt_watchlist_still_sends_the_whole_show(self) -> None:
+        # Only history is episode-scoped; a watchlist entry *is* the series.
+        payload = TraktClient._build_sync_payload([_episode(None, None)])
+        self.assertEqual(payload["shows"], [{"ids": {"tmdb": 1429}}])
+
+    def test_trakt_add_to_history_reports_the_dropped_row(self) -> None:
+        client = TraktClient(TraktConfig(client_id="c", access_token="t"))
+        with patch.object(TraktClient, "_post", return_value={"added": {"episodes": 1}}) as post:
+            totals = client.add_to_history([_episode(None, None), _episode(1, 3)])
+        self.assertEqual(totals["not_found"], 1)
+        self.assertNotIn("_dropped", post.call_args[0][1])
+
+    def test_simkl_history_drops_a_show_row_with_no_episode(self) -> None:
+        payload = SimklClient._build_sync_payload(
+            [_episode(None, None)], with_watched_at=True, episode_scoped=True,
+        )
+        self.assertNotIn("shows", payload)
+        self.assertEqual(payload["_dropped"], 1)
+
+    def test_simkl_stamps_each_episode_rather_than_the_show(self) -> None:
+        # Episodes of one show share an entry, so a show-level watched_at would
+        # put the first episode's date on every other episode in the batch.
+        payload = SimklClient._build_sync_payload(
+            [
+                _episode(1, 1, watched_at="2024-01-01T00:00:00Z"),
+                _episode(1, 2, watched_at="2024-02-02T00:00:00Z"),
+            ],
+            with_watched_at=True, episode_scoped=True,
+        )
+        show = payload["shows"][0]
+        self.assertNotIn("watched_at", show)
+        episodes = show["seasons"][0]["episodes"]
+        self.assertEqual(
+            [e["watched_at"] for e in episodes],
+            ["2024-01-01T00:00:00Z", "2024-02-02T00:00:00Z"],
+        )
+
+    def test_simkl_watchlist_still_sends_the_whole_show(self) -> None:
+        payload = SimklClient._build_sync_payload([_episode(None, None)], to_list="plantowatch")
+        self.assertEqual(len(payload["shows"]), 1)
+        self.assertNotIn("seasons", payload["shows"][0])
+
+    def test_mdblist_history_sends_an_episode_tree(self) -> None:
+        payload = MdbListClient._to_sync_payload(
+            [_episode(1, 3, imdb_id="tt2560140", watched_at="2024-01-01T00:00:00Z")],
+            episode_scoped=True,
+        )
+        seasons = payload["shows"][0]["seasons"]
+        self.assertEqual(seasons[0]["number"], 1)
+        self.assertEqual(seasons[0]["episodes"][0]["number"], 3)
+        self.assertEqual(payload["_dropped"], 0)
+
+    def test_mdblist_history_drops_a_show_row_with_no_episode(self) -> None:
+        payload = MdbListClient._to_sync_payload(
+            [_episode(None, None, imdb_id="tt2560140")], episode_scoped=True,
+        )
+        self.assertEqual(payload["shows"], [])
+        self.assertEqual(payload["_dropped"], 1)
+
+    def test_mdblist_reads_watched_episodes_back_one_row_each(self) -> None:
+        # Flattening the tree to the series would make every episode look
+        # unsynced and the pair would rewrite the whole show on every run.
+        rows = MdbListClient._from_sync_payload({
+            "shows": [{
+                "show": {"title": "Show", "ids": {"tmdb": 1429}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 1, "watched_at": "2024-01-01T00:00:00Z"},
+                    {"number": 2, "watched_at": "2024-01-02T00:00:00Z"},
+                ]}],
+            }],
+        }, "history")
+        self.assertEqual([(r["season"], r["episode"]) for r in rows], [(1, 1), (1, 2)])
+        self.assertEqual(rows[1]["watched_at"], "2024-01-02T00:00:00Z")

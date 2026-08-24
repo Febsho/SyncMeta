@@ -313,6 +313,50 @@ movie at `0x0`. A show play with no episode number is *dropped*, never guessed:
 inventing one claims episodes nobody watched, which is exactly what SIMKL's
 aggregate counts would produce. Season 0 is specials and is kept.
 
+**A history row that names no episode is never written to any service.** Trakt,
+SIMKL and MDBList all read a show entry carrying no `seasons` tree as *the whole
+show*, so flattening one watched episode to its series is not a smaller write —
+it marks every season the user has never seen. `providers.is_episode_scoped` /
+`episode_scoped_history` state the rule, each client's payload builder takes an
+`episode_scoped` flag for its history endpoints, and dropped rows are counted
+into `not_found` rather than silently discarded. Watchlist and collection are
+untouched by this: there a bare show entry genuinely *is* the item. MDBList had
+the worst version of it — `_to_sync_payload` dropped season/episode outright, so
+every episode written to `/sync/watched` marked the whole show; it now sends the
+Trakt-shaped tree, and `_from_sync_payload` reads that tree back one row per
+episode so the next run does not see the whole show as unsynced. SIMKL also
+stamped the play date on the *show*, which put the first episode's date on every
+other episode grouped into the same entry; `watched_at` now rides the episode.
+
+**Watching something twice is two rows, and both have to arrive.** `item_key`
+answers "which episode", so every play of one episode shares a key — diffing
+history on identity alone keeps the first row and discards every rewatch, which
+is why a second viewing never reached the other service. `cross_sync._history_adds`
+matches a play on identity *and* `providers.normalize_watched_at` (UTC seconds;
+sub-second precision is dropped because no provider round-trips it, and two
+spellings of one instant must not read as two plays), and it is used by both the
+one-way and the two-way path.
+
+Extra plays only go to a target that can hold them. `ProviderAdapter.records_plays`
+declares that — true for Trakt, PublicMetaDB and the Library, false for SIMKL,
+AniList and MDBList, which report watched *state*: one row back however many
+plays they were sent, so writing a rewatch there would leave it looking missing
+on every subsequent run and the pair would re-send it forever. It is declared,
+never sniffed. An episode the target lacks entirely is always added, whatever
+kind of target it is. `ReadCache.apply_write` is likewise exempted for history:
+its usual replace-on-add would drop the older play and make a rewatch just
+written look like the only one.
+
+**The Library keeps every play, not just the first.** A slot in `watched` still
+holds one date, because that is what the coverage views read; `plays[slot]` is
+the full list, and `fetch("history")` emits one row per play. Two rules keep it
+from inventing history: a row carrying no timestamp of its own is *presence* — a
+watched-state read, an AniList progress count, a SIMKL aggregate — and can only
+ever confirm what is stored; and a `cursor_exempt` or `anilist_derived` row is
+never a rewatch, since its date is the entry's and moves whenever the entry is
+touched. An entry written before `plays` existed is seeded from its one date, so
+its first play is not recounted as a second.
+
 **"Anime" is a flag on a TMDB namespace, never a third namespace.**
 `src/media_kind.py` classifies into movie / show / anime / anime_movie. The
 namespace comes from TMDB (or Fribb's mapping key); the anime flag comes from

@@ -851,15 +851,28 @@ class TraktClient:
         return ids
 
     @classmethod
-    def _build_sync_payload(cls, items: list[dict], *, with_watched_at: bool = False) -> dict:
+    def _build_sync_payload(
+        cls,
+        items: list[dict],
+        *,
+        with_watched_at: bool = False,
+        episode_scoped: bool = False,
+    ) -> dict:
         """Group canonical items into Trakt's {movies: [...], shows: [...]} shape.
 
         When an item carries season/episode numbers the show is expressed as a
         nested seasons/episodes tree, which is how Trakt scopes history to
         individual episodes rather than a whole show.
+
+        ``episode_scoped`` is the guard that makes a history write safe. To Trakt
+        a show entry with no ``seasons`` means *the entire show*, so a row that
+        names only the series would mark every season watched because one
+        episode was. Those rows are dropped rather than sent; the caller counts
+        them as not written.
         """
         movies: list[dict] = []
         shows_by_key: dict[str, dict] = {}
+        dropped = 0
 
         for item in items:
             ids = cls._write_ids(item)
@@ -875,18 +888,24 @@ class TraktClient:
                 movies.append(entry)
                 continue
 
-            # Group episodes of the same show under one show entry.
-            key = json.dumps(ids, sort_keys=True)
-            show = shows_by_key.setdefault(key, {"ids": ids})
             season_number = item.get("season")
             episode_number = item.get("episode")
-            if season_number is None or episode_number is None:
-                continue
             try:
                 season_number = int(season_number)
                 episode_number = int(episode_number)
             except (TypeError, ValueError):
+                season_number = episode_number = None
+            if season_number is None or episode_number is None:
+                if episode_scoped:
+                    dropped += 1
+                    continue
+                # Watchlist/collection genuinely mean the whole show here.
+                shows_by_key.setdefault(json.dumps(ids, sort_keys=True), {"ids": ids})
                 continue
+
+            # Group episodes of the same show under one show entry.
+            key = json.dumps(ids, sort_keys=True)
+            show = shows_by_key.setdefault(key, {"ids": ids})
 
             seasons = show.setdefault("seasons", [])
             season = next((s for s in seasons if s.get("number") == season_number), None)
@@ -903,14 +922,33 @@ class TraktClient:
             payload["movies"] = movies
         if shows_by_key:
             payload["shows"] = list(shows_by_key.values())
+        if dropped:
+            payload["_dropped"] = dropped
         return payload
 
-    def _sync_write(self, path: str, items: list[dict], *, with_watched_at: bool = False) -> dict:
+    def _sync_write(
+        self,
+        path: str,
+        items: list[dict],
+        *,
+        with_watched_at: bool = False,
+        episode_scoped: bool = False,
+    ) -> dict:
         """POST canonical items to a Trakt /sync endpoint in batches."""
         totals: dict = {"added": 0, "deleted": 0, "not_found": 0, "batches": 0}
         for start in range(0, len(items), TRAKT_SYNC_BATCH_SIZE):
             chunk = items[start:start + TRAKT_SYNC_BATCH_SIZE]
-            payload = self._build_sync_payload(chunk, with_watched_at=with_watched_at)
+            payload = self._build_sync_payload(
+                chunk, with_watched_at=with_watched_at, episode_scoped=episode_scoped,
+            )
+            dropped = int(payload.pop("_dropped", 0) or 0)
+            if dropped:
+                logger.warning(
+                    "Trakt %s: skipped %d show row(s) with no episode number — "
+                    "sending them would mark the whole show watched",
+                    path, dropped,
+                )
+                totals["not_found"] += dropped
             if not payload:
                 continue
             response = self._post(path, payload) or {}
@@ -940,10 +978,12 @@ class TraktClient:
         return self._sync_write("/sync/collection/remove", items)
 
     def add_to_history(self, items: list[dict]) -> dict:
-        return self._sync_write("/sync/history", items, with_watched_at=True)
+        return self._sync_write(
+            "/sync/history", items, with_watched_at=True, episode_scoped=True,
+        )
 
     def remove_from_history(self, items: list[dict]) -> dict:
-        return self._sync_write("/sync/history/remove", items)
+        return self._sync_write("/sync/history/remove", items, episode_scoped=True)
 
     def add_to_custom_list(self, user: str, slug: str, items: list[dict]) -> dict:
         """Add items to one of the user's own Trakt lists."""

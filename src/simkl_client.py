@@ -216,14 +216,26 @@ class SimklClient:
         *,
         to_list: str = "",
         with_watched_at: bool = False,
+        episode_scoped: bool = False,
     ) -> dict:
         """Group canonical items into SIMKL's {movies, shows} payload shape.
 
         SIMKL groups by movies/shows like Trakt, but anime lives under `shows`
         unless it is a film, and the target list is named per item via `to`.
+
+        ``episode_scoped`` guards the history endpoints. A show entry carrying no
+        ``seasons`` tells SIMKL the whole show was watched, so a row that names
+        only the series is dropped rather than sent — otherwise watching one
+        episode marks every season the user has never seen.
+
+        For a show the play timestamp belongs on the *episode*, not on the show
+        entry: episodes of one show are grouped under a single entry, so a
+        show-level ``watched_at`` would stamp the first episode's date onto every
+        other episode in the same batch.
         """
         movies: list[dict] = []
         shows_by_key: dict[str, dict] = {}
+        dropped = 0
 
         for item in items:
             ids = cls._write_ids(item)
@@ -238,11 +250,25 @@ class SimklClient:
             if item.get("year"):
                 entry["year"] = item["year"]
             watched_at = item.get("watched_at") if with_watched_at else None
-            if watched_at:
-                entry["watched_at"] = watched_at
 
             if media_type == "movie":
+                if watched_at:
+                    entry["watched_at"] = watched_at
                 movies.append(entry)
+                continue
+
+            season_number = item.get("season")
+            episode_number = item.get("episode")
+            try:
+                season_number = int(season_number)
+                episode_number = int(episode_number)
+            except (TypeError, ValueError):
+                season_number = episode_number = None
+            if season_number is None or episode_number is None:
+                if episode_scoped:
+                    dropped += 1
+                    continue
+                shows_by_key.setdefault(json.dumps(ids, sort_keys=True), entry)
                 continue
 
             key = json.dumps(ids, sort_keys=True)
@@ -250,27 +276,23 @@ class SimklClient:
             if show is None:
                 show = entry
                 shows_by_key[key] = show
-            season_number = item.get("season")
-            episode_number = item.get("episode")
-            if season_number is None or episode_number is None:
-                continue
-            try:
-                season_number = int(season_number)
-                episode_number = int(episode_number)
-            except (TypeError, ValueError):
-                continue
             seasons = show.setdefault("seasons", [])
             season = next((s for s in seasons if s.get("number") == season_number), None)
             if season is None:
                 season = {"number": season_number, "episodes": []}
                 seasons.append(season)
-            season["episodes"].append({"number": episode_number})
+            episode: dict = {"number": episode_number}
+            if watched_at:
+                episode["watched_at"] = watched_at
+            season["episodes"].append(episode)
 
         payload: dict = {}
         if movies:
             payload["movies"] = movies
         if shows_by_key:
             payload["shows"] = list(shows_by_key.values())
+        if dropped:
+            payload["_dropped"] = dropped
         return payload
 
     def _sync_write(
@@ -280,11 +302,23 @@ class SimklClient:
         *,
         to_list: str = "",
         with_watched_at: bool = False,
+        episode_scoped: bool = False,
     ) -> dict:
         totals = {"added": 0, "not_found": 0, "batches": 0}
         for start in range(0, len(items), SIMKL_SYNC_BATCH_SIZE):
             chunk = items[start:start + SIMKL_SYNC_BATCH_SIZE]
-            payload = self._build_sync_payload(chunk, to_list=to_list, with_watched_at=with_watched_at)
+            payload = self._build_sync_payload(
+                chunk, to_list=to_list, with_watched_at=with_watched_at,
+                episode_scoped=episode_scoped,
+            )
+            dropped = int(payload.pop("_dropped", 0) or 0)
+            if dropped:
+                logger.warning(
+                    "SIMKL %s: skipped %d show row(s) with no episode number — "
+                    "sending them would mark the whole show watched",
+                    path, dropped,
+                )
+                totals["not_found"] += dropped
             if not payload:
                 continue
             response = self._post(path, payload) or {}
@@ -295,7 +329,7 @@ class SimklClient:
             if isinstance(not_found, dict):
                 missed = sum(len(v) for v in not_found.values() if isinstance(v, list))
             totals["not_found"] += missed
-            totals["added"] += max(0, len(chunk) - missed)
+            totals["added"] += max(0, len(chunk) - dropped - missed)
         return totals
 
     def add_to_list(self, items: list[dict], category: str) -> dict:
@@ -311,10 +345,12 @@ class SimklClient:
         return self._sync_write("/sync/remove-from-list", items, to_list=to_list)
 
     def add_to_history(self, items: list[dict]) -> dict:
-        return self._sync_write("/sync/history", items, with_watched_at=True)
+        return self._sync_write(
+            "/sync/history", items, with_watched_at=True, episode_scoped=True,
+        )
 
     def remove_from_history(self, items: list[dict]) -> dict:
-        return self._sync_write("/sync/history/remove", items)
+        return self._sync_write("/sync/history/remove", items, episode_scoped=True)
 
     # ── Authentication (PIN flow) ──────────────────────────────────
 

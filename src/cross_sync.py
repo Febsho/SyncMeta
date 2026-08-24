@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .providers import (
+    CATEGORY_HISTORY,
     CATEGORY_RESUME,
     MODE_ONE_WAY,
     REMOVAL_ADDITIVE,
@@ -38,6 +39,7 @@ from .providers import (
     enrich_identity,
     has_portable_identity,
     item_key,
+    normalize_watched_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,16 +147,58 @@ class ReadCache:
         removed_keys = {_key(item) for item in (removed or [])}
         added_keys = {_key(item) for item in (added or [])}
         kept = [item for item in current if _key(item) not in removed_keys]
-        # `add` is an upsert for mutable categories such as resume progress.
-        # Replace the cached old value instead of retaining two rows with the
-        # same identity until the next full provider read.
-        kept = [item for item in kept if _key(item) not in added_keys]
+        if category != CATEGORY_HISTORY:
+            # `add` is an upsert for mutable categories such as resume progress.
+            # Replace the cached old value instead of retaining two rows with the
+            # same identity until the next full provider read.
+            #
+            # History is the exception: its rows are plays, so two entries with
+            # the same identity are two viewings, and dropping the older one
+            # would make a rewatch this batch just wrote look like the only play.
+            kept = [item for item in kept if _key(item) not in added_keys]
         kept.extend(added or [])
         self._entries[key] = kept
 
     def invalidate_provider(self, provider: str) -> None:
         for key in [k for k in self._entries if k[0] == str(provider)]:
             self._entries.pop(key, None)
+
+
+def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, target_plays: dict) -> list[dict]:
+    """Pick the history rows the target is genuinely missing.
+
+    Identity alone cannot answer this. ``item_key`` says *which episode*, so
+    watching an episode three times is three rows sharing one key — diffing on
+    it keeps the first and silently discards every rewatch, which is why a
+    second viewing never reached the other service.
+
+    So a play is matched on identity *and* its timestamp, but only where the
+    target can hold more than one: a service that reports watched *state* hands
+    back a single row however many plays it was sent, so writing the extra ones
+    would leave them looking missing on every subsequent run and the pair would
+    re-send them forever. ``records_plays`` on the adapter decides that, and
+    ``target_plays`` is empty when it is false.
+
+    An episode the target does not have at all is always added, whichever kind
+    of target it is — that is the ordinary first-play case.
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for key, item in source_rows:
+        stamp = normalize_watched_at(item.get("watched_at"))
+        if key in target_by_key:
+            known = target_plays.get(key)
+            if not known:
+                # Already watched there, and the target keeps no per-play
+                # record to add a rewatch to.
+                continue
+            if not stamp or stamp in known:
+                continue
+        if (key, stamp) in seen:
+            continue
+        seen.add((key, stamp))
+        out.append(item)
+    return out
 
 
 #: A list has to be big enough, and lose enough, for a mass deletion to be
@@ -555,26 +599,45 @@ class CrossSyncService:
         # reports AniList ids and Trakt reports TMDB, so without this the same
         # show would key differently per service, nothing would ever match, and
         # the pair would re-add its entire source list on every run.
+        is_history = category == CATEGORY_HISTORY
+
         source_by_key: dict[str, dict] = {}
+        # History keeps every row, not one per episode: the extras are the
+        # rewatches, and collapsing them here is what lost them.
+        source_rows: list[tuple[str, dict]] = []
         for raw_item in source_items:
             item = enrich_identity(raw_item)
             if not has_portable_identity(item):
                 # Nothing portable to match on; count it rather than guessing.
                 result.unmapped += 1
                 continue
-            source_by_key.setdefault(self._comparison_key(item, target_list), item)
+            key = self._comparison_key(item, target_list)
+            source_by_key.setdefault(key, item)
+            if is_history:
+                source_rows.append((key, item))
 
         target_by_key: dict[str, dict] = {}
+        target_plays: dict[str, set[str]] = {}
+        keeps_plays = is_history and bool(getattr(target, "records_plays", False))
         for raw_item in target_items:
             item = enrich_identity(raw_item)
-            target_by_key.setdefault(self._comparison_key(item, target_list), item)
+            key = self._comparison_key(item, target_list)
+            target_by_key.setdefault(key, item)
+            if keeps_plays:
+                stamp = normalize_watched_at(item.get("watched_at"))
+                if stamp:
+                    target_plays.setdefault(key, set()).add(stamp)
 
-        to_add = [
-            item for key, item in source_by_key.items()
-            if key not in target_by_key
-            or (category == CATEGORY_RESUME and not self._resume_matches(item, target_by_key[key]))
-        ]
-        result.skipped_existing = len(source_by_key) - len(to_add)
+        if is_history:
+            to_add = _history_adds(source_rows, target_by_key, target_plays)
+            result.skipped_existing = max(0, len(source_rows) - len(to_add))
+        else:
+            to_add = [
+                item for key, item in source_by_key.items()
+                if key not in target_by_key
+                or (category == CATEGORY_RESUME and not self._resume_matches(item, target_by_key[key]))
+            ]
+            result.skipped_existing = len(source_by_key) - len(to_add)
 
         to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
         blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
@@ -700,18 +763,29 @@ class CrossSyncService:
                 logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
                 return result
 
+        is_history = category == CATEGORY_HISTORY
+
         def _index(raw_items, count_unmapped):
+            """Index by identity, and for history also keep every play row."""
             out: dict[str, dict] = {}
+            rows: list[tuple[str, dict]] = []
+            plays: dict[str, set[str]] = {}
             for raw in raw_items:
                 item = enrich_identity(raw)
                 if count_unmapped and not has_portable_identity(item):
                     result.unmapped += 1
                     continue
-                out.setdefault(item_key(item), item)
-            return out
+                key = item_key(item)
+                out.setdefault(key, item)
+                if is_history:
+                    rows.append((key, item))
+                    stamp = normalize_watched_at(item.get("watched_at"))
+                    if stamp:
+                        plays.setdefault(key, set()).add(stamp)
+            return out, rows, plays
 
-        first_by_key = _index(sides["first"], True)
-        second_by_key = _index(sides["second"], True)
+        first_by_key, first_rows, first_plays = _index(sides["first"], True)
+        second_by_key, second_rows, second_plays = _index(sides["second"], True)
         result.source_items = len(first_by_key)
         result.target_items = len(second_by_key)
 
@@ -735,6 +809,22 @@ class CrossSyncService:
 
         add_to_second = [first_by_key[k] for k in only_first - drop_from_first]
         add_to_first = [second_by_key[k] for k in only_second - drop_from_second]
+        if is_history:
+            # Same reasoning as the one-way path: a rewatch is a second row
+            # under one episode key, so set arithmetic on identity drops it.
+            # Only a side that keeps a per-play record can receive the extras;
+            # a watched-state service would report the single row back and the
+            # pair would re-send the rewatch on every run.
+            add_to_second = _history_adds(
+                [row for row in first_rows if row[0] not in drop_from_first],
+                second_by_key,
+                second_plays if getattr(second, "records_plays", False) else {},
+            )
+            add_to_first = _history_adds(
+                [row for row in second_rows if row[0] not in drop_from_second],
+                first_by_key,
+                first_plays if getattr(first, "records_plays", False) else {},
+            )
         differing_shared: set[str] = set()
         if category == CATEGORY_RESUME:
             for key in first_keys & second_keys:

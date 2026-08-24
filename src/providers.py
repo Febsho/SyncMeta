@@ -18,6 +18,7 @@ removal mode are recorded against, so it must be stable across runs.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from urllib.parse import quote, unquote
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,77 @@ def item_key(item: dict) -> str:
         except (TypeError, ValueError):
             pass
     return key
+
+
+#: The canonical shape a play timestamp is compared in. Providers report the
+#: same instant with different spellings ("2024-01-02T03:04:05.000Z",
+#: "2024-01-02T03:04:05+00:00"), and two spellings of one play must not read as
+#: two plays — that is how a rewatch sync turns into an endless re-add loop.
+_PLAY_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def normalize_watched_at(value) -> str:
+    """Return a play timestamp as UTC seconds, or "" when there is none.
+
+    Sub-second precision is deliberately dropped: no provider round-trips it
+    faithfully, and keeping it would make the same play compare unequal to
+    itself after one hop.
+    """
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "null"}:
+        return ""
+    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime(_PLAY_TIME_FORMAT)
+
+
+def history_play_key(item: dict) -> str:
+    """Identity of one *play*, as opposed to one watched episode.
+
+    ``item_key`` answers "which episode is this", which is the right question
+    for a watchlist and the wrong one for history: watching an episode twice is
+    two rows that share an episode key, so keying history on identity alone
+    collapses every rewatch into the first play and no second watch is ever
+    synced anywhere.  A row with no timestamp keys as presence-only, which is
+    what providers that record watched *state* rather than plays report.
+    """
+    return f"{item_key(item)}@{normalize_watched_at(item.get('watched_at'))}"
+
+
+def is_episode_scoped(item: dict) -> bool:
+    """Whether a history row names what was actually watched.
+
+    A movie is one thing and needs no coordinates.  A show row without a season
+    and episode names only the series, and every service's history API reads a
+    bare show as *the whole show* — writing one because a single episode was
+    watched marks seasons the user has never seen.  Such a row is dropped, never
+    guessed at, the same rule the Library applies to its own store.
+    """
+    media_type = str(item.get("media_type") or "").strip().lower()
+    if media_type == "movie":
+        return True
+    try:
+        return int(item.get("season")) >= 0 and int(item.get("episode")) >= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def episode_scoped_history(items: list[dict]) -> tuple[list[dict], int]:
+    """Split history rows into the writable ones and a count of the rest."""
+    kept = [item for item in items or [] if is_episode_scoped(item)]
+    dropped = len(items or []) - len(kept)
+    if dropped:
+        logger.warning(
+            "Dropping %d history row(s) that name a show but no episode; "
+            "writing them would mark the whole show watched",
+            dropped,
+        )
+    return kept, dropped
 
 
 def has_portable_identity(item: dict) -> bool:
@@ -325,6 +397,17 @@ class ProviderAdapter:
     reads: tuple[str, ...] = ()
     writes: tuple[str, ...] = ()
 
+    #: Whether this provider's watch history is a *play log* — it stores one
+    #: record per viewing and reports them all back — as opposed to watched
+    #: *state*, which is one flag or one progress count per episode.
+    #:
+    #: This gates rewatch propagation, and it has to be declared rather than
+    #: guessed: writing a second play to a service that only reports state means
+    #: the next run reads back the same single row, sees the extra play missing
+    #: again, and writes it again, forever.  So a rewatch is only carried to a
+    #: target that can actually hold it.
+    records_plays: bool = False
+
     #: Whether this provider has named lists worth offering per pair. False for
     #: providers whose categories are single fixed lists (SIMKL/AniList statuses).
     supports_list_selection: bool = False
@@ -458,6 +541,9 @@ class ProviderAdapter:
 class TraktAdapter(ProviderAdapter):
     key = "trakt"
     label = "Trakt"
+    # /sync/history is a play log: every viewing is its own record, and the
+    # paginated read hands all of them back.
+    records_plays = True
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
@@ -703,6 +789,10 @@ class TraktAdapter(ProviderAdapter):
 class SimklAdapter(ProviderAdapter):
     key = "simkl"
     label = "SIMKL"
+    # SIMKL accepts plays but reads back /sync/all-items, which is watched
+    # *state* — one last-watched date per episode. A second play written here
+    # is invisible on the next read, so rewatches are not carried to it.
+    records_plays = False
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
@@ -973,6 +1063,9 @@ class AniListAdapter(ProviderAdapter):
 class PmdbAdapter(ProviderAdapter):
     key = "pmdb"
     label = "PublicMetaDB"
+    # /api/external/watched keeps one row per play unless `dedupe` is asked
+    # for, and the history write deliberately does not ask for it.
+    records_plays = True
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     supports_list_selection = True
@@ -1242,7 +1335,11 @@ class PmdbAdapter(ProviderAdapter):
                 totals["added"] += len(payload)
             return totals
         if category == CATEGORY_HISTORY:
-            for item in items:
+            # A show row with no episode would be stored as a series-level play
+            # and read back as the whole show being watched.
+            writable, dropped = episode_scoped_history(items)
+            totals["not_found"] += dropped
+            for item in writable:
                 tmdb_id = str(item.get("tmdb_id") or "").strip()
                 if not tmdb_id.isdigit():
                     totals["not_found"] += 1
@@ -1593,6 +1690,9 @@ class LibraryAdapter(ProviderAdapter):
 
     key = "library"
     label = "Library"
+    # The Library keeps every play it is told about, which is what lets it sit
+    # in the middle of a fan-in/fan-out without flattening a rewatch.
+    records_plays = True
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     supports_list_selection = True

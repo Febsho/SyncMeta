@@ -1575,3 +1575,134 @@ class RemovalGuardTests(unittest.TestCase):
         # The blocked keys stay in the agreed state, so the next run sees the
         # same situation rather than treating them as never-synced.
         self.assertEqual(len(category.managed_keys), 40)
+
+
+def _episode(tmdb_id: str, season: int, episode: int, watched_at: str) -> dict:
+    return {
+        "title": "Show",
+        "media_type": "tv",
+        "tmdb_id": tmdb_id,
+        "ids": {"tmdb": tmdb_id},
+        "season": season,
+        "episode": episode,
+        "watched_at": watched_at,
+    }
+
+
+class MultiplePlayHistoryTests(unittest.TestCase):
+    """Watching something twice has to arrive at the other service twice.
+
+    ``item_key`` answers "which episode", so every play of one episode shares a
+    key. Diffing history on that alone keeps the first row and drops every
+    rewatch, which is why a second viewing never left the source.
+    """
+
+    def _run(self, source_rows, target_rows, *, target_records_plays):
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: source_rows},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_HISTORY: target_rows},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = target_records_plays
+        result = CrossSyncService({"trakt": source, "pmdb": target}).run_pair(
+            _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
+        )
+        return result, target
+
+    def test_every_play_of_an_unseen_episode_is_written(self) -> None:
+        rows = [
+            _episode("42", 1, 3, "2024-01-01T20:00:00Z"),
+            _episode("42", 1, 3, "2024-06-01T20:00:00Z"),
+        ]
+        result, target = self._run(rows, [], target_records_plays=True)
+        self.assertEqual(result.added, 2)
+        written = [i["watched_at"] for i in target.added[0][1]]
+        self.assertEqual(written, ["2024-01-01T20:00:00Z", "2024-06-01T20:00:00Z"])
+
+    def test_a_rewatch_reaches_a_target_that_already_has_the_first_play(self) -> None:
+        result, target = self._run(
+            [
+                _episode("42", 1, 3, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 3, "2024-06-01T20:00:00Z"),
+            ],
+            [_episode("42", 1, 3, "2024-01-01T20:00:00Z")],
+            target_records_plays=True,
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(
+            [i["watched_at"] for i in target.added[0][1]], ["2024-06-01T20:00:00Z"],
+        )
+
+    def test_a_second_run_writes_nothing(self) -> None:
+        rows = [
+            _episode("42", 1, 3, "2024-01-01T20:00:00Z"),
+            _episode("42", 1, 3, "2024-06-01T20:00:00Z"),
+        ]
+        result, _ = self._run(rows, list(rows), target_records_plays=True)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.categories[0].skipped_existing, 2)
+
+    def test_a_differently_spelled_timestamp_is_the_same_play(self) -> None:
+        result, _ = self._run(
+            [_episode("42", 1, 3, "2024-01-01T20:00:00Z")],
+            [_episode("42", 1, 3, "2024-01-01T20:00:00.000+00:00")],
+            target_records_plays=True,
+        )
+        self.assertEqual(result.added, 0)
+
+    def test_a_watched_state_target_never_receives_the_rewatch(self) -> None:
+        """Writing it would be invisible on the next read and re-sent forever."""
+        result, target = self._run(
+            [
+                _episode("42", 1, 3, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 3, "2024-06-01T20:00:00Z"),
+            ],
+            [_episode("42", 1, 3, "2024-01-01T20:00:00Z")],
+            target_records_plays=False,
+        )
+        self.assertEqual(result.added, 0)
+        self.assertFalse(target.added)
+
+    def test_an_unseen_episode_still_reaches_a_watched_state_target(self) -> None:
+        result, target = self._run(
+            [_episode("42", 2, 1, "2024-06-01T20:00:00Z")],
+            [_episode("42", 1, 3, "2024-01-01T20:00:00Z")],
+            target_records_plays=False,
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(target.added[0][1][0]["episode"], 1)
+
+    def test_two_way_carries_rewatches_both_directions(self) -> None:
+        first = FakeAdapter(
+            "library",
+            {CATEGORY_HISTORY: [
+                _episode("42", 1, 1, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 1, "2024-02-01T20:00:00Z"),
+            ]},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        second = FakeAdapter(
+            "pmdb",
+            {CATEGORY_HISTORY: [
+                _episode("42", 1, 1, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 1, "2024-03-01T20:00:00Z"),
+            ]},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        first.records_plays = second.records_plays = True
+        result = CrossSyncService({"library": first, "pmdb": second}).run_pair(
+            _pair(
+                source="library", target="pmdb", mode="two_way",
+                categories=[CATEGORY_HISTORY],
+            )
+        )
+        self.assertEqual(result.added, 2)
+        self.assertEqual(
+            [i["watched_at"] for i in second.added[0][1]], ["2024-02-01T20:00:00Z"],
+        )
+        self.assertEqual(
+            [i["watched_at"] for i in first.added[0][1]], ["2024-03-01T20:00:00Z"],
+        )

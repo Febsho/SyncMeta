@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import json
 import logging
 import re
 import secrets
@@ -621,15 +622,23 @@ class MdbListClient:
         return path
 
     @staticmethod
-    def _to_sync_payload(items: list[dict]) -> dict:
+    def _to_sync_payload(items: list[dict], *, episode_scoped: bool = False) -> dict:
         """Group the app's items into MDBList's movies/shows request body.
 
         Items with neither an IMDB nor a TMDB id are dropped rather than sent:
         MDBList cannot resolve them, and a body full of id-less entries is how
         a write silently lands on the wrong title.
+
+        The body is Trakt-shaped, and so is its reading of a show entry: one
+        carrying no ``seasons`` means *the whole show*. Watch history therefore
+        goes out as a nested seasons/episodes tree, and a show row that names no
+        episode is dropped (``episode_scoped``) instead of being flattened to the
+        series — flattening is what made watching a single episode mark every
+        season of the show watched on MDBList.
         """
         movies: list[dict] = []
-        shows: list[dict] = []
+        shows_by_key: dict[str, dict] = {}
+        dropped = 0
         for item in items or []:
             ids: dict = {}
             imdb_id = str(item.get("imdb_id") or "").strip()
@@ -646,10 +655,40 @@ class MdbListClient:
             if item.get("year"):
                 entry["year"] = item["year"]
             watched_at = item.get("watched_at") or item.get("last_watched_at")
+
+            if item.get("media_type") == "movie":
+                if watched_at:
+                    entry["watched_at"] = watched_at
+                movies.append(entry)
+                continue
+
+            try:
+                season_number = int(item.get("season"))
+                episode_number = int(item.get("episode"))
+            except (TypeError, ValueError):
+                season_number = episode_number = None
+            key = json.dumps(ids, sort_keys=True)
+            if season_number is None or episode_number is None:
+                if episode_scoped:
+                    dropped += 1
+                    continue
+                if watched_at:
+                    entry["watched_at"] = watched_at
+                shows_by_key.setdefault(key, entry)
+                continue
+
+            show = shows_by_key.setdefault(key, entry)
+            seasons = show.setdefault("seasons", [])
+            season = next((s for s in seasons if s.get("number") == season_number), None)
+            if season is None:
+                season = {"number": season_number, "episodes": []}
+                seasons.append(season)
+            episode: dict = {"number": episode_number}
             if watched_at:
-                entry["watched_at"] = watched_at
-            (movies if item.get("media_type") == "movie" else shows).append(entry)
-        return {"movies": movies, "shows": shows}
+                episode["watched_at"] = watched_at
+            season["episodes"].append(episode)
+
+        return {"movies": movies, "shows": list(shows_by_key.values()), "_dropped": dropped}
 
     @classmethod
     def _from_sync_payload(cls, payload: dict, category: str) -> list[dict]:
@@ -673,7 +712,7 @@ class MdbListClient:
                 tmdb_id = ids.get("tmdb") or media.get("tmdb_id") or media.get("id")
                 if not imdb_id and not tmdb_id:
                     continue
-                out.append({
+                base = {
                     "title": media.get("title") or "Unknown",
                     "year": media.get("year") or media.get("release_year"),
                     "media_type": media_type,
@@ -688,6 +727,45 @@ class MdbListClient:
                     "status": None,
                     "added_at": row.get("listed_at") or row.get("collected_at"),
                     "watched_at": row.get("last_watched_at") or row.get("watched_at"),
+                }
+                # Watch history comes back as the same seasons/episodes tree it
+                # is written as. Flattening it to the series would make every
+                # episode look unsynced on the next run, so the pair would
+                # rewrite the whole show every time.
+                episodes = cls._flatten_watched_episodes(row, media, base)
+                out.extend(episodes if episodes else [base])
+        return out
+
+    @staticmethod
+    def _flatten_watched_episodes(row: dict, media: dict, base: dict) -> list[dict]:
+        """Expand a show's seasons/episodes tree into one row per episode."""
+        seasons = row.get("seasons") or media.get("seasons")
+        if not isinstance(seasons, list):
+            return []
+        out: list[dict] = []
+        for season in seasons:
+            if not isinstance(season, dict):
+                continue
+            try:
+                season_number = int(season.get("number"))
+            except (TypeError, ValueError):
+                continue
+            for episode in season.get("episodes") or []:
+                if not isinstance(episode, dict):
+                    continue
+                try:
+                    episode_number = int(episode.get("number"))
+                except (TypeError, ValueError):
+                    continue
+                out.append({
+                    **base,
+                    "season": season_number,
+                    "episode": episode_number,
+                    "watched_at": (
+                        episode.get("last_watched_at")
+                        or episode.get("watched_at")
+                        or base.get("watched_at")
+                    ),
                 })
         return out
 
@@ -775,14 +853,23 @@ class MdbListClient:
         return totals
 
     def add_sync_items(self, category: str, items: list[dict]) -> dict:
-        payload = self._to_sync_payload(items)
+        category_key = str(category or "").strip().lower()
+        payload = self._to_sync_payload(items, episode_scoped=category_key == "history")
+        dropped = int(payload.pop("_dropped", 0) or 0)
+        if dropped:
+            logger.warning(
+                "MDBList: skipped %d show row(s) with no episode number — "
+                "sending them would mark the whole show watched",
+                dropped,
+            )
         sent = len(payload["movies"]) + len(payload["shows"])
         if not sent:
-            return {"added": 0, "deleted": 0, "not_found": 0}
-        paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
+            return {"added": 0, "deleted": 0, "not_found": dropped}
+        paths = self._SYNC_WRITE_PATHS.get(category_key)
         if not paths:
             raise ValueError(f"MDBList has no sync endpoint for {category!r}")
         totals = self._write_totals(self._post(paths[0], payload), "added", sent)
+        totals["not_found"] = int(totals.get("not_found") or 0) + dropped
         logger.info(
             "MDBList: added %d movie(s) and %d show(s) to %s (%d accepted, %d not found)",
             len(payload["movies"]), len(payload["shows"]), category,
@@ -791,14 +878,23 @@ class MdbListClient:
         return totals
 
     def remove_sync_items(self, category: str, items: list[dict]) -> dict:
-        payload = self._to_sync_payload(items)
+        category_key = str(category or "").strip().lower()
+        payload = self._to_sync_payload(items, episode_scoped=category_key == "history")
+        dropped = int(payload.pop("_dropped", 0) or 0)
+        if dropped:
+            logger.warning(
+                "MDBList: skipped %d show row(s) with no episode number — "
+                "sending them would mark the whole show watched",
+                dropped,
+            )
         sent = len(payload["movies"]) + len(payload["shows"])
         if not sent:
-            return {"added": 0, "deleted": 0, "not_found": 0}
-        paths = self._SYNC_WRITE_PATHS.get(str(category or "").strip().lower())
+            return {"added": 0, "deleted": 0, "not_found": dropped}
+        paths = self._SYNC_WRITE_PATHS.get(category_key)
         if not paths:
             raise ValueError(f"MDBList has no sync endpoint for {category!r}")
         totals = self._write_totals(self._post(paths[1], payload), "deleted", sent)
+        totals["not_found"] = int(totals.get("not_found") or 0) + dropped
         logger.info(
             "MDBList: removed %d movie(s) and %d show(s) from %s (%d accepted)",
             len(payload["movies"]), len(payload["shows"]), category, totals["deleted"],
