@@ -1,3 +1,5 @@
+
+
 # SyncMeta
 
 [![Deploy to Docker](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml)
@@ -18,6 +20,8 @@ cd SyncMeta
 cp .env.example .env
 docker compose up -d syncmeta
 ```
+
+The `.env` file is optional; `docker compose up -d syncmeta` also works without it.
 
 Open `http://127.0.0.1:8080` and:
 
