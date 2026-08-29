@@ -233,6 +233,41 @@ gets to decide that a failed read really was empty. Blocking is *demotion* —
 `SyncPlan.without_removals` keeps the additions, since whatever made the
 removals unsafe says nothing about items the source positively reported.
 
+**History is a union, and dedupes in three layers.** `sync/history.py`. An
+episode absent from the source is not evidence to delete it — providers expose
+different windows of the same history — so only an explicit `mirror` route
+removes, whole episodes only, once a baseline exists. Deduplication runs
+strongest-first: the source's own stable event id (`event_id`, persisted in
+`ItemState.event_ids`), then this route's record of the plays it already carried
+(`ItemState.plays`), then the destination's current plays matched through
+`PlaySet`'s tolerance window. The second layer is what stops a two-way route
+re-importing its own write; the third is what makes a repeated run idempotent.
+A row reporting watched *state* — no timestamp, `cursor_exempt`, or
+`anilist_derived` — may create the first play of an unknown episode but never a
+second, so repeated state syncs write nothing.
+
+**Resume never rewinds.** `sync/progress.py`. Below 2% is an accidental open, at
+or above 90% the title is finished and pushing it on would make a watched show
+look abandoned near the end, and a destination further along is never
+overwritten. Furthest-wins is deliberate over most-recent: no provider here
+exposes a portable per-item modification time, and furthest is the only
+deterministic rule that cannot rewind either side because of run order.
+
+**A truncated read is `PARTIAL`, and only two providers can tell.** PublicMetaDB
+detects a page it promised that came back empty; MDBList detects a pagination
+cursor that stops advancing. Both surface through `ProviderAdapter.last_read_complete()`.
+Trakt, SIMKL and AniList end their reads on an unambiguous signal and have no
+known silent-truncation path, so they report complete — stated rather than
+assumed, and the one place to change when that stops being true.
+
+**A removal asks the destination, not the route.** `sync/ownership.py`. Two
+routes commonly feed one target (SIMKL → Trakt and MDBList → Trakt both wanting
+Movie X). Per-route `managed` decides whether a route *may* delete; it cannot
+decide whether it *should*, because the other route will re-add on its next run
+and the item flickers forever. `run_pairs` therefore reads every route's source
+before any route writes — the batch cache makes that nearly free — and a removal
+is dropped when another active route's source still lists the item.
+
 **A partial run is neither a success nor a failure.** `ExecutionResult.complete`
 is false while anything is outstanding — a failed write, one the provider never
 confirmed, an action the guard blocked — and only a complete run may `commit` a

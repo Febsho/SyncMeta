@@ -113,10 +113,13 @@ class PlannedAction:
     #: Two-way only: which side this action writes to.
     direction: str = "forward"
 
+    year: object = None
+
     def to_dict(self) -> dict:
         return {
             "key": self.key,
             "kind": self.kind,
+            "year": self.year,
             "category": self.category,
             "source_provider": self.source_provider,
             "destination_provider": self.destination_provider,
@@ -221,6 +224,11 @@ def _describe(item: dict) -> tuple[str, str]:
     )
 
 
+def _year(item: dict):
+    value = (item or {}).get("year")
+    return value if isinstance(value, (int, str)) and str(value).strip() else None
+
+
 def plan_membership(
     *,
     route_id: str,
@@ -268,7 +276,7 @@ def plan_membership(
         return PlannedAction(
             key=key, kind=kind, category=category,
             source_provider=source_provider, destination_provider=destination_provider,
-            title=title, media_type=media_type,
+            title=title, media_type=media_type, year=_year(item),
             old_state=old_state, new_state=new_state, reason=reason,
             confidence=confidence, destructive=destructive, managed=managed,
             item=item or {},
@@ -456,7 +464,7 @@ def plan_two_way(
             key=key, kind=kind, category=category,
             source_provider=first_provider if forward else second_provider,
             destination_provider=second_provider if forward else first_provider,
-            title=title, media_type=media_type, old_state=old_state,
+            title=title, media_type=media_type, year=_year(item), old_state=old_state,
             new_state=new_state, reason=reason, confidence=confidence,
             destructive=destructive, managed=managed, item=item or {},
             direction=direction,

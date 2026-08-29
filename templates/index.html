@@ -1052,6 +1052,11 @@
     }
 
     /* ── Sync preview ────────────────────────────────────────────────────── */
+    .preview-destructive{display:flex;align-items:baseline;gap:10px;padding:10px 14px;border:1px solid rgba(248,113,113,.28);background:rgba(248,113,113,.06);border-radius:10px;margin-bottom:12px;font-size:13px;color:var(--z200)}
+    .preview-warnings{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+    .preview-warning{font-size:12px;color:var(--z400);line-height:1.5;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--z950)}
+    .preview-warning-blocked{border-color:rgba(248,113,113,.3);color:var(--z200)}
+    .preview-item .catalog-note{margin-top:2px}
     .preview-total{display:flex;flex-direction:column;gap:4px;padding:0 0 14px;margin-bottom:12px;border-bottom:1px solid var(--line)}
     .preview-total .overline{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label)}
     .preview-total-value{font-size:28px;font-weight:500;letter-spacing:-.03em;color:var(--z100);font-variant-numeric:tabular-nums}
@@ -9547,6 +9552,168 @@
       return { groups, total };
     }
 
+    // ── plan preview ────────────────────────────────────────────────────────
+    // The planner produces one immutable plan per route and category, and every
+    // action in it carries the reason a person should be shown. Rendering that
+    // directly is the point: a preview built from a second, parallel code path
+    // is a preview that can disagree with what the sync actually does.
+    const PLAN_SECTIONS = [
+      { key: 'additions', label: 'Will add', sign: '+', tone: 'c-green' },
+      { key: 'updates', label: 'Will update', sign: '~', tone: 'c-dim' },
+      { key: 'removals', label: 'Will remove', sign: '−', tone: 'c-red' },
+      { key: 'conflicts', label: 'Conflicts', sign: '!', tone: 'c-orange' },
+      { key: 'unresolved', label: 'Unresolved', sign: '?', tone: 'c-orange' },
+    ];
+
+    function planRouteLabel(plan) {
+      const from = providerLabel(plan.source_provider) || plan.source_provider || '';
+      const to = providerLabel(plan.destination_provider) || plan.destination_provider || '';
+      const category = CATEGORY_LABELS[plan.category] || plan.category || '';
+      return `${from} → ${to}${category ? ` · ${category}` : ''}`;
+    }
+
+    function planActionRow(action, section) {
+      const year = action.year ? ` <span class="c-dim">(${escAttr(action.year)})</span>` : '';
+      return `
+        <div class="preview-item">
+          <span class="preview-item-sign ${section.tone}">${section.sign}</span>
+          <span>
+            ${esc(action.title || 'Unknown')}${year}
+            ${action.reason ? `<div class="catalog-note">${esc(action.reason)}</div>` : ''}
+          </span>
+          <span class="c-dim">${esc(action.media_type || '')}</span>
+        </div>`;
+    }
+
+    function planSummaryHtml(plans, verdicts) {
+      const totals = { additions: 0, updates: 0, removals: 0, conflicts: 0, unresolved: 0 };
+      let destinationSize = 0;
+      (plans || []).forEach(plan => {
+        PLAN_SECTIONS.forEach(section => {
+          totals[section.key] += (plan[section.key] || []).length;
+        });
+      });
+      (verdicts || []).forEach(v => { destinationSize += Number(v.destination_size || 0); });
+      const writes = totals.additions + totals.updates + totals.removals;
+      if (!writes && !totals.conflicts && !totals.unresolved) return '';
+
+      const destructive = totals.removals
+        ? `<div class="preview-destructive">
+             <span class="overline">Destructive</span>
+             <span>${totals.removals} item${totals.removals === 1 ? '' : 's'} removed${
+               destinationSize ? ` · ${(100 * totals.removals / destinationSize).toFixed(1)}% of the destination` : ''
+             }</span>
+           </div>`
+        : '';
+      return `
+        <div class="preview-total">
+          <span class="overline">Total changes</span>
+          <span class="preview-total-value">${writes}</span>
+        </div>
+        ${destructive}`;
+    }
+
+    function planWarningsHtml(plans, verdicts) {
+      const rows = [];
+      (verdicts || []).forEach(v => {
+        (v.blocks || []).forEach(block => rows.push({ tone: 'blocked', text: block }));
+        (v.warnings || []).forEach(text => rows.push({
+          tone: v.overridden ? 'overridden' : 'warn', text,
+        }));
+      });
+      (plans || []).forEach(plan => {
+        (plan.warnings || []).forEach(text => rows.push({ tone: 'warn', text }));
+      });
+      if (!rows.length) return '';
+      return `
+        <div class="preview-warnings">
+          <span class="overline">Warnings</span>
+          ${rows.map(row => `
+            <div class="preview-warning ${row.tone === 'blocked' ? 'preview-warning-blocked' : ''}">
+              ${row.tone === 'blocked' ? '<span class="c-red">Paused</span> ' : ''}
+              ${row.tone === 'overridden' ? '<span class="c-orange">Overridden</span> ' : ''}
+              ${esc(row.text)}
+            </div>`).join('')}
+        </div>`;
+    }
+
+    function planPreviewHtml(plans, verdicts) {
+      const summary = planSummaryHtml(plans, verdicts);
+      if (!summary) {
+        return `<div class="empty-state">
+          <div class="empty-state-title">Nothing would change</div>
+          <div class="empty-state-copy">Every route is already in sync with what its source reports.</div>
+        </div>${planWarningsHtml(plans, verdicts)}`;
+      }
+      const groups = [];
+      (plans || []).forEach(plan => {
+        PLAN_SECTIONS.forEach(section => {
+          const actions = plan[section.key] || [];
+          if (!actions.length) return;
+          groups.push({ section, plan, actions });
+        });
+      });
+      return summary + planWarningsHtml(plans, verdicts) + groups.map((group, index) => `
+        <details class="preview-group" ${index === 0 ? 'open' : ''}>
+          <summary class="preview-group-head">
+            <span class="preview-group-name">
+              ${esc(group.section.label)}
+              <span class="c-dim">· ${esc(planRouteLabel(group.plan))}</span>
+            </span>
+            <span class="preview-group-counts ${group.section.tone}">${group.actions.length}</span>
+          </summary>
+          <div class="preview-items">
+            ${group.actions.slice(0, PREVIEW_ROWS_PER_GROUP).map(
+              action => planActionRow(action, group.section)).join('')}
+            ${group.actions.length > PREVIEW_ROWS_PER_GROUP
+              ? `<div class="catalog-note">Showing the first ${PREVIEW_ROWS_PER_GROUP} of ${group.actions.length}.</div>`
+              : ''}
+          </div>
+        </details>`).join('');
+    }
+
+    const PREVIEW_ROWS_PER_GROUP = 25;
+    const CATEGORY_LABELS = {
+      watchlist: 'Watchlist', collection: 'Collection',
+      history: 'Watch history', resume: 'Resume',
+    };
+
+    function openPlanPreviewDialog(plans, verdicts) {
+      const overlay = el('preview-dialog');
+      const body = el('preview-dialog-body');
+      if (!overlay || !body) return;
+      body.innerHTML = planPreviewHtml(plans, verdicts);
+      const blocked = (verdicts || []).some(v => v.allowed === false);
+      const writes = (plans || []).reduce((sum, plan) => sum
+        + (plan.additions || []).length
+        + (plan.updates || []).length
+        + (plan.removals || []).length, 0);
+      const apply = el('preview-dialog-apply');
+      if (apply) {
+        // A blocked plan still has additions worth applying, so the button is
+        // offered — it just no longer promises the removals.
+        apply.classList.toggle('hidden', !writes);
+        apply.textContent = blocked
+          ? `Continue anyway (${writes})`
+          : `Apply ${writes} change${writes === 1 ? '' : 's'}`;
+      }
+      dialogRestoreFocus = document.activeElement;
+      overlay.classList.remove('hidden');
+      trapDialogFocus(overlay);
+      const close = () => {
+        overlay.classList.add('hidden');
+        overlay.onkeydown = null;
+        document.removeEventListener('keydown', onKey);
+        if (dialogRestoreFocus && dialogRestoreFocus.focus) dialogRestoreFocus.focus();
+      };
+      const onKey = (event) => { if (event.key === 'Escape') close(); };
+      document.addEventListener('keydown', onKey);
+      el('preview-dialog-cancel').onclick = close;
+      overlay.onclick = (event) => { if (event.target === overlay) close(); };
+      if (apply) apply.onclick = () => { close(); runPairs(null, false); };
+      el('preview-dialog-cancel').focus();
+    }
+
     function openPreviewDialog(profile, results) {
       const overlay = el('preview-dialog');
       const body = el('preview-dialog-body');
@@ -11394,6 +11561,12 @@
         }
         const runs = result.data.results || [];
         renderPairResults(runs, result.data.dry_run);
+        // A dry run's whole purpose is to be looked at. The planner already
+        // produced the reasons, so show them rather than making the user infer
+        // intent from counters.
+        if (dryRun && Array.isArray(result.data.plans) && result.data.plans.length) {
+          openPlanPreviewDialog(result.data.plans, result.data.safety || []);
+        }
         const totalAdded = runs.reduce((sum, r) => sum + (r.added || 0), 0);
         const cached = Number(result.data.cached_reads || 0);
         const savedNote = cached ? ` (${cached} read${cached === 1 ? '' : 's'} served from cache)` : '';

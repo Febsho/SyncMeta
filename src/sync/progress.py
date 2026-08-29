@@ -113,6 +113,7 @@ def plan_progress(
             key=key, kind=kind, category=category,
             source_provider=source_provider, destination_provider=destination_provider,
             title=str(item.get("title") or ""), media_type=str(item.get("media_type") or ""),
+            year=item.get("year"),
             reason=reason, confidence=confidence, item=item,
         )
 
