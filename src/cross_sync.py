@@ -27,11 +27,13 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .sync.executor import execute_plan
 from .sync.planner import (
     SyncPlan,
     normalize_policy,
     plan_membership,
 )
+from .sync.safety import SafetyPolicy, enforce as enforce_safety, evaluate as evaluate_safety
 from .sync.models import (
     RouteBaseline,
     STATE_ABSENT,
@@ -42,8 +44,10 @@ from .sync.models import (
     RouteObservation,
 )
 from .providers import (
+    CATEGORY_COLLECTION,
     CATEGORY_HISTORY,
     CATEGORY_RESUME,
+    CATEGORY_WATCHLIST,
     MODE_ONE_WAY,
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
@@ -228,6 +232,9 @@ def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, targ
 #: A list has to be big enough, and lose enough, for a mass deletion to be
 #: surprising. Below these the guard stays silent — removing 2 of 3 items is a
 #: perfectly ordinary edit and pausing it would be noise.
+#: Categories the baseline planner owns. Membership only — see _plan_category.
+_PLANNED_CATEGORIES = frozenset({CATEGORY_WATCHLIST, CATEGORY_COLLECTION})
+
 _GUARD_MIN_TARGET_SIZE = 10
 _GUARD_MIN_REMOVALS = 5
 
@@ -358,6 +365,7 @@ class CrossSyncService:
         guard_large_removals: bool = True,
         guard_removal_percent: int = 20,
         state_store=None,
+        allow_destructive_override: bool = False,
     ):
         self._adapters = dict(adapters or {})
         # Baselines, when the caller has them. Optional so every existing test
@@ -375,6 +383,11 @@ class CrossSyncService:
         except (TypeError, ValueError):
             percent = 20
         self._guard_removal_percent = min(100, max(1, percent))
+        # Only a person acting on a preview may waive the size thresholds. An
+        # automatic run leaves this False and therefore cannot, and no override
+        # ever waives a *hard* block — an unreadable source or a missing
+        # baseline is bad evidence, not a decision anyone gets to make.
+        self._allow_destructive_override = bool(allow_destructive_override)
         # {pair_id: {category: [key, ...]}} — keys this pair has written before.
         self._managed_keys = {
             str(pair_id): {
@@ -391,7 +404,8 @@ class CrossSyncService:
         # switching execution onto them is the next step, and running them in
         # parallel first is what makes that switch reviewable against real data.
         self._plans: dict[tuple[str, str], SyncPlan] = {}
-        self._plan_divergences: list[dict] = []
+        self._plan_verdicts: dict = {}
+        self._plan_blocked_items: dict = {}
         self._cancel_requested_callback = cancel_requested_callback
         self._status_callback = status_callback
         # Set only while a batch is in flight; see _batch_cache().
@@ -441,15 +455,9 @@ class CrossSyncService:
         return dict(self._plans)
 
     @property
-    def plan_divergences(self) -> list[dict]:
-        """Where the planner and the live decision disagreed.
-
-        Empty is the goal. Every entry is a case the baseline explains and the
-        presence-only diff does not, so this is the evidence for switching
-        execution over — and, until then, a way to spot a planner bug without
-        anyone's library paying for it.
-        """
-        return list(self._plan_divergences)
+    def plan_verdicts(self) -> dict:
+        """What the safety guard concluded about each plan."""
+        return dict(self._plan_verdicts)
 
     @property
     def route_states(self) -> dict:
@@ -735,15 +743,38 @@ class CrossSyncService:
             ]
             result.skipped_existing = len(source_by_key) - len(to_add)
 
-        to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
-        blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
-        if blocked:
-            self._note_blocked(
-                pair, category, result,
-                removals=len(to_remove), target_size=len(target_by_key),
-                percent=percent, where=target.label, items=to_remove,
-            )
-            to_remove = []
+        # The planner decides membership categories from the baseline; history
+        # keeps the legacy diff until its own planner lands.
+        plan = self._plan_category(
+            pair, category,
+            source_by_key=source_by_key, target_by_key=target_by_key,
+            source=source, target=target,
+        )
+        if plan is not None:
+            to_add = [action.item for action in plan.additions]
+            to_remove = [action.item for action in plan.removals]
+            result.skipped_existing = len(plan.skipped)
+            verdict = self._plan_verdicts.get((str(pair.pair_id), str(category)))
+            if verdict is not None and verdict.blocked:
+                self._note_blocked(
+                    pair, category, result,
+                    removals=verdict.removals, target_size=len(target_by_key),
+                    percent=verdict.percent, where=target.label,
+                    items=self._plan_blocked_items.get(
+                        (str(pair.pair_id), str(category)), [],
+                    ),
+                    detail=verdict.explain(),
+                )
+        else:
+            to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
+            blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
+            if blocked:
+                self._note_blocked(
+                    pair, category, result,
+                    removals=len(to_remove), target_size=len(target_by_key),
+                    percent=percent, where=target.label, items=to_remove,
+                )
+                to_remove = []
 
         self._set_status(
             f"{pair.display_name()}: {len(to_add)} to add, {len(to_remove)} to remove on {target.label}"
@@ -801,13 +832,6 @@ class CrossSyncService:
                 added=wrote_added, removed=wrote_removed,
             )
 
-        self._build_shadow_plan(
-            pair, category,
-            source_by_key=source_by_key, target_by_key=target_by_key,
-            source=source, target=target, target_list=target_list,
-            live_add=to_add, live_remove=to_remove,
-            source_trustworthy=True,
-        )
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
         self._observe_route(
             pair, category,
@@ -1127,7 +1151,7 @@ class CrossSyncService:
     def _note_blocked(
         self, pair, category: str, result: PairCategoryStats,
         *, removals: int, target_size: int, percent: int, where: str,
-        items: list[dict] | None = None,
+        items: list[dict] | None = None, detail: str = "",
     ) -> None:
         review_items = []
         for item in items or []:
@@ -1146,12 +1170,15 @@ class CrossSyncService:
             "percent": percent,
             "target": where,
             "items": review_items,
+            # The exact threshold or condition that stopped it, so the Issues
+            # page can say why rather than only that.
+            "detail": detail,
         })
         logger.warning(
-            "Pair %s: refusing to remove %d of %d %s items (%d%%) from %s — "
-            "over the %d%% safety threshold; nothing was deleted",
-            pair.display_name(), removals, target_size, category, percent,
-            where, self._guard_removal_percent,
+            "Pair %s: refusing to remove %d of %d %s items (%s%%) from %s — %s; "
+            "nothing was deleted",
+            pair.display_name(), removals, target_size, category, percent, where,
+            detail or f"over the {self._guard_removal_percent}% safety threshold",
         )
         self._set_status(
             f"{pair.display_name()}: paused an unusually large removal "
@@ -1185,19 +1212,24 @@ class CrossSyncService:
 
         return [target_by_key[key] for key in stale_keys]
 
-    def _build_shadow_plan(
+    def _plan_category(
         self, pair, category: str, *, source_by_key, target_by_key,
-        source, target, target_list, live_add, live_remove, source_trustworthy,
-    ) -> None:
-        """Plan the category from the baseline, beside the live decision.
+        source, target, source_trustworthy=True,
+    ):
+        """Plan the category from the baseline, then let the guard rule on it.
 
-        The plan is recorded and compared; it does not drive this run. The point
-        is to see, on real libraries, every case where the baseline reaches a
-        different conclusion from the presence-only diff — which is exactly the
-        set of cases the redesign exists to fix — before letting it act.
+        Returns the plan the run may actually perform, or None for a category
+        this planner does not cover yet.
+
+        Only *membership* categories are planned here — "is this item on this
+        list". History is an append-only event log with its own dedupe rules,
+        and resume is a progress value where an item present on both sides may
+        still need writing because the position moved. Handing either to a
+        membership planner would silently turn "changed" into "already in sync",
+        so both keep the legacy path until their own planners land.
         """
-        if category == CATEGORY_HISTORY:
-            return  # history has its own semantics; planned separately
+        if category not in _PLANNED_CATEGORIES:
+            return None
         baseline = None
         if self._state_store is not None:
             try:
@@ -1215,34 +1247,32 @@ class CrossSyncService:
                 source_trustworthy=source_trustworthy,
             )
         except Exception:
+            # A planner failure must not take the run with it; the caller falls
+            # back to the legacy diff, which is additive-safe.
             logger.warning("Could not build sync plan", exc_info=True)
-            return
-        self._plans[(str(pair.pair_id), str(category))] = plan
+            return None
 
-        planned_adds = {a.key for a in plan.additions}
-        planned_removes = {r.key for r in plan.removals}
-        live_adds = {self._comparison_key(i, target_list) for i in live_add or []}
-        live_removes = {self._comparison_key(i, target_list) for i in live_remove or []}
-        if planned_adds == live_adds and planned_removes == live_removes:
-            return
-        divergence = {
-            "route_id": str(pair.pair_id),
-            "category": str(category),
-            "phase": baseline.phase,
-            "adds_only_planned": len(planned_adds - live_adds),
-            "adds_only_live": len(live_adds - planned_adds),
-            "removals_only_planned": len(planned_removes - live_removes),
-            # The one that matters: deletions the old diff wanted and the
-            # baseline cannot justify.
-            "removals_only_live": len(live_removes - planned_removes),
-        }
-        self._plan_divergences.append(divergence)
-        logger.info(
-            "Sync plan differs from the live decision for %s/%s (%s): "
-            "%d removal(s) the baseline would not justify, %d it would add",
-            pair.display_name(), category, baseline.phase,
-            divergence["removals_only_live"], divergence["adds_only_planned"],
+        verdict = evaluate_safety(
+            plan,
+            policy=SafetyPolicy(
+                enabled=self._guard_large_removals,
+                max_removal_percent=self._guard_removal_percent,
+                allow_destructive_override=self._allow_destructive_override,
+            ),
+            destination_size=len(target_by_key),
+            source_size=len(source_by_key),
+            source_trustworthy=source_trustworthy,
+            baseline_established=baseline.allows_removals,
         )
+        key = (str(pair.pair_id), str(category))
+        if verdict.blocked:
+            # Kept before enforcement demotes them: the Issues page lists what
+            # *would* have been deleted, and a demoted action no longer says so.
+            self._plan_blocked_items[key] = [action.item for action in plan.removals]
+        plan = enforce_safety(plan, verdict)
+        self._plans[key] = plan
+        self._plan_verdicts[key] = verdict
+        return plan
 
     # ── baseline observation ───────────────────────────────────────────────
     #

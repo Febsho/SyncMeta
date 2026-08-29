@@ -4712,6 +4712,9 @@ def api_profile_pairs_run():
             guard_large_removals=config.sync.guard_large_removals and not bypass_guard,
             guard_removal_percent=config.sync.guard_removal_percent,
             state_store=_sync_state_store_for(profile_id),
+            # This endpoint is a person acting on a preview. The scheduled path
+            # never passes it, so an automatic run cannot waive the thresholds.
+            allow_destructive_override=bypass_guard,
         )
         log_token = _log_profile_id.set(profile_id)
         try:
@@ -4737,7 +4740,7 @@ def api_profile_pairs_run():
             # The baseline planner's reading of the same run. Reported, not yet
             # obeyed — see CrossSyncService.plan_divergences.
             "plans": [plan.to_dict() for plan in service.plans.values()],
-            "plan_divergences": service.plan_divergences,
+            "safety": [v.to_dict() for v in service.plan_verdicts.values()],
         })
 
     try:

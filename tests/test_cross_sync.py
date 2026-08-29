@@ -135,6 +135,34 @@ class ResumePairTests(unittest.TestCase):
         self.assertEqual(second.added[0][1][0]["position_ms"], 70_000)
 
 
+def _established_store(keys, *, pair_id="p1", category=CATEGORY_WATCHLIST,
+                       managed=(), source_keys=None):
+    """A state store whose route has one confirmed sync behind it.
+
+    The planner refuses every removal until a route has completed a run — see
+    `FirstRunProtectionTests`. Tests that are about *what* gets removed rather
+    than *whether removal is allowed yet* therefore need a real baseline.
+    """
+    import tempfile
+    from pathlib import Path
+    from src.sync.models import ItemState, STATE_PRESENT
+    from src.sync.state_store import SyncStateStore
+
+    directory = tempfile.mkdtemp()
+    store = SyncStateStore(Path(directory) / "state.json")
+    present = set(source_keys if source_keys is not None else keys)
+    store.commit(pair_id, category, items={
+        key: ItemState(
+            source=STATE_PRESENT if key in present else "",
+            destination=STATE_PRESENT,
+            synced=STATE_PRESENT if key in present else "",
+            managed=key in set(managed),
+        )
+        for key in keys
+    })
+    return store
+
+
 def _pair(**overrides) -> SyncPair:
     raw = {
         "pair_id": "p1",
@@ -300,8 +328,14 @@ class RemovalModeTests(unittest.TestCase):
     def _setup(self, mode: str, managed=None):
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
         target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("99")]})
+        owned = (managed or {}).get("p1", {}).get(CATEGORY_WATCHLIST, [])
         service = CrossSyncService(
             {"trakt": source, "simkl": target}, managed_keys=managed or {},
+            # Both items were on the source at the last agreement, so 99 having
+            # gone is a real deletion rather than something never seen.
+            state_store=_established_store(
+                ["movie:tmdb:1", "movie:tmdb:99"], managed=owned,
+            ),
         )
         return source, target, service, _pair(removal_mode=mode)
 
@@ -975,7 +1009,13 @@ class BatchReadCacheTests(unittest.TestCase):
         trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
         pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: []})
         simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("9")]})
-        service = CrossSyncService({"trakt": trakt, "pmdb": pmdb, "simkl": simkl})
+        # Both routes need a settled baseline, or the first-run protection would
+        # stop the removal before the cache ever came into it.
+        store = _established_store([item_key(_movie("9"))], pair_id="a")
+        store.commit("b", CATEGORY_WATCHLIST, items=store.baseline("a", CATEGORY_WATCHLIST).items)
+        service = CrossSyncService(
+            {"trakt": trakt, "pmdb": pmdb, "simkl": simkl}, state_store=store,
+        )
 
         results = service.run_pairs([
             _pair(pair_id="a", source="trakt", target="simkl", removal_mode=REMOVAL_MIRROR),
@@ -1515,6 +1555,13 @@ class RemovalGuardTests(unittest.TestCase):
     def _run(self, source_items, target_items, **service_kwargs):
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: source_items})
         target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: target_items})
+        service_kwargs.setdefault(
+            # The guard is about *size*, so these routes need a settled baseline
+            # — otherwise the first-run protection would stop them first and the
+            # threshold would never be reached.
+            "state_store",
+            _established_store([item_key(i) for i in target_items]),
+        )
         service = CrossSyncService({"trakt": source, "simkl": target}, **service_kwargs)
         result = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
         return result, target
@@ -1771,3 +1818,95 @@ class SamePlayToleranceTests(unittest.TestCase):
         for _ in range(3):
             result, target = self._run(stamps, ["2024-01-01T20:00:29Z"])
             self.assertEqual(result.added, 0)
+
+
+class FirstRunProtectionTests(unittest.TestCase):
+    """A route may not delete until it has one confirmed sync behind it.
+
+    This is a deliberate behaviour change, and it is the whole reason the
+    baseline exists. Without one, "absent from the source" cannot be told apart
+    from "the source never had it" — so the first run of a route, including the
+    first run of every existing route after this shipped, adds but never
+    removes. The run after that has a baseline and behaves normally.
+    """
+
+    def _service(self, store=None):
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("99")]})
+        service = CrossSyncService(
+            {"trakt": source, "simkl": target},
+            managed_keys={"p1": {CATEGORY_WATCHLIST: ["movie:tmdb:1", "movie:tmdb:99"]}},
+            state_store=store,
+        )
+        return source, target, service
+
+    def test_a_route_with_no_baseline_removes_nothing(self) -> None:
+        _source, target, service = self._service()
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+        self.assertEqual(stats.removed, 0)
+        self.assertEqual(target.removed, [])
+
+    def test_it_still_adds_on_that_first_run(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+        self.assertEqual(stats.added, 1)
+
+    def test_adopted_ownership_alone_does_not_authorise_a_deletion(self) -> None:
+        # The migration from pair_managed_keys records what a pair wrote, but
+        # never what the source looked like, so it cannot justify a removal.
+        import tempfile
+        from pathlib import Path
+        from src.sync.state_store import SyncStateStore
+
+        store = SyncStateStore(Path(tempfile.mkdtemp()) / "state.json")
+        store.adopt_managed_keys({"p1": {CATEGORY_WATCHLIST: ["movie:tmdb:99"]}})
+        _source, target, service = self._service(store)
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED))
+        self.assertEqual(stats.removed, 0)
+        self.assertEqual(target.removed, [])
+
+    def test_once_a_baseline_exists_the_removal_happens(self) -> None:
+        store = _established_store(
+            ["movie:tmdb:1", "movie:tmdb:99"], managed=["movie:tmdb:99"],
+        )
+        _source, target, service = self._service(store)
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED))
+        self.assertEqual(stats.removed, 1)
+        self.assertEqual([i["tmdb_id"] for i in target.removed[0][1]], ["99"])
+
+    def test_history_is_unaffected_by_the_planner(self) -> None:
+        # History keeps the legacy path until its own planner lands, so its
+        # behaviour must not have shifted underneath it.
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        service = CrossSyncService({"trakt": source, "pmdb": target})
+        stats = service.run_pair(
+            _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
+        )
+        self.assertEqual(stats.added, 1)
+        self.assertEqual(service.plans, {})
+
+    def test_resume_is_unaffected_by_the_planner(self) -> None:
+        # Resume needs update semantics: an item on both sides may still need
+        # writing because the position moved. A membership planner would call
+        # that "already in sync".
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [_resume("1", 60_000)]},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [_resume("1", 20_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        service = CrossSyncService({"trakt": source, "library": target})
+        result = service.run_pair(_pair(target="library", categories=[CATEGORY_RESUME]))
+        self.assertEqual(result.added, 1)
+        self.assertEqual(service.plans, {})

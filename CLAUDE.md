@@ -205,11 +205,43 @@ deliberately not offered for membership — several providers expose no reliable
 per-item modification time, and a policy that degrades to "whichever we read
 second" is worse than reporting the conflict.
 
-**The planner runs in shadow first.** `CrossSyncService` builds a plan beside the
-live decision and records where they disagree (`plan_divergences`, surfaced on
-`/pairs/run`); it does not yet drive writes. Switching execution over is the next
-step, and running both against real libraries first is what makes that switch
-reviewable rather than hopeful.
+* `sync/safety.py` — threshold and evidence checks over a plan
+* `sync/executor.py` — performs a plan, reporting each action's fate
+
+**Membership now executes from the plan; history and resume do not.**
+`_PLANNED_CATEGORIES` is watchlist and collection only. History is an
+append-only log with its own dedupe rules, and resume is a progress value where
+an item present on both sides may still need writing because the position moved
+— handing either to a *membership* planner would silently turn "changed" into
+"already in sync". Both keep the legacy path until their own planners land, and
+there are tests pinning that.
+
+**A route may not delete until it has one confirmed sync behind it.** This is a
+real behaviour change: the first run of every existing route after this shipped
+adds but removes nothing, then establishes a baseline and behaves normally.
+Without a baseline "absent from the source" cannot be told apart from "the
+source never had it", and the adopted `pair_managed_keys` cannot fill the gap
+because they never recorded the source side.
+
+**The guard blocks in two tiers, and only one is overridable.** Threshold blocks
+(too many removals, too large a share) can be waived by a person acting on a
+preview — `allow_destructive_override`, passed only by `/pairs/run`, never by
+the scheduler. Hard blocks cannot be waived by anyone: an unreadable source or
+destination, a missing baseline, or a source returning nothing at all while the
+destination holds plenty. A person may decide a large deletion is right; nobody
+gets to decide that a failed read really was empty. Blocking is *demotion* —
+`SyncPlan.without_removals` keeps the additions, since whatever made the
+removals unsafe says nothing about items the source positively reported.
+
+**A partial run is neither a success nor a failure.** `ExecutionResult.complete`
+is false while anything is outstanding — a failed write, one the provider never
+confirmed, an action the guard blocked — and only a complete run may `commit` a
+baseline. An item the provider *explicitly* could not match is `not_found` and
+does **not** hold the route back: retrying will not change its answer, and one
+permanently unmappable title must not stop a route ever agreeing on anything.
+Batched writes mean an adapter reports "added: 8" for ten items without saying
+which two it dropped; the unconfirmed remainder is recorded as `unconfirmed` and
+stays outstanding rather than being claimed either way.
 
 **Only a run that actually succeeded may advance the agreement.** `commit` is
 the sole method that moves `last_successful_sync`, bumps `sync_version` and

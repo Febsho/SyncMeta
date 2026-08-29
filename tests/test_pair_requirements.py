@@ -29,6 +29,29 @@ def _movie(tmdb_id: str = "128") -> dict:
     }
 
 
+
+def _settled_baseline(pair_id, category, keys):
+    """One confirmed sync behind this route, so a removal may be justified.
+
+    Without it the first-run protection stops every deletion, which is correct
+    but is not what this test is about.
+    """
+    import tempfile
+    from pathlib import Path
+    from src.sync.models import ItemState, STATE_PRESENT
+    from src.sync.state_store import SyncStateStore
+
+    store = SyncStateStore(Path(tempfile.mkdtemp()) / "state.json")
+    store.commit(pair_id, category, items={
+        key: ItemState(
+            source=STATE_PRESENT, destination=STATE_PRESENT,
+            synced=STATE_PRESENT, managed=True,
+        )
+        for key in keys
+    })
+    return store
+
+
 class _SimklClient:
     def __init__(self, planned: list[dict]) -> None:
         self.planned = list(planned)
@@ -179,7 +202,9 @@ class PlanToWatchRoutingTests(unittest.TestCase):
             "status-transition": {
                 CATEGORY_COLLECTION: ["watching:movie:tmdb:128"],
             },
-        })
+        }, state_store=_settled_baseline(
+            "status-transition", CATEGORY_COLLECTION, ["watching:movie:tmdb:128"],
+        ))
 
         result = service.run_pair(pair)
 
