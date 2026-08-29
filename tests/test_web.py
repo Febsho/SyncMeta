@@ -1612,7 +1612,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertEqual(adapters["trakt"].fetches, 1, "the shared source was read once per pair")
-        self.assertEqual(body["cached_reads"], 1)
+        # One network fetch for two routes sharing a source. The ownership
+        # pre-pass reads it first, so every later read of it is a cache hit.
+        self.assertEqual(body["cached_reads"], 3)
         self.assertEqual(body["provider_reads"], 3)
         self.assertEqual([r["added"] for r in body["results"]], [1, 1])
 

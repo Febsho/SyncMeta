@@ -576,6 +576,22 @@ class ProviderAdapter:
         """Human-readable explanation when ``can_write()`` is False."""
         return ""
 
+    def last_read_complete(self) -> bool:
+        """Whether this adapter's most recent read returned everything.
+
+        False turns a successful fetch into one that may be added from but never
+        deleted from — a page that never arrived is indistinguishable from a
+        page whose contents were removed.
+
+        Only providers that can actually detect truncation report it: today
+        PublicMetaDB (a promised page that came back empty) and MDBList (a
+        pagination cursor that stops advancing). Trakt, SIMKL and AniList end
+        their reads on an unambiguous signal and have no known silent-truncation
+        path, so they answer True.
+        """
+        client = getattr(self, "_client", None)
+        return bool(getattr(client, "last_read_complete", True))
+
     def accepts(self, category: str, item: dict, target_list: str = "") -> bool:
         """Whether this target will actually store ``item`` in ``category``.
 

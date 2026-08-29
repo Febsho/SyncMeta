@@ -10,4 +10,10 @@ Landing incrementally. What exists today:
 * ``models``      — the shared vocabulary: fetch outcomes, item states, baselines
 * ``state_store`` — per-route baselines, persisted per profile, advanced only by
                     a run that actually succeeded
+* ``planner``     — membership: what changed, not what differs
+* ``history``     — watch events: union semantics and three layers of dedupe
+* ``progress``    — resume points: never rewind somebody's playback
+* ``safety``      — refuse a plan more likely to be a bug than an intention
+* ``executor``    — perform a plan and report each action's fate
+* ``ownership``   — whether any other route still requires an item
 """

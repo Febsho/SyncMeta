@@ -70,6 +70,9 @@ class MdbListClient:
         self._refresh_lock = threading.Lock()
         self._refresh_attempted = False
         self._refresh_succeeded = False
+        # See PublicMetaDBClient: False means the last paginated read was cut
+        # short, so absence in it justifies no deletion.
+        self.last_read_complete = True
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -772,6 +775,7 @@ class MdbListClient:
     def get_sync_items(self, category: str) -> list[dict]:
         """Read one sync category, preferring the current cursor pagination."""
         path = self._sync_path(category)
+        self.last_read_complete = True
         offset = 0
         limit = 1000
         cursor = ""
@@ -800,6 +804,15 @@ class MdbListClient:
                 break
             if next_cursor:
                 if next_cursor == cursor:
+                    # The server says there is more but keeps handing back the
+                    # same cursor. Stopping here is right; pretending we saw the
+                    # whole list is not.
+                    self.last_read_complete = False
+                    logger.warning(
+                        "MDBList %s: pagination cursor stopped advancing after "
+                        "%d item(s); treating this read as incomplete",
+                        path, len(items),
+                    )
                     break
                 cursor = next_cursor
             else:

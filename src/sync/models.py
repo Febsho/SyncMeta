@@ -133,6 +133,12 @@ class ItemState:
     changed_source_at: int = 0
     changed_destination_at: int = 0
     action: str = ""
+    #: History only: the play timestamps this route has already carried across
+    #: for this episode, and the source event ids behind them. This is what makes
+    #: a repeated sync idempotent and, in a two-way route, what stops an event
+    #: coming back as if the destination had invented it.
+    plays: tuple[str, ...] = ()
+    event_ids: tuple[str, ...] = ()
 
     @property
     def known(self) -> bool:
@@ -146,15 +152,22 @@ class ItemState:
             1 if self.managed else 0,
             self.changed_source_at, self.changed_destination_at,
             self.action,
+            list(self.plays), list(self.event_ids),
         ]
-        while len(packed) > 1 and packed[-1] in ("", 0):
+        while len(packed) > 1 and packed[-1] in ("", 0, []):
             packed.pop()
         return packed
 
     @classmethod
     def from_list(cls, raw: object) -> "ItemState":
         values = list(raw) if isinstance(raw, (list, tuple)) else []
-        values += [None] * (7 - len(values))
+        values += [None] * (9 - len(values))
+
+        def _tuple(value) -> tuple[str, ...]:
+            if not isinstance(value, (list, tuple)):
+                return ()
+            return tuple(str(entry) for entry in value if str(entry or "").strip())
+
         return cls(
             source=str(values[0] or ""),
             destination=str(values[1] or ""),
@@ -163,6 +176,8 @@ class ItemState:
             changed_source_at=int(values[4] or 0),
             changed_destination_at=int(values[5] or 0),
             action=str(values[6] or ""),
+            plays=_tuple(values[7]),
+            event_ids=_tuple(values[8]),
         )
 
 
