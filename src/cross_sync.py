@@ -979,6 +979,21 @@ class CrossSyncService:
             )
             if planned is not None:
                 return planned
+        elif is_history:
+            planned = self._run_two_way_history(
+                pair, first, second, category, result,
+                first_rows=[item for _key, item in first_rows],
+                second_rows=[item for _key, item in second_rows],
+            )
+            if planned is not None:
+                return planned
+        elif category == CATEGORY_RESUME:
+            planned = self._run_two_way_progress(
+                pair, first, second, category, result,
+                first_by_key=first_by_key, second_by_key=second_by_key,
+            )
+            if planned is not None:
+                return planned
 
         first_keys, second_keys = set(first_by_key), set(second_by_key)
         known = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
@@ -1368,6 +1383,109 @@ class CrossSyncService:
                 logger.warning("Could not record two-way baseline", exc_info=True)
         return result
 
+    def _run_two_way_history(
+        self, pair, first, second, category, result, *, first_rows, second_rows,
+    ):
+        """Carry watch events both ways, from one pair of reads.
+
+        History is a union, so both directions are simply planned — there is no
+        deletion to order and therefore no way for run order to change the
+        outcome. Both plans are built from the *same* snapshots, so a play only
+        on one side is carried to the other and neither is re-read mid-run.
+
+        Ping-pong across runs is prevented by the baseline rather than by
+        ordering: once a play is recorded as carried, it is recognised on the
+        way back and never returned to where it came from.
+        """
+        baseline = self._baseline_for(pair, category)
+        try:
+            forward = plan_history(
+                route_id=str(pair.pair_id), source_rows=first_rows,
+                destination_rows=second_rows, baseline=baseline,
+                target_records_plays=bool(getattr(second, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=first.key, destination_provider=second.key,
+                category=str(category),
+            )
+            backward = plan_history(
+                route_id=str(pair.pair_id), source_rows=second_rows,
+                destination_rows=first_rows, baseline=baseline,
+                target_records_plays=bool(getattr(first, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=second.key, destination_provider=first.key,
+                category=str(category),
+            )
+        except Exception:
+            logger.warning("Could not build two-way history plan", exc_info=True)
+            return None
+
+        self._plans[(str(pair.pair_id), str(category))] = forward.plan
+        for plan, target in ((forward.plan, second), (backward.plan, first)):
+            self._apply_two_way_side(pair, category, plan, target, result)
+
+        if self._state_store is not None and not self._dry_run and not result.errors:
+            try:
+                # Both directions' records, merged: after this run each side
+                # holds what the other had, and the baseline has to say so or
+                # the next run carries it all again.
+                items = dict(baseline.items)
+                for planned in (forward, backward):
+                    for key, projected in planned.projected.items():
+                        existing = items.get(key)
+                        if existing is None:
+                            items[key] = projected
+                            continue
+                        merged_plays = tuple(dict.fromkeys(
+                            tuple(existing.plays) + tuple(projected.plays)
+                        ))
+                        merged_events = tuple(dict.fromkeys(
+                            tuple(existing.event_ids) + tuple(projected.event_ids)
+                        ))
+                        items[key] = ItemState(
+                            source=STATE_PRESENT, destination=STATE_PRESENT,
+                            synced=STATE_PRESENT, managed=True,
+                            plays=merged_plays, event_ids=merged_events,
+                        )
+                self._state_store.commit(pair.pair_id, category, items=items)
+            except Exception:
+                logger.warning("Could not record two-way history baseline", exc_info=True)
+        return result
+
+    def _run_two_way_progress(
+        self, pair, first, second, category, result, *, first_by_key, second_by_key,
+    ):
+        """Reconcile resume points both ways, which is furthest-wins by itself.
+
+        Each direction refuses to write when the destination is already further
+        along, so planning both and applying both leaves each side at the
+        furthest valid position — without either side's turn deciding it.
+        """
+        baseline = self._baseline_for(pair, category)
+        try:
+            forward = plan_progress(
+                route_id=str(pair.pair_id), source_by_key=first_by_key,
+                destination_by_key=second_by_key, baseline=baseline,
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=first.key, destination_provider=second.key,
+                category=str(category),
+            ).plan
+            backward = plan_progress(
+                route_id=str(pair.pair_id), source_by_key=second_by_key,
+                destination_by_key=first_by_key, baseline=baseline,
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=second.key, destination_provider=first.key,
+                category=str(category),
+            ).plan
+        except Exception:
+            logger.warning("Could not build two-way progress plan", exc_info=True)
+            return None
+
+        self._plans[(str(pair.pair_id), str(category))] = forward
+        result.conflicts_detected = len(forward.conflicts) + len(backward.conflicts)
+        for plan, target in ((forward, second), (backward, first)):
+            self._apply_two_way_side(pair, category, plan, target, result)
+        return result
+
     def _apply_two_way_side(
         self, pair, category, plan, target, result, target_list: str = "",
     ) -> None:
@@ -1394,10 +1512,13 @@ class CrossSyncService:
             if not forward:
                 result.removed_back += len(plan.removals)
 
-        if plan.additions and not self._dry_run:
+        # Updates ride with additions: `add` is an upsert for the categories
+        # that have them, and resume produces nothing else.
+        writes = list(plan.additions) + list(plan.updates)
+        if writes and not self._dry_run:
             try:
                 totals = target.add(
-                    category, [a.item for a in plan.additions], target_list,
+                    category, [a.item for a in writes], target_list,
                     **_add_kwargs(target, pair),
                 ) or {}
                 count = _total(totals, "added")
@@ -1412,10 +1533,10 @@ class CrossSyncService:
             else:
                 result.added_back += count
                 result.added += count
-        elif plan.additions:
-            result.added += len(plan.additions)
+        elif writes:
+            result.added += len(writes)
             if not forward:
-                result.added_back += len(plan.additions)
+                result.added_back += len(writes)
 
     def _baseline_for(self, pair, category: str):
         if self._state_store is not None:

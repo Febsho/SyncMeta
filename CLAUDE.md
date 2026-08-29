@@ -216,8 +216,13 @@ collapse exactly the distinctions each exists to keep — a membership planner
 calls a moved playback position "already in sync", and calls a rewatch a
 duplicate. `_run_category` dispatches on the category; each planner falls back to
 the legacy diff if it raises, so a planner bug degrades rather than fails the
-run. The **two-way** path plans membership only — history and resume there still
-use `_history_adds` / `_resume_matches`.
+run. **Two-way** plans every category too: membership through `plan_two_way`,
+history by planning both directions from the *same* pair of reads (a union has
+no deletion to order, and the baseline's record of what was carried is what stops
+a play echoing back), and resume by planning both directions — each refuses to
+write when the destination is already further, so applying both is furthest-wins
+without either side's turn deciding it. `_history_adds` / `_resume_matches`
+survive only as the fallback when a planner raises.
 
 **History's dedupe has to read the live ledger, not the initial destination
 read.** Two plays of one episode arriving in the same batch is the case that
@@ -321,6 +326,15 @@ why `pair_managed_keys` — a fraction of the size — already had to be dropped
 `/status`. `CrossSyncService.route_states` is likewise server-side only and is
 deliberately *not* folded into `PairCategoryStats`, which is serialized into
 `last_pair_results` and does ride the poll.
+
+**Route shapes are named, never refused.** `sync/topology.py` flags two one-way
+routes pointing at each other (one two-way route reconciles from a single
+baseline; two decide independently and re-add each other's deletions) and cycles
+of three or more (additions still settle, but a deletion can travel the loop and
+return as an addition). Several routes writing one destination is reported as
+information only — it is legitimate and common, and the ownership rules already
+handle it. Nothing is forbidden: the user may have a reason, and refusing to run
+would be worse than the shape.
 
 ## Key Invariants
 

@@ -2130,3 +2130,65 @@ class ResumePlannerThroughTheServiceTests(unittest.TestCase):
     def test_a_settled_resume_route_writes_nothing(self) -> None:
         result, _ = self._run(_resume("1", 40_000), _resume("1", 40_000))
         self.assertEqual(result.added, 0)
+
+
+class TwoWayHistoryTests(unittest.TestCase):
+    """Both sides end holding the union, and stay there.
+
+    The failure this guards is ping-pong: a play carried A→B coming back as if
+    B had invented it. Ordering cannot prevent that — only the baseline's record
+    of what was already carried can.
+    """
+
+    def setUp(self) -> None:
+        self.store = _fresh_store()
+        self.pair = _pair(
+            source="trakt", target="simkl", mode="two_way",
+            categories=[CATEGORY_HISTORY], removal_mode=REMOVAL_MANAGED,
+        )
+
+    def _side(self, key, rows):
+        adapter = FakeAdapter(
+            key, {CATEGORY_HISTORY: list(rows)},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        adapter.records_plays = True
+        return adapter
+
+    def _run(self, a, b):
+        return CrossSyncService(
+            {"trakt": a, "simkl": b}, state_store=self.store,
+        ).run_pair(self.pair)
+
+    def test_each_side_gains_what_the_other_had(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 2, "2024-02-02T20:00:00Z")])
+        self._run(a, b)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+        self.assertEqual(len(b._contents[CATEGORY_HISTORY]), 2)
+
+    def test_later_runs_write_nothing(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 2, "2024-02-02T20:00:00Z")])
+        self._run(a, b)
+        for _ in range(3):
+            self.assertEqual(self._run(a, b).added, 0)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+
+    def test_a_new_play_on_one_side_propagates_once(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        self._run(a, b)
+        b._contents[CATEGORY_HISTORY].append(
+            _episode("42", 1, 3, "2024-09-09T20:00:00Z")
+        )
+        self.assertEqual(self._run(a, b).added, 1)
+        self.assertEqual(self._run(a, b).added, 0)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+        self.assertEqual(len(b._contents[CATEGORY_HISTORY]), 2)
+
+    def test_history_is_never_removed_from_either_side(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [])
+        result = self._run(a, b)
+        self.assertEqual(result.removed, 0)

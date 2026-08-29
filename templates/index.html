@@ -1052,6 +1052,10 @@
     }
 
     /* ── Sync preview ────────────────────────────────────────────────────── */
+    .topology-note{display:flex;gap:10px;align-items:flex-start;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--z950);font-size:12px;color:var(--z300);line-height:1.5;margin-bottom:8px}
+    .topology-note-warn{border-color:rgba(251,191,36,.28)}
+    .topology-note-dot{width:6px;height:6px;border-radius:50%;background:var(--z600);margin-top:6px;flex:none}
+    .topology-note-warn .topology-note-dot{background:var(--orange)}
     .preview-destructive{display:flex;align-items:baseline;gap:10px;padding:10px 14px;border:1px solid rgba(248,113,113,.28);background:rgba(248,113,113,.06);border-radius:10px;margin-bottom:12px;font-size:13px;color:var(--z200)}
     .preview-warnings{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
     .preview-warning{font-size:12px;color:var(--z400);line-height:1.5;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--z950)}
@@ -1793,6 +1797,7 @@
             </div>
             <div id="pairs-capabilities" class="pair-caps"></div>
             <div class="sync-routes-head"><span class="sync-routes-title">Your sync routes</span><button class="btn btn-sm" type="button" id="btn-pair-add">Add advanced route</button></div>
+            <div id="pairs-topology" class="hidden"></div>
             <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
             <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px">
               <div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div>
@@ -11050,6 +11055,24 @@
       card.outerHTML = pairCardHtml(pair, index);
     }
 
+    function renderTopologyNotes(notes) {
+      const host = el('pairs-topology');
+      if (!host) return;
+      const rows = (notes || []).filter(note => note && note.message);
+      if (!rows.length) { host.innerHTML = ''; host.classList.add('hidden'); return; }
+      host.classList.remove('hidden');
+      host.innerHTML = rows.map(note => `
+        <div class="topology-note ${note.severity === 'warning' ? 'topology-note-warn' : ''}">
+          <span class="topology-note-dot"></span>
+          <div>
+            <div>${esc(note.message)}</div>
+            ${(note.routes || []).filter(Boolean).length
+              ? `<div class="catalog-note">${esc((note.routes || []).filter(Boolean).join(' · '))}</div>`
+              : ''}
+          </div>
+        </div>`).join('');
+    }
+
     function renderPairs() {
       const node = el('pairs-list');
       if (!node) return;
@@ -11355,6 +11378,7 @@
         two_way_removal_modes: Array.isArray(result.data.two_way_removal_modes)
           ? result.data.two_way_removal_modes : ['additive', 'managed'],
         destination_rules: Array.isArray(result.data.destination_rules) ? result.data.destination_rules : [],
+        topology: Array.isArray(result.data.topology) ? result.data.topology : [],
       };
       if (Array.isArray(openByPosition)) {
         pairsState.pairs.forEach((pair, i) => setPairExpanded(pair, !!openByPosition[i]));
@@ -11366,6 +11390,7 @@
       }
       renderPairCapabilities();
       renderSyncCards();
+      renderTopologyNotes(pairsState.topology);
       renderPairs();
       renderRouteScheduleSettings();
       updateMultiSyncBuilder();

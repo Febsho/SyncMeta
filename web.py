@@ -95,6 +95,7 @@ from src.providers import (
 )
 from src.library_store import LibraryStore
 from src.sync.state_store import SyncStateStore
+from src.sync.topology import analyze as analyze_topology
 from src.media_kind import ALL_KINDS, KIND_LABELS, matches_filter
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
@@ -4544,7 +4545,18 @@ def api_profile_pairs():
         entry["next_sync_at"] = schedule.get("next_sync_at")
         pairs.append(entry)
 
-    return jsonify({"pairs": pairs, **_pair_capabilities(config, profile_id=profile_id)})
+    # How the routes fit together. Advisory only — a shape is named, never
+    # refused, because the user may well have a reason for it.
+    try:
+        topology = [note.to_dict() for note in analyze_topology(_sync_pairs_from_config(config))]
+    except Exception:
+        logger.warning("Could not analyse route topology", exc_info=True)
+        topology = []
+
+    return jsonify({
+        "pairs": pairs, "topology": topology,
+        **_pair_capabilities(config, profile_id=profile_id),
+    })
 
 
 @app.route("/api/profile/pairs/lists", methods=["POST"])
