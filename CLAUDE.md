@@ -345,6 +345,21 @@ episode so the next run does not see the whole show as unsynced. SIMKL also
 stamped the play date on the *show*, which put the first episode's date on every
 other episode grouped into the same entry; `watched_at` now rides the episode.
 
+**The same viewing, reported twice, is one play.** Services do not agree on
+*when* a play happened — Trakt stamps the scrobble, SIMKL stamps when its server
+recorded it, an importer stamps whatever it was handed — so the same watch
+arrives seconds or minutes apart. Matched on the exact second it looked like a
+fresh rewatch at every hop, so one viewing multiplied into one play per service
+and grew on every run. `providers.PlaySet` matches within
+`PLAY_MATCH_WINDOW_SECONDS` (default 900, `SYNCMETA_PLAY_MATCH_WINDOW`, exposed
+in the admin panel), bisecting a sorted list because it is consulted once per
+source row. The window is wider than provider drift and narrower than a real
+repeat viewing, which cannot happen faster than the runtime. `_history_adds`
+seeds one ledger per episode from the target's stamps and updates it as rows are
+accepted, so two source rows a few seconds apart cannot both be written either;
+`library_store._record_extra_play` uses the same ledger, which is also what stops
+an entry written before `plays` existed gaining a phantom second play.
+
 **Watching something twice is two rows, and both have to arrive.** `item_key`
 answers "which episode", so every play of one episode shares a key — diffing
 history on identity alone keeps the first row and discards every rewatch, which

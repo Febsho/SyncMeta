@@ -373,3 +373,49 @@ class LibraryPlayTests(unittest.TestCase):
         self.store.mark_watched([self._play("2024-06-01T20:00:00Z")])
         self.store.unmark_watched([self._play("2024-01-01T20:00:00Z")])
         self.assertEqual(self._history_stamps(), [])
+
+
+class LibraryPlayToleranceTests(unittest.TestCase):
+    """The hub hears about one viewing from several services.
+
+    Each timestamps it slightly differently, so comparing on the exact second
+    turned a single watch into one play per service — and the Library then fanned
+    that back out to every target.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.store = LibraryStore(Path(self._dir.name) / "library.json")
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _play(self, watched_at: str) -> dict:
+        return {
+            "media_type": "tv", "tmdb_id": "1429", "title": "Attack on Titan",
+            "season": 1, "episode": 3, "watched_at": watched_at,
+        }
+
+    def _plays(self) -> int:
+        return len(self.store.fetch("history"))
+
+    def test_three_services_reporting_one_viewing_store_one_play(self) -> None:
+        for stamp in ("2024-01-01T20:00:00Z", "2024-01-01T20:00:37Z",
+                      "2024-01-01T20:01:12Z"):
+            self.store.mark_watched([self._play(stamp)], source="pair")
+        self.assertEqual(self._plays(), 1)
+
+    def test_a_genuine_rewatch_is_still_a_second_play(self) -> None:
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")], source="pair")
+        self.store.mark_watched([self._play("2024-06-01T20:00:00Z")], source="pair")
+        self.assertEqual(self._plays(), 2)
+
+    def test_a_legacy_entry_gains_no_phantom_play(self) -> None:
+        # An entry written before `plays` existed keeps one date. A re-read of
+        # the same viewing, timestamped a little differently, must not become a
+        # second play the first time it is synced after the upgrade.
+        self.store.mark_watched([self._play("2024-01-01T20:00:00Z")], source="pair")
+        for entry in self.store._items.values():
+            entry.pop("plays", None)
+        self.store.mark_watched([self._play("2024-01-01T20:00:37Z")], source="pair")
+        self.assertEqual(self._plays(), 1)

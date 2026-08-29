@@ -38,8 +38,8 @@ from .providers import (
     VISIBILITY_PRIVATE,
     enrich_identity,
     has_portable_identity,
+    PlaySet,
     item_key,
-    normalize_watched_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,31 +172,41 @@ def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, targ
     it keeps the first and silently discards every rewatch, which is why a
     second viewing never reached the other service.
 
-    So a play is matched on identity *and* its timestamp, but only where the
-    target can hold more than one: a service that reports watched *state* hands
-    back a single row however many plays it was sent, so writing the extra ones
-    would leave them looking missing on every subsequent run and the pair would
-    re-send them forever. ``records_plays`` on the adapter decides that, and
-    ``target_plays`` is empty when it is false.
+    But nor can an exact timestamp. Services do not agree on *when* a play
+    happened — Trakt stamps the scrobble, SIMKL stamps when its server recorded
+    it — so the same viewing arrives seconds apart and, matched exactly, looked
+    like a fresh rewatch at every hop. Plays are therefore matched within
+    ``PLAY_MATCH_WINDOW_SECONDS`` (see ``providers.PlaySet``).
 
-    An episode the target does not have at all is always added, whichever kind
-    of target it is — that is the ordinary first-play case.
+    The ledger starts from what the target already holds and is updated as rows
+    are accepted, so two source rows that are themselves a few seconds apart
+    cannot both be written either.
+
+    A rewatch only goes to a target that can hold one: a service reporting
+    watched *state* hands back a single row however many plays it was sent, so
+    the extra would look missing on every later run and be re-sent forever.
+    ``records_plays`` decides that, and ``target_plays`` is empty when it is
+    false. An episode the target lacks entirely is always added.
     """
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    ledgers: dict[str, PlaySet] = {}
     for key, item in source_rows:
-        stamp = normalize_watched_at(item.get("watched_at"))
-        if key in target_by_key:
-            known = target_plays.get(key)
-            if not known:
-                # Already watched there, and the target keeps no per-play
-                # record to add a rewatch to.
-                continue
-            if not stamp or stamp in known:
-                continue
-        if (key, stamp) in seen:
+        present = key in target_by_key
+        known = target_plays.get(key)
+        if present and not known:
+            # Already watched there, and the target keeps no per-play record to
+            # attach a rewatch to.
             continue
-        seen.add((key, stamp))
+        ledger = ledgers.get(key)
+        if ledger is None:
+            ledger = PlaySet(known or ())
+            ledgers[key] = ledger
+        stamp = item.get("watched_at")
+        if present and not ledger.stamped:
+            continue
+        if ledger.matches(stamp):
+            continue
+        ledger.add(stamp)
         out.append(item)
     return out
 
@@ -645,16 +655,14 @@ class CrossSyncService:
                 source_rows.append((key, item))
 
         target_by_key: dict[str, dict] = {}
-        target_plays: dict[str, set[str]] = {}
+        target_plays: dict[str, list] = {}
         keeps_plays = is_history and bool(getattr(target, "records_plays", False))
         for raw_item in target_items:
             item = enrich_identity(raw_item)
             key = self._comparison_key(item, target_list)
             target_by_key.setdefault(key, item)
             if keeps_plays:
-                stamp = normalize_watched_at(item.get("watched_at"))
-                if stamp:
-                    target_plays.setdefault(key, set()).add(stamp)
+                target_plays.setdefault(key, []).append(item.get("watched_at"))
 
         if is_history:
             to_add = _history_adds(source_rows, target_by_key, target_plays)
@@ -797,7 +805,7 @@ class CrossSyncService:
             """Index by identity, and for history also keep every play row."""
             out: dict[str, dict] = {}
             rows: list[tuple[str, dict]] = []
-            plays: dict[str, set[str]] = {}
+            plays: dict[str, list] = {}
             for raw in raw_items:
                 item = enrich_identity(raw)
                 if count_unmapped and not has_portable_identity(item):
@@ -807,9 +815,7 @@ class CrossSyncService:
                 out.setdefault(key, item)
                 if is_history:
                     rows.append((key, item))
-                    stamp = normalize_watched_at(item.get("watched_at"))
-                    if stamp:
-                        plays.setdefault(key, set()).add(stamp)
+                    plays.setdefault(key, []).append(item.get("watched_at"))
             return out, rows, plays
 
         first_by_key, first_rows, first_plays = _index(sides["first"], True)

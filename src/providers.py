@@ -17,7 +17,9 @@ removal mode are recorded against, so it must be stable across runs.
 
 from __future__ import annotations
 
+import bisect
 import logging
+import os
 from datetime import datetime, timezone
 from urllib.parse import quote, unquote
 
@@ -217,6 +219,94 @@ def normalize_watched_at(value) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).strftime(_PLAY_TIME_FORMAT)
+
+
+def watched_at_epoch(value) -> int | None:
+    """A play timestamp as epoch seconds, or None when there is none."""
+    text = normalize_watched_at(value)
+    if not text:
+        return None
+    return int(
+        datetime.strptime(text, _PLAY_TIME_FORMAT)
+        .replace(tzinfo=timezone.utc)
+        .timestamp()
+    )
+
+
+def _env_play_window() -> int:
+    raw = os.getenv("SYNCMETA_PLAY_MATCH_WINDOW", "").strip()
+    if not raw:
+        return _DEFAULT_PLAY_MATCH_WINDOW
+    try:
+        return max(0, min(86400, int(float(raw))))
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid SYNCMETA_PLAY_MATCH_WINDOW %r; using %d",
+            raw, _DEFAULT_PLAY_MATCH_WINDOW,
+        )
+        return _DEFAULT_PLAY_MATCH_WINDOW
+
+
+#: How far apart two records of the same episode have to be before they count as
+#: two viewings rather than one.
+#:
+#: Services do not agree on *when* a play happened. Trakt stamps the scrobble,
+#: SIMKL stamps when its server recorded it, an importer stamps whatever it was
+#: given — the same viewing routinely arrives seconds or minutes apart. Matched
+#: on the exact second, every hop then looked like a fresh rewatch, so one
+#: viewing multiplied into one play per service and kept growing.
+#:
+#: Fifteen minutes is comfortably wider than that drift and still narrower than
+#: a real repeat viewing, which cannot happen faster than the runtime: a 20-plus
+#: minute episode watched twice back to back is still two plays. Something very
+#: short rewatched immediately collapses into one, which is the accepted cost.
+_DEFAULT_PLAY_MATCH_WINDOW = 900
+PLAY_MATCH_WINDOW_SECONDS = _env_play_window()
+
+
+class PlaySet:
+    """The play times known for one episode, compared with tolerance.
+
+    Kept sorted and bisected because a real history is large — this is consulted
+    once per source row per run.
+    """
+
+    __slots__ = ("_epochs", "_window", "_had_presence")
+
+    def __init__(self, stamps=(), window: int | None = None):
+        self._window = PLAY_MATCH_WINDOW_SECONDS if window is None else max(0, int(window))
+        self._epochs: list[int] = sorted(
+            epoch for epoch in (watched_at_epoch(value) for value in stamps or ())
+            if epoch is not None
+        )
+        self._had_presence = False
+
+    def __bool__(self) -> bool:
+        return bool(self._epochs)
+
+    @property
+    def stamped(self) -> bool:
+        """Whether anything here carries a usable time at all."""
+        return bool(self._epochs)
+
+    def matches(self, value) -> bool:
+        """Whether ``value`` is one of the viewings already recorded."""
+        epoch = watched_at_epoch(value)
+        if epoch is None:
+            # A row with no time of its own is presence, not a distinct play.
+            return self._had_presence or bool(self._epochs)
+        index = bisect.bisect_left(self._epochs, epoch)
+        for neighbour in self._epochs[max(0, index - 1):index + 1]:
+            if abs(neighbour - epoch) <= self._window:
+                return True
+        return False
+
+    def add(self, value) -> None:
+        epoch = watched_at_epoch(value)
+        if epoch is None:
+            self._had_presence = True
+            return
+        bisect.insort(self._epochs, epoch)
 
 
 def history_play_key(item: dict) -> str:

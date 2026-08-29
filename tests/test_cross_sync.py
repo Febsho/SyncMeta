@@ -1706,3 +1706,68 @@ class MultiplePlayHistoryTests(unittest.TestCase):
         self.assertEqual(
             [i["watched_at"] for i in first.added[0][1]], ["2024-03-01T20:00:00Z"],
         )
+
+
+class SamePlayToleranceTests(unittest.TestCase):
+    """The same viewing, reported twice, is one play — not two.
+
+    Services do not agree on *when* a play happened: Trakt stamps the scrobble,
+    SIMKL stamps when its server recorded it, an importer stamps whatever it was
+    handed. Matched on the exact second, the same watch looked like a fresh
+    rewatch at every hop, so one viewing multiplied into one play per service
+    and kept growing on every run.
+    """
+
+    def _run(self, target_stamps, source_stamps):
+        source = FakeAdapter(
+            "trakt",
+            {CATEGORY_HISTORY: [_episode("42", 1, 3, ts) for ts in source_stamps]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "pmdb",
+            {CATEGORY_HISTORY: [_episode("42", 1, 3, ts) for ts in target_stamps]},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = True
+        result = CrossSyncService({"trakt": source, "pmdb": target}).run_pair(
+            _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
+        )
+        return result, target
+
+    def test_seconds_of_drift_is_the_same_play(self) -> None:
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"], ["2024-01-01T20:00:37Z"],
+        )
+        self.assertEqual(result.added, 0)
+        self.assertFalse(target.added)
+
+    def test_a_minute_of_drift_is_the_same_play(self) -> None:
+        result, _ = self._run(["2024-01-01T20:00:00Z"], ["2024-01-01T20:01:00Z"])
+        self.assertEqual(result.added, 0)
+
+    def test_a_genuine_rewatch_still_gets_through(self) -> None:
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"], ["2024-06-01T20:00:00Z"],
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(
+            [i["watched_at"] for i in target.added[0][1]], ["2024-06-01T20:00:00Z"],
+        )
+
+    def test_two_drifting_source_rows_are_not_both_written(self) -> None:
+        # The ledger updates as rows are accepted, so a source that reports the
+        # same viewing twice cannot write it twice either.
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"],
+            ["2024-06-01T20:00:00Z", "2024-06-01T20:00:40Z"],
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(len(target.added[0][1]), 1)
+
+    def test_repeated_runs_converge(self) -> None:
+        # The failure the user saw: the count grew on every sync.
+        stamps = ["2024-01-01T20:00:00Z"]
+        for _ in range(3):
+            result, target = self._run(stamps, ["2024-01-01T20:00:29Z"])
+            self.assertEqual(result.added, 0)
