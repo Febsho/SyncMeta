@@ -585,6 +585,20 @@ class LibraryStore:
                 out.append(item)
             return out
 
+    def clear(self) -> int:
+        """Remove every entry. Returns how many there were.
+
+        The file is written even when the Library was already empty, so the
+        on-disk state always matches what was asked for rather than depending on
+        whether anything happened to be there.
+        """
+        with self._lock:
+            removed = len(self._items)
+            self._items = {}
+            self._save_locked()
+        logger.info("Cleared %d entry(ies) from library %s", removed, self._path)
+        return removed
+
     def entries(self) -> list[dict]:
         """Every stored entry, for the Library UI."""
         with self._lock:

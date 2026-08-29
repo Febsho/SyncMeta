@@ -346,6 +346,17 @@ it deletes anything. The earliest play of each cluster is kept, and an
 incomplete PMDB read refuses the scan outright, since half the history looks
 like half the duplicates.
 
+**Clearing the Library drops its routes' baselines with it.**
+`/api/profile/data/clear-library` empties `LibraryStore` and then calls
+`forget_route` for every pair with `library` at either end. Clearing the store
+alone is a trap: a route reading *from* the Library holds a baseline saying its
+source had thousands of items, so an empty Library reads as the user having
+deleted them all. The safety guard would refuse the removal — a source returning
+nothing while the destination holds plenty is a hard block — but the route would
+then sit against that block instead of starting over. Dropping the baselines
+puts those routes back in `baseline_initializing`, where they may add and may
+not remove. Routes that never touch the Library keep theirs.
+
 **The Library hub is recommended, never imposed.** With three or more services
 connected and no Library route yet, the quick-setup builder explains why N
 two-way routes through the Library beat the N×(N−1) it takes to wire every pair

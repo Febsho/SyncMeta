@@ -1052,6 +1052,7 @@
     }
 
     /* ── Sync preview ────────────────────────────────────────────────────── */
+    .panel-header-tools{display:inline-flex;align-items:center;gap:10px;text-transform:none;letter-spacing:normal}
     .hub-recommendation{padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--z950);margin-bottom:14px}
     .hub-recommendation-title{font-size:13px;font-weight:600;color:var(--z100);margin-bottom:4px}
     .hub-recommendation-copy{font-size:12px;color:var(--z400);line-height:1.6}
@@ -1389,7 +1390,11 @@
         <div class="panel" id="library-local-panel">
           <div class="panel-header">
             <span>My Library</span>
-            <span class="history-time" id="lib-local-count"></span>
+            <span class="panel-header-tools">
+              <span class="history-time" id="lib-local-count"></span>
+              <button class="btn btn-sm btn-ghost" type="button" id="btn-clear-library"
+                      onclick="clearLibrary()" title="Remove every entry from the local Library">Clear Library</button>
+            </span>
           </div>
           <div class="panel-body" style="padding-bottom:12px">
             <div class="lib-filters">
@@ -2065,6 +2070,7 @@
               <div class="settings-group form-section"><div class="settings-group-title">Synchronization state</div><div class="desc">Clears cursors, list fingerprints and pair ownership state. Connections remain; the next run rebuilds state.</div><button class="btn btn-sm" type="button" onclick="runDataAction('reset-sync-state','Reset synchronization state?','The next synchronization will rebuild all derived state.')">Reset sync state</button></div>
               <div class="settings-group form-section"><div class="settings-group-title">Mappings</div><div class="desc">Automatic resolution caches can be rebuilt independently. Manually confirmed mappings are preserved unless you explicitly choose to remove them.</div><div class="actions-bar"><button class="btn btn-sm" type="button" onclick="clearMappingData(false)">Delete automatic cache</button><button class="btn btn-sm btn-danger" type="button" onclick="clearMappingData(true)">Delete cache and manual mappings</button></div></div>
               <div class="settings-group form-section"><div class="settings-group-title">Connections</div><div class="desc">Disconnect SIMKL, Trakt, AniList and MDBList. PublicMetaDB destination and TMDB metadata settings remain.</div><button class="btn btn-sm btn-danger" type="button" onclick="runDataAction('disconnect-sources','Disconnect all source providers?','PublicMetaDB remains configured.')">Disconnect all providers</button></div>
+              <div class="settings-group form-section"><div class="settings-group-title">Local Library</div><div class="desc">Empties SyncMeta's own copy of your titles, watch history and resume points. Nothing is deleted on SIMKL, Trakt, AniList, MDBList or PublicMetaDB. Routes that use the Library start over: the next run may add, but will not remove anything until it has completed once.</div><button class="btn btn-sm btn-danger" type="button" onclick="clearLibrary()">Clear Library</button></div>
               <div class="settings-group form-section"><div class="settings-group-title">PublicMetaDB data</div><div class="desc">Deletes lists managed by SyncMeta. It does not delete media from PublicMetaDB itself and cannot be automatically restored.</div><button class="btn btn-sm btn-danger" type="button" onclick="runDataAction('delete-pmdb-lists','Delete managed PublicMetaDB lists?','This cannot be undone.')">Delete PublicMetaDB lists</button></div>
               <div class="settings-group danger-zone form-section"><div class="settings-group-title">Profile</div><div class="settings-group-desc">Permanently deletes this profile, saved credentials, sync history, mappings and local Library data.</div><button class="btn btn-danger" type="button" onclick="deleteProfileData()">Delete User Records</button></div>
             </div>
@@ -8355,6 +8361,42 @@
       showToast('Data management action completed.', false, true);
       _forceStatusRefresh(true);
       return true;
+    }
+
+    async function clearLibrary() {
+      // Worth spelling out what this does and does not touch: the Library is
+      // SyncMeta's own copy, and clearing it removes nothing from any service.
+      const confirmed = await confirmDialog({
+        title: 'Clear the local Library?',
+        body: "This empties SyncMeta's own copy of your titles, watch history and "
+            + 'resume points. Nothing is removed from SIMKL, Trakt, AniList, MDBList '
+            + 'or PublicMetaDB. Routes that use the Library start over, so the next '
+            + 'run may add but will not remove anything until it has completed once.',
+        confirmLabel: 'Clear Library',
+        destructive: true,
+      });
+      if (!confirmed) return false;
+      const button = el('btn-clear-library');
+      if (button) { button.disabled = true; button.textContent = 'Clearing…'; }
+      try {
+        const result = await apiPost('/api/profile/data/clear-library', {});
+        if (!result.ok) {
+          showToast(formatApiError(result.data, 'Could not clear the Library.'), true, false);
+          return false;
+        }
+        const removed = Number(result.data.removed || 0);
+        const reset = Number(result.data.routes_reset || 0);
+        showToast(
+          `Library cleared — ${removed} entr${removed === 1 ? 'y' : 'ies'} removed`
+          + (reset ? `, ${reset} route${reset === 1 ? '' : 's'} will rebuild their baseline.` : '.'),
+          false, true,
+        );
+        if (typeof loadLocalLibrary === 'function') loadLocalLibrary();
+        _forceStatusRefresh(true);
+        return true;
+      } finally {
+        if (button) { button.disabled = false; button.textContent = 'Clear Library'; }
+      }
     }
 
     async function clearMappingData(includeManual) {

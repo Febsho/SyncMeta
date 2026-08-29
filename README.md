@@ -209,6 +209,16 @@ a genuine rewatch weeks later is never touched. If PublicMetaDB returns only
 part of your history the scan refuses to run at all, since half the history
 looks like half the duplicates.
 
+**Clearing the Library.** The Library page and the Danger Zone both offer
+*Clear Library*, which empties SyncMeta's own copy of your titles, watch history
+and resume points. Nothing is removed from SIMKL, Trakt, AniList, MDBList or
+PublicMetaDB — it only clears the local store.
+
+Routes that use the Library have their baselines dropped along with it, so they
+start over: the next run may add, but will not remove anything until it has
+completed once. Without that, a route reading *from* the Library would see its
+source go from thousands of items to none and read it as a mass deletion.
+
 **Route shapes.** The route editor warns about configurations that fight — two
 one-way routes pointing at each other (better as one two-way route) and loops
 (A → B → C → A, where no service is the authority). Neither is forbidden.

@@ -419,3 +419,52 @@ class LibraryPlayToleranceTests(unittest.TestCase):
             entry.pop("plays", None)
         self.store.mark_watched([self._play("2024-01-01T20:00:37Z")], source="pair")
         self.assertEqual(self._plays(), 1)
+
+
+class LibraryClearTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.path = Path(self._dir.name) / "library.json"
+        self.store = LibraryStore(self.path)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _populate(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [
+            {"media_type": "movie", "tmdb_id": "1", "title": "A"},
+        ])
+        self.store.mark_watched([{
+            "media_type": "tv", "tmdb_id": "2", "title": "B",
+            "season": 1, "episode": 1, "watched_at": "2024-01-01T20:00:00Z",
+        }])
+
+    def test_clearing_reports_what_it_removed(self) -> None:
+        self._populate()
+        self.assertEqual(self.store.clear(), 2)
+
+    def test_everything_is_gone_afterwards(self) -> None:
+        self._populate()
+        self.store.clear()
+        self.assertEqual(self.store.entries(), [])
+        self.assertEqual(self.store.fetch(CATEGORY_WATCHLIST), [])
+        self.assertEqual(self.store.fetch("history"), [])
+        self.assertEqual(self.store.counts()["total"], 0)
+
+    def test_the_file_reflects_it(self) -> None:
+        # Not only the in-memory copy: a restart must not bring it back.
+        self._populate()
+        self.store.clear()
+        self.assertEqual(LibraryStore(self.path).entries(), [])
+
+    def test_clearing_an_empty_library_is_harmless(self) -> None:
+        self.assertEqual(self.store.clear(), 0)
+        self.assertEqual(self.store.entries(), [])
+
+    def test_the_store_still_works_afterwards(self) -> None:
+        self._populate()
+        self.store.clear()
+        self.store.add(CATEGORY_WATCHLIST, [
+            {"media_type": "movie", "tmdb_id": "9", "title": "C"},
+        ])
+        self.assertEqual(len(self.store.entries()), 1)

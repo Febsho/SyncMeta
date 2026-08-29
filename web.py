@@ -4235,6 +4235,65 @@ def api_profile_data_clear_mappings():
     )
 
 
+@app.route("/api/profile/data/clear-library", methods=["POST"])
+def api_profile_data_clear_library():
+    """Empty the local Library, and forget what the routes agreed about it.
+
+    Clearing the store on its own would be a trap. A route that reads *from* the
+    Library has a baseline saying the source held thousands of items; with the
+    Library suddenly empty, the next run would read that as the user having
+    deleted all of them and plan to remove them from the destination too. The
+    safety guard would refuse it — a source returning nothing while the
+    destination holds plenty is a hard block — but the route would sit stuck
+    against that block rather than simply starting over.
+
+    So the baselines for every route touching the Library are dropped with it.
+    Those routes re-enter their initialising state: the next run may add, and
+    may not remove, until it has completed once and has something to compare
+    against again.
+    """
+    profile_id = _current_profile_id()
+    profile = _current_private_profile()
+    if not profile_id or not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    if profile.get("sync_running"):
+        return _json_error("Wait for the current sync to finish", 409)
+
+    try:
+        removed = _library_store_for(profile_id).clear()
+    except Exception as exc:
+        logger.exception("Could not clear the library for profile %s", profile_id[:8])
+        return _json_error(f"Could not clear the Library: {exc}", 500)
+
+    routes_reset = 0
+    try:
+        state_store = _sync_state_store_for(profile_id)
+        for pair in (profile.get("options") or {}).get("sync_pairs") or []:
+            if not isinstance(pair, dict):
+                continue
+            if "library" not in (str(pair.get("source") or ""), str(pair.get("target") or "")):
+                continue
+            pair_id = str(pair.get("pair_id") or "").strip()
+            if pair_id and state_store.forget_route(pair_id):
+                routes_reset += 1
+    except Exception:
+        logger.warning(
+            "Cleared the library but could not reset its route baselines for %s",
+            profile_id[:8], exc_info=True,
+        )
+
+    logger.info(
+        "Cleared %d Library entry(ies) for profile %s and reset %d route baseline(s)",
+        removed, profile_id[:8], routes_reset,
+    )
+    return jsonify({
+        "status": "cleared",
+        "removed": removed,
+        "routes_reset": routes_reset,
+        "profile": _profile_store.get_profile_by_id(profile_id, include_credentials=True),
+    })
+
+
 @app.route("/api/profile/data/disconnect-sources", methods=["POST"])
 def api_profile_data_disconnect_sources():
     profile_id = _current_profile_id()

@@ -3905,3 +3905,90 @@ class DuplicatePlayRepairEndpointTests(unittest.TestCase):
         self.client.post("/api/profile/logout", json={})
         response = self.client.post("/api/profile/history/duplicates", json={})
         self.assertEqual(response.status_code, 401)
+
+
+class ClearLibraryEndpointTests(unittest.TestCase):
+    """Emptying SyncMeta's own copy, and starting the routes that use it over.
+
+    Clearing the store alone would be a trap: a route reading *from* the Library
+    has a baseline saying its source held thousands of items, so an empty
+    Library reads as the user having deleted all of them. The safety guard would
+    refuse the resulting removal, but the route would then sit stuck against
+    that block rather than simply starting again.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        store_path = Path(self.tmpdir.name) / "profiles.json"
+        web._profile_store = web.ProfileStore(store_path)
+        web.PROFILE_STORE_FILE = store_path
+        web._library_stores = {}
+        web._sync_state_stores = {}
+        web._session_store = web.ServerSessionStore(ttl_seconds=3600)
+        web._login_limiter = web.LoginAttemptLimiter(max_attempts=5, window_seconds=60)
+        web.SITE_ACCESS_PASSWORD = ""
+        self.client = web.app.test_client()
+        profile = web._profile_store.create_profile(
+            "secret", {}, {
+                "auto_sync": False,
+                "sync_pairs": [
+                    {"pair_id": "into-library", "source": "trakt", "target": "library",
+                     "categories": ["watchlist"]},
+                    {"pair_id": "elsewhere", "source": "trakt", "target": "pmdb",
+                     "categories": ["watchlist"]},
+                ],
+            },
+        )
+        self.profile_id = profile["profile_id"]
+        self.client.post("/api/profile/login", json={
+            "profile_id": self.profile_id, "password": "secret",
+        })
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def _seed(self):
+        library = web._library_store_for(self.profile_id)
+        library.add("watchlist", [{"media_type": "movie", "tmdb_id": "1", "title": "A"}])
+        state = web._sync_state_store_for(self.profile_id)
+        from src.sync.models import ItemState
+        for route in ("into-library", "elsewhere"):
+            state.commit(route, "watchlist", items={"movie:tmdb:1": ItemState(managed=True)})
+        return library, state
+
+    def test_the_library_is_emptied_and_the_count_reported(self) -> None:
+        library, _state = self._seed()
+        response = self.client.post("/api/profile/data/clear-library", json={})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["status"], "cleared")
+        self.assertEqual(body["removed"], 1)
+        self.assertEqual(library.entries(), [])
+
+    def test_routes_touching_the_library_lose_their_baseline(self) -> None:
+        _library, state = self._seed()
+        body = self.client.post("/api/profile/data/clear-library", json={}).get_json()
+        self.assertEqual(body["routes_reset"], 1)
+        # It may add again, but must not remove until it has completed a run.
+        self.assertFalse(state.baseline("into-library", "watchlist").allows_removals)
+
+    def test_other_routes_keep_theirs(self) -> None:
+        _library, state = self._seed()
+        self.client.post("/api/profile/data/clear-library", json={})
+        self.assertTrue(state.baseline("elsewhere", "watchlist").allows_removals)
+
+    def test_clearing_an_empty_library_succeeds(self) -> None:
+        response = self.client.post("/api/profile/data/clear-library", json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed"], 0)
+
+    def test_it_refuses_while_a_sync_is_running(self) -> None:
+        private = web._profile_store._profiles[self.profile_id]
+        private["sync_running"] = True
+        response = self.client.post("/api/profile/data/clear-library", json={})
+        self.assertEqual(response.status_code, 409)
+
+    def test_signing_in_is_required(self) -> None:
+        self.client.post("/api/profile/logout", json={})
+        response = self.client.post("/api/profile/data/clear-library", json={})
+        self.assertEqual(response.status_code, 401)
