@@ -94,6 +94,9 @@ from src.providers import (
     TraktAdapter,
 )
 from src.library_store import LibraryStore
+from src.sync.state_store import SyncStateStore
+from src.sync.topology import analyze as analyze_topology
+from src.sync.duplicates import redundant_plays as duplicate_redundant_plays, scan as scan_duplicates
 from src.media_kind import ALL_KINDS, KIND_LABELS, matches_filter
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
@@ -997,6 +1000,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
                 guard_large_removals=config.sync.guard_large_removals,
                 guard_removal_percent=config.sync.guard_removal_percent,
+                state_store=_sync_state_store_for(profile_id),
             )
             pair_results = pair_service.run_pairs(pairs)
             pair_result_dicts = [
@@ -1012,6 +1016,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 _profile_store.update_pair_last_results(
                     profile_id, pair_result_dicts, dry_run=False,
                 )
+                _persist_route_baselines(profile_id, pair_service, dry_run)
         _profile_store.record_sync_success(
             profile_id,
             result_dicts,
@@ -1189,12 +1194,121 @@ def _library_store_for(profile_id: str) -> LibraryStore:
         return store
 
 
+_sync_state_stores: dict[str, SyncStateStore] = {}
+_sync_state_stores_lock = threading.Lock()
+
+
+def _sync_state_store_for(profile_id: str) -> SyncStateStore:
+    """The profile's per-route sync baselines.
+
+    Beside the Library rather than inside profiles.json: a baseline holds one
+    entry per item per category per route, which is far too much to carry
+    through a file that is rewritten on every profile mutation and deep-copied
+    on every status poll.
+    """
+    key = str(profile_id or "").strip()
+    with _sync_state_stores_lock:
+        store = _sync_state_stores.get(key)
+        if store is None:
+            store = SyncStateStore(PROFILE_STORE_FILE.parent / "sync_state" / f"{key}.json")
+            _sync_state_stores[key] = store
+            _seed_sync_state_from_managed_keys(key, store)
+        return store
+
+
+def _seed_sync_state_from_managed_keys(profile_id: str, store: SyncStateStore) -> None:
+    """Carry existing pair ownership into the baseline store, once.
+
+    `pair_managed_keys` is the one part of the new model that already exists on
+    upgraded profiles. Adopting it keeps a route knowing which destination
+    entries are its own; it deliberately does not mark the route established,
+    because the old store never recorded what the *source* looked like.
+    """
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except Exception:
+        return
+    if not profile:
+        return
+    managed = (profile.get("activity_state") or {}).get("pair_managed_keys") or {}
+    if not managed:
+        return
+    try:
+        adopted = store.adopt_managed_keys(managed)
+    except Exception:
+        logger.warning("Could not seed sync baselines for %s", profile_id, exc_info=True)
+        return
+    if adopted:
+        logger.info(
+            "Seeded %d managed item(s) into sync baselines for profile %s",
+            adopted, profile_id,
+        )
+
+
+def _persist_route_baselines(profile_id: str, service, dry_run: bool) -> None:
+    """Fold a finished pair run into the profile's baselines.
+
+    Only a category that completed cleanly advances the agreement. One that
+    errored records the failure and leaves the previous agreement in place, so a
+    provider outage can never teach the engine that everything it failed to read
+    was deleted.
+    """
+    if dry_run:
+        return
+    observations = getattr(service, "route_states", None) or {}
+    if not observations:
+        return
+    try:
+        store = _sync_state_store_for(profile_id)
+    except Exception:
+        logger.warning("Could not open sync baselines for %s", profile_id, exc_info=True)
+        return
+    for (route_id, category), observed in observations.items():
+        try:
+            if observed.trustworthy:
+                store.commit(
+                    route_id, category,
+                    items=observed.items,
+                    source_fetch=observed.source_fetch,
+                    destination_fetch=observed.destination_fetch,
+                    save=False,
+                )
+            elif observed.items:
+                # Some writes landed; keep them so the next run does not repeat
+                # them, but do not call the result an agreement.
+                store.record_partial(
+                    route_id, category, applied=observed.items,
+                    error=observed.error, save=False,
+                )
+            else:
+                store.record_failure(route_id, category, observed.error, save=False)
+        except Exception:
+            logger.warning(
+                "Could not record baseline for route %s/%s", route_id, category,
+                exc_info=True,
+            )
+    try:
+        store.save()
+    except Exception:
+        logger.warning("Could not save sync baselines for %s", profile_id, exc_info=True)
+
+
 def _purge_profile_runtime_data(profile_ids: list[str]) -> None:
     """Remove runtime state and local Library files for deleted profiles."""
     for profile_id in profile_ids:
         _session_store.destroy_profile_sessions(profile_id)
         _profile_log_store.clear(profile_id)
         _mdblist_pkce_store.clear_profile(profile_id)
+        with _sync_state_stores_lock:
+            state_store = _sync_state_stores.pop(profile_id, None)
+        state_path = (
+            state_store.path if state_store is not None
+            else _profile_store._path.parent / "sync_state" / f"{profile_id}.json"
+        )
+        try:
+            state_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove sync state %s", state_path, exc_info=True)
         with _library_stores_lock:
             store = _library_stores.pop(profile_id, None)
         library_path = (
@@ -4373,6 +4487,92 @@ def api_profile_activity_history_clear():
     return jsonify({"status": "cleared", "deleted_count": deleted_count, "profile": profile})
 
 
+@app.route("/api/profile/history/duplicates", methods=["POST"])
+def api_profile_history_duplicates():
+    """Find plays that were recorded twice, and optionally remove them.
+
+    Two modes, and the split is deliberate. Scanning reads history and reports;
+    it changes nothing and is the default. Repair deletes play records from
+    PublicMetaDB, which cannot be undone, so it requires `confirm: true` *and*
+    an explicit count that matches what the scan found — a stale page must not
+    be able to delete more than the person looking at it agreed to.
+    """
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _json_error("Sign in first", 401)
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    config = _config_from_profile(profile)
+    if not config.pmdb.api_key:
+        return _json_error("Save your PublicMetaDB API key first", 409)
+
+    body = request.get_json(silent=True) or {}
+    confirm = bool(body.get("confirm"))
+    expected = body.get("expected_redundant")
+
+    client = PublicMetaDBClient(config.pmdb)
+    try:
+        rows = client.get_watched_history() or []
+    except Exception as exc:
+        logger.exception("Could not read PublicMetaDB history for duplicate scan")
+        return _json_error(f"Could not read watch history: {exc}", 502)
+    if not client.last_read_complete:
+        # Half the history looks like half the duplicates, and the repair would
+        # then be reasoning about a set it never saw.
+        return _json_error(
+            "PublicMetaDB returned only part of the watch history, so a "
+            "duplicate scan would be incomplete. Try again shortly.", 503,
+        )
+
+    normalized = []
+    for entry in rows:
+        item = PmdbAdapter._normalize_pmdb_entry(entry)
+        if not item:
+            continue
+        for field_name in ("season", "episode", "watched_at"):
+            if entry.get(field_name) is not None:
+                item[field_name] = entry[field_name]
+        normalized.append(item)
+
+    report = scan_duplicates(normalized)
+    payload = report.to_dict()
+
+    if not confirm:
+        return jsonify({"status": "scanned", **payload})
+
+    doomed = duplicate_redundant_plays(report)
+    if expected is not None and int(expected) != len(doomed):
+        # The page the person approved from is not the state on the server now.
+        return _json_error(
+            f"The history changed since it was scanned ({len(doomed)} redundant "
+            f"plays now, {int(expected)} when you looked). Scan again first.", 409,
+        )
+
+    deleted = 0
+    failed = 0
+    for play in doomed:
+        record_id = play.get("pmdb_item_id")
+        if not record_id:
+            failed += 1
+            continue
+        try:
+            if client.delete_watched_entry(str(record_id)):
+                deleted += 1
+        except Exception:
+            failed += 1
+            logger.warning("Could not delete watch record %s", record_id, exc_info=True)
+    logger.info(
+        "Duplicate repair for profile %s: removed %d redundant play(s), %d failed",
+        profile_id[:8], deleted, failed,
+    )
+    return jsonify({
+        "status": "repaired", "deleted": deleted, "failed": failed, **payload,
+    })
+
+
 @app.route("/api/profile/sync/stop", methods=["POST"])
 def api_profile_sync_stop():
     profile_id = _current_profile_id()
@@ -4432,7 +4632,18 @@ def api_profile_pairs():
         entry["next_sync_at"] = schedule.get("next_sync_at")
         pairs.append(entry)
 
-    return jsonify({"pairs": pairs, **_pair_capabilities(config, profile_id=profile_id)})
+    # How the routes fit together. Advisory only — a shape is named, never
+    # refused, because the user may well have a reason for it.
+    try:
+        topology = [note.to_dict() for note in analyze_topology(_sync_pairs_from_config(config))]
+    except Exception:
+        logger.warning("Could not analyse route topology", exc_info=True)
+        topology = []
+
+    return jsonify({
+        "pairs": pairs, "topology": topology,
+        **_pair_capabilities(config, profile_id=profile_id),
+    })
 
 
 @app.route("/api/profile/pairs/lists", methods=["POST"])
@@ -4599,6 +4810,10 @@ def api_profile_pairs_run():
             # profile setting remains untouched, so later runs are guarded.
             guard_large_removals=config.sync.guard_large_removals and not bypass_guard,
             guard_removal_percent=config.sync.guard_removal_percent,
+            state_store=_sync_state_store_for(profile_id),
+            # This endpoint is a person acting on a preview. The scheduled path
+            # never passes it, so an automatic run cannot waive the thresholds.
+            allow_destructive_override=bypass_guard,
         )
         log_token = _log_profile_id.set(profile_id)
         try:
@@ -4615,11 +4830,16 @@ def api_profile_pairs_run():
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
             _profile_store.update_pair_last_results(profile_id, result_dicts)
             _profile_store.mark_pairs_synced(profile_id, [pair.pair_id for pair in pairs])
+            _persist_route_baselines(profile_id, service, dry_run)
         return jsonify({
             "status": "completed", "dry_run": dry_run,
             "results": result_dicts,
             "provider_reads": service.last_run_provider_reads,
             "cached_reads": service.last_run_cache_hits,
+            # The baseline planner's reading of the same run. Reported, not yet
+            # obeyed — see CrossSyncService.plan_divergences.
+            "plans": [plan.to_dict() for plan in service.plans.values()],
+            "safety": [v.to_dict() for v in service.plan_verdicts.values()],
         })
 
     try:

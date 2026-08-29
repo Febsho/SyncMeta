@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 
 from .media_kind import KIND_ANIME, KIND_ANIME_MOVIE, classify, normalize_namespace
-from .providers import PLANNED_FLAG, is_planned, normalize_watched_at
+from .providers import PLANNED_FLAG, PlaySet, is_planned
 
 logger = logging.getLogger(__name__)
 
@@ -403,13 +403,16 @@ class LibraryStore:
             return False
         known = plays.get(slot)
         if not isinstance(known, list) or not known:
-            # An entry stored before plays existed: seed it from the one date
-            # it kept, so the first play is not double-counted as a rewatch.
+            # An entry stored before plays existed: seed it from the one date it
+            # kept, so its first play is not recounted as a rewatch.
             known = [first_seen] if first_seen else []
             plays[slot] = known
-        stamps = {normalize_watched_at(value) for value in known}
-        stamp = normalize_watched_at(reported)
-        if not stamp or stamp in stamps:
+        # Matched with tolerance, not on the exact second. The Library is the
+        # hub, so it hears about one viewing from several services, each having
+        # timestamped it slightly differently — compared exactly, one play
+        # became one play per service and then fanned back out that way.
+        ledger = PlaySet(known)
+        if not ledger.stamped or ledger.matches(reported):
             return False
         known.append(reported)
         return True

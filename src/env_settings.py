@@ -58,6 +58,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("access", "Access & security"),
     ("scheduler", "Scheduler"),
     ("concurrency", "Sync concurrency"),
+    ("sync", "Sync behaviour"),
     ("network", "Network timeouts"),
     ("logging", "Logging"),
 )
@@ -159,6 +160,16 @@ SETTINGS: tuple[Setting, ...] = (
         "SYNCMETA_ANILIST_PREWARM_LIMIT", "AniList prewarm limit", "concurrency",
         "Anime titles pre-resolved before a sync starts. 0 disables prewarming.",
         default="100", minimum=0, maximum=200,
+    ),
+
+    Setting(
+        "SYNCMETA_PLAY_MATCH_WINDOW", "Same-play window", "sync",
+        "Seconds within which two records of the same episode count as one "
+        "viewing rather than two. Services timestamp the same play differently, "
+        "so matching on the exact second turns one watch into a new play at "
+        "every hop. Raise it if duplicate plays still appear; lower it only if "
+        "you rewatch things faster than this.",
+        default="900", minimum=0, maximum=86400,
     ),
 
     # ── network ──────────────────────────────────────────────────────────────

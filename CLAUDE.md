@@ -167,6 +167,201 @@ Key patterns:
 - The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) renders each pair as a `.svc-card .svc-card-static` in a `.svc-grid`, the same card language as the service pipelines — it was a flat `.pipe-status-row`, so two panels showing the same kind of thing looked like different eras of the app. It stays its **own** panel (see below); only the card vocabulary is shared. Hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
+**The sync engine is moving into `src/sync/`, incrementally.** `sync_service.py`
+and `cross_sync.py` answer "copy this category from A to B"; `src/sync/` answers
+the question underneath — *what actually changed since the two sides last
+agreed*, which is the only thing that can tell a user's edit apart from a
+provider hiccup. Landed so far:
+
+* `sync/models.py` — `FetchStatus`/`FetchOutcome`, `ItemState`, `RouteBaseline`,
+  `RouteObservation`
+* `sync/state_store.py` — `SyncStateStore`, per-profile baselines
+* `sync/planner.py` — `plan_membership` / `plan_two_way`, the immutable `SyncPlan`
+
+**The planner decides from the baseline; the old diff decided from presence.**
+Comparing a source list against a destination list says only that they differ —
+"missing on the destination" is either an item the user just added on the source
+or one they just deleted on the destination, and those want opposite actions.
+`plan_membership` compares *both* current states against the last agreement, so
+absence on the source is only a deletion when the baseline says the source used
+to have it. Three cases separate it from `_items_to_remove`: a half-read source
+(removals dropped, additions kept), a route with no baseline yet (nothing may be
+deleted, including right after the `pair_managed_keys` migration), and a
+destination item the source never had (kept unless the policy is `mirror`).
+
+**A plan is immutable, and preview and execution must share one.** `SyncPlan` is
+a frozen dataclass of frozen `PlannedAction`s, each carrying the reason a person
+should be shown. Two code paths — one to preview, one to execute — is how a
+preview becomes a lie; there is one planner and the executor consumes what it
+produced.
+
+**Two-way is planned in one pass, and a real conflict is reported, not resolved.**
+`plan_two_way` asks *which side moved* rather than which side differs: one side
+changed and the other did not means the changed side wins in either direction;
+both changed and now agree means nothing to do; both changed and still disagree
+is a conflict, and by default neither side is touched, because letting run order
+pick a winner silently discards one of the user's two edits. `latest_change` is
+deliberately not offered for membership — several providers expose no reliable
+per-item modification time, and a policy that degrades to "whichever we read
+second" is worse than reporting the conflict.
+
+* `sync/safety.py` — threshold and evidence checks over a plan
+* `sync/executor.py` — performs a plan, reporting each action's fate
+
+**Every category is planned, but each kind of data gets its own planner.**
+Membership (`_PLANNED_CATEGORIES` — watchlist and collection) asks "is it on the
+list"; `sync/history.py` asks "did this happen and have we already carried it";
+`sync/progress.py` asks "is this further along". Sharing one planner would
+collapse exactly the distinctions each exists to keep — a membership planner
+calls a moved playback position "already in sync", and calls a rewatch a
+duplicate. `_run_category` dispatches on the category; each planner falls back to
+the legacy diff if it raises, so a planner bug degrades rather than fails the
+run. **Two-way** plans every category too: membership through `plan_two_way`,
+history by planning both directions from the *same* pair of reads (a union has
+no deletion to order, and the baseline's record of what was carried is what stops
+a play echoing back), and resume by planning both directions — each refuses to
+write when the destination is already further, so applying both is furthest-wins
+without either side's turn deciding it. `_history_adds` / `_resume_matches`
+survive only as the fallback when a planner raises.
+
+**History's dedupe has to read the live ledger, not the initial destination
+read.** Two plays of one episode arriving in the same batch is the case that
+catches this: the first makes the episode known, and to a destination that
+records watched state rather than plays the second must then be refused. A check
+written against the destination's contents *before* the run let both through,
+which is one duplicate play per batch, forever.
+
+**A route may not delete until it has one confirmed sync behind it.** This is a
+real behaviour change: the first run of every existing route after this shipped
+adds but removes nothing, then establishes a baseline and behaves normally.
+Without a baseline "absent from the source" cannot be told apart from "the
+source never had it", and the adopted `pair_managed_keys` cannot fill the gap
+because they never recorded the source side.
+
+**The guard blocks in two tiers, and only one is overridable.** Threshold blocks
+(too many removals, too large a share) can be waived by a person acting on a
+preview — `allow_destructive_override`, passed only by `/pairs/run`, never by
+the scheduler. Hard blocks cannot be waived by anyone: an unreadable source or
+destination, a missing baseline, or a source returning nothing at all while the
+destination holds plenty. A person may decide a large deletion is right; nobody
+gets to decide that a failed read really was empty. Blocking is *demotion* —
+`SyncPlan.without_removals` keeps the additions, since whatever made the
+removals unsafe says nothing about items the source positively reported.
+
+**History is a union, and dedupes in three layers.** `sync/history.py`. An
+episode absent from the source is not evidence to delete it — providers expose
+different windows of the same history — so only an explicit `mirror` route
+removes, whole episodes only, once a baseline exists. Deduplication runs
+strongest-first: the source's own stable event id (`event_id`, persisted in
+`ItemState.event_ids`), then this route's record of the plays it already carried
+(`ItemState.plays`), then the destination's current plays matched through
+`PlaySet`'s tolerance window. The second layer is what stops a two-way route
+re-importing its own write; the third is what makes a repeated run idempotent.
+A row reporting watched *state* — no timestamp, `cursor_exempt`, or
+`anilist_derived` — may create the first play of an unknown episode but never a
+second, so repeated state syncs write nothing.
+
+**Resume never rewinds.** `sync/progress.py`. Below 2% is an accidental open, at
+or above 90% the title is finished and pushing it on would make a watched show
+look abandoned near the end, and a destination further along is never
+overwritten. Furthest-wins is deliberate over most-recent: no provider here
+exposes a portable per-item modification time, and furthest is the only
+deterministic rule that cannot rewind either side because of run order.
+
+**A truncated read is `PARTIAL`, and only two providers can tell.** PublicMetaDB
+detects a page it promised that came back empty; MDBList detects a pagination
+cursor that stops advancing. Both surface through `ProviderAdapter.last_read_complete()`.
+Trakt, SIMKL and AniList end their reads on an unambiguous signal and have no
+known silent-truncation path, so they report complete — stated rather than
+assumed, and the one place to change when that stops being true.
+
+**A removal asks the destination, not the route.** `sync/ownership.py`. Two
+routes commonly feed one target (SIMKL → Trakt and MDBList → Trakt both wanting
+Movie X). Per-route `managed` decides whether a route *may* delete; it cannot
+decide whether it *should*, because the other route will re-add on its next run
+and the item flickers forever. `run_pairs` therefore reads every route's source
+before any route writes — the batch cache makes that nearly free — and a removal
+is dropped when another active route's source still lists the item.
+
+**A partial run is neither a success nor a failure.** `ExecutionResult.complete`
+is false while anything is outstanding — a failed write, one the provider never
+confirmed, an action the guard blocked — and only a complete run may `commit` a
+baseline. An item the provider *explicitly* could not match is `not_found` and
+does **not** hold the route back: retrying will not change its answer, and one
+permanently unmappable title must not stop a route ever agreeing on anything.
+Batched writes mean an adapter reports "added: 8" for ten items without saying
+which two it dropped; the unconfirmed remainder is recorded as `unconfirmed` and
+stays outstanding rather than being claimed either way.
+
+**Only a run that actually succeeded may advance the agreement.** `commit` is
+the sole method that moves `last_successful_sync`, bumps `sync_version` and
+replaces the item states. `record_failure` writes the error and leaves the
+agreement alone; `record_partial` folds in the writes that *did* land — so the
+next run neither repeats them nor believes the rest done — without declaring
+success. A provider outage can therefore never teach the engine that everything
+it failed to read was deleted.
+
+**A read that failed is not an empty list.** Every fetch is classified into a
+`FetchStatus`, and only `SUCCESS_WITH_ITEMS`/`SUCCESS_EMPTY` are
+`trustworthy_for_removals`. A timeout, a 401, a rate limit and a half-read page
+all look identical to "the user deleted everything" if you only count what came
+back. `FetchOutcome.complete` covers the subtle case: a 200 carrying real items
+is fine to add from and still unsafe to delete from if a page never arrived.
+`PARTIAL` is modelled but not yet produced — no client reports incomplete
+pagination today; `cross_sync._fetch_outcome` is the single place that changes
+when they learn to.
+
+**A route with no baseline may add but never remove.** A fresh route sits in
+`baseline_initializing` until one run completes. The migration from
+`pair_managed_keys` adopts ownership — that store already recorded what a pair
+wrote — but deliberately does *not* mark the route established, because it never
+recorded what the *source* looked like and so cannot answer "did this disappear
+since we agreed". Guessing there would let the first run after an upgrade delete
+on the strength of a comparison it never made.
+
+**Baselines live beside the Library, not in `profiles.json`.** One entry per item
+per category per route runs to megabytes; `profiles.json` is rewritten under a
+lock on every profile mutation and deep-copied on every status poll, which is
+why `pair_managed_keys` — a fraction of the size — already had to be dropped from
+`/status`. `CrossSyncService.route_states` is likewise server-side only and is
+deliberately *not* folded into `PairCategoryStats`, which is serialized into
+`last_pair_results` and does ride the poll.
+
+**A large deletion is verified, a small one is not.** `_verify_removals` re-reads
+the destination after removing `_VERIFY_REMOVALS_ABOVE` items or more and
+reports any that are still there. An adapter's "deleted: 12" is what it *sent*,
+and a provider that silently no-ops leaves the next run planning the same
+deletion forever while the count going down gives nobody a reason to look. Small
+removals are deliberately not verified — the point is to catch the expensive
+mistakes, not to double every sync's request count.
+
+**Duplicate plays are found by scanning, and removed only on request.**
+`sync/duplicates.py` applies the same tolerance window backwards over stored
+history: plays of one episode chained within the window are one viewing recorded
+several times, plays weeks apart are separate viewings. The engine will never do
+this on its own — to a union a duplicate is indistinguishable from a rewatch it
+must preserve — so `/api/profile/history/duplicates` scans by default and
+requires `confirm` *plus* an `expected_redundant` count matching the scan before
+it deletes anything. The earliest play of each cluster is kept, and an
+incomplete PMDB read refuses the scan outright, since half the history looks
+like half the duplicates.
+
+**The Library hub is recommended, never imposed.** With three or more services
+connected and no Library route yet, the quick-setup builder explains why N
+two-way routes through the Library beat the N×(N−1) it takes to wire every pair
+directly: each service is read once per sync rather than once per route, and
+there are no loops for a deletion to travel. Existing direct routes keep working
+and "Add advanced route" still builds them.
+
+**Route shapes are named, never refused.** `sync/topology.py` flags two one-way
+routes pointing at each other (one two-way route reconciles from a single
+baseline; two decide independently and re-add each other's deletions) and cycles
+of three or more (additions still settle, but a deletion can travel the loop and
+return as an addition). Several routes writing one destination is reported as
+information only — it is legitimate and common, and the ownership rules already
+handle it. Nothing is forbidden: the user may have a reason, and refusing to run
+would be worse than the shape.
+
 ## Key Invariants
 
 **The scheduler shares the web process, so it must yield to it.** `ProfileScheduler`
@@ -344,6 +539,21 @@ Trakt-shaped tree, and `_from_sync_payload` reads that tree back one row per
 episode so the next run does not see the whole show as unsynced. SIMKL also
 stamped the play date on the *show*, which put the first episode's date on every
 other episode grouped into the same entry; `watched_at` now rides the episode.
+
+**The same viewing, reported twice, is one play.** Services do not agree on
+*when* a play happened — Trakt stamps the scrobble, SIMKL stamps when its server
+recorded it, an importer stamps whatever it was handed — so the same watch
+arrives seconds or minutes apart. Matched on the exact second it looked like a
+fresh rewatch at every hop, so one viewing multiplied into one play per service
+and grew on every run. `providers.PlaySet` matches within
+`PLAY_MATCH_WINDOW_SECONDS` (default 900, `SYNCMETA_PLAY_MATCH_WINDOW`, exposed
+in the admin panel), bisecting a sorted list because it is consulted once per
+source row. The window is wider than provider drift and narrower than a real
+repeat viewing, which cannot happen faster than the runtime. `_history_adds`
+seeds one ledger per episode from the target's stamps and updates it as rows are
+accepted, so two source rows a few seconds apart cannot both be written either;
+`library_store._record_extra_play` uses the same ledger, which is also what stops
+an entry written before `plays` existed gaining a phantom second play.
 
 **Watching something twice is two rows, and both have to arrive.** `item_key`
 answers "which episode", so every play of one episode shares a key — diffing

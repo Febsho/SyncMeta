@@ -263,6 +263,32 @@ class _FakePmdbTarget(_Fake):
     accepts = PmdbAdapter.accepts
 
 
+def _settled_store(managed_keys):
+    """A baseline in which both items were last seen on the source.
+
+    A route may not delete until it has one confirmed sync behind it, so a test
+    about *what* gets pruned has to supply that history.
+    """
+    if not managed_keys:
+        return None
+    import tempfile
+    from pathlib import Path
+    from src.sync.models import ItemState, STATE_PRESENT
+    from src.sync.state_store import SyncStateStore
+
+    store = SyncStateStore(Path(tempfile.mkdtemp()) / "state.json")
+    for pair_id, categories in managed_keys.items():
+        for category, keys in categories.items():
+            store.commit(pair_id, category, items={
+                key: ItemState(
+                    source=STATE_PRESENT, destination=STATE_PRESENT,
+                    synced=STATE_PRESENT, managed=True,
+                )
+                for key in keys
+            })
+    return store
+
+
 class PairWatchlistScopeTests(unittest.TestCase):
     """The refusal has to shape the diff, not just the write.
 
@@ -291,6 +317,7 @@ class PairWatchlistScopeTests(unittest.TestCase):
         })
         service = CrossSyncService(
             {"library": source, "pmdb": target}, managed_keys=managed_keys,
+            state_store=_settled_store(managed_keys),
         )
         return service.run_pair(pair), source, target
 

@@ -78,6 +78,10 @@ class PublicMetaDBClient:
         self._mapping_auth_warning_logged = False
         self._stats = PublicMetaDBStats()
         self._stats_lock = threading.Lock()
+        # Whether the most recent paginated read returned everything it said it
+        # would. False means absence proves nothing, so nothing may be deleted
+        # on the strength of it.
+        self.last_read_complete = True
 
     def _check_cancelled(self) -> None:
         if not self._cancel_requested_callback:
@@ -286,6 +290,10 @@ class PublicMetaDBClient:
             raise
 
     def _get_paginated_items(self, path: str, per_page: int = 100) -> list[dict]:
+        # Reset per read. A page that comes back empty when the server said
+        # there were more is a truncated result, not a shorter list — and the
+        # difference decides whether a sync may delete what it did not see.
+        self.last_read_complete = True
         resp = self._get(path, params={"page": 1, "perPage": per_page})
         if not resp:
             return []
@@ -311,7 +319,14 @@ class PublicMetaDBClient:
                 elif page_resp:
                     pages_data[page_num] = list(page_resp.get("items", []))
                 else:
+                    # The server promised this page and did not deliver it.
                     pages_data[page_num] = []
+                    self.last_read_complete = False
+                    logger.warning(
+                        "PublicMetaDB %s: page %d of %d came back empty; "
+                        "treating this read as incomplete",
+                        path, page_num, total_pages,
+                    )
 
         all_items: list[dict] = []
         for p in range(1, total_pages + 1):

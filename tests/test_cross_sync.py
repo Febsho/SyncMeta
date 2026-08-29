@@ -135,6 +135,47 @@ class ResumePairTests(unittest.TestCase):
         self.assertEqual(second.added[0][1][0]["position_ms"], 70_000)
 
 
+def _fresh_store():
+    """An empty baseline store, so a service can build its own across runs.
+
+    Two-way reconciliation needs to know what both sides last agreed on, so a
+    test that runs a pair twice has to give the engine somewhere to keep it.
+    """
+    import tempfile
+    from pathlib import Path
+    from src.sync.state_store import SyncStateStore
+
+    return SyncStateStore(Path(tempfile.mkdtemp()) / "state.json")
+
+
+def _established_store(keys, *, pair_id="p1", category=CATEGORY_WATCHLIST,
+                       managed=(), source_keys=None):
+    """A state store whose route has one confirmed sync behind it.
+
+    The planner refuses every removal until a route has completed a run — see
+    `FirstRunProtectionTests`. Tests that are about *what* gets removed rather
+    than *whether removal is allowed yet* therefore need a real baseline.
+    """
+    import tempfile
+    from pathlib import Path
+    from src.sync.models import ItemState, STATE_PRESENT
+    from src.sync.state_store import SyncStateStore
+
+    directory = tempfile.mkdtemp()
+    store = SyncStateStore(Path(directory) / "state.json")
+    present = set(source_keys if source_keys is not None else keys)
+    store.commit(pair_id, category, items={
+        key: ItemState(
+            source=STATE_PRESENT if key in present else "",
+            destination=STATE_PRESENT,
+            synced=STATE_PRESENT if key in present else "",
+            managed=key in set(managed),
+        )
+        for key in keys
+    })
+    return store
+
+
 def _pair(**overrides) -> SyncPair:
     raw = {
         "pair_id": "p1",
@@ -300,8 +341,14 @@ class RemovalModeTests(unittest.TestCase):
     def _setup(self, mode: str, managed=None):
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
         target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("99")]})
+        owned = (managed or {}).get("p1", {}).get(CATEGORY_WATCHLIST, [])
         service = CrossSyncService(
             {"trakt": source, "simkl": target}, managed_keys=managed or {},
+            # Both items were on the source at the last agreement, so 99 having
+            # gone is a real deletion rather than something never seen.
+            state_store=_established_store(
+                ["movie:tmdb:1", "movie:tmdb:99"], managed=owned,
+            ),
         )
         return source, target, service, _pair(removal_mode=mode)
 
@@ -737,8 +784,10 @@ class TwoWayPairTests(unittest.TestCase):
     """Two-way keeps both sides holding the union.
 
     The dangerous part is telling "new on one side" from "deleted on the other".
-    Both look identical in a single snapshot, so the pair's managed-key set is
-    used as the last agreed state. These tests pin that distinction down.
+    Both look identical in a single snapshot, so the run is decided against the
+    baseline — the state the two sides last agreed on. These tests pin that
+    distinction down, which is why each of them runs the pair twice: the first
+    run establishes the agreement the second reasons from.
     """
 
     def _two_way(self, **overrides):
@@ -777,7 +826,7 @@ class TwoWayPairTests(unittest.TestCase):
         # other rather than being copied straight back.
         a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
         b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
-        service = CrossSyncService({"trakt": a, "simkl": b})
+        service = CrossSyncService({"trakt": a, "simkl": b}, state_store=_fresh_store())
         service.run_pair(self._two_way())          # agree on 1 and 2
 
         b.remove(CATEGORY_WATCHLIST, [_movie("2")])   # user deletes on SIMKL
@@ -822,7 +871,7 @@ class TwoWayPairTests(unittest.TestCase):
         def build(swap):
             a = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
             b = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
-            svc = CrossSyncService({"trakt": a, "simkl": b})
+            svc = CrossSyncService({"trakt": a, "simkl": b}, state_store=_fresh_store())
             first = self._two_way() if not swap else self._two_way(source="simkl", target="trakt")
             svc.run_pair(first)
             a.remove(CATEGORY_WATCHLIST, [_movie("1")])   # deleted on Trakt
@@ -950,8 +999,12 @@ class BatchReadCacheTests(unittest.TestCase):
             _pair(pair_id="b", target="pmdb"),
         ])
 
+        # The saving that matters: one network read for two routes sharing a
+        # source. The ownership pre-pass reads it first, so both routes are then
+        # served from the cache — three hits, still one fetch.
         self.assertEqual(len(source.fetched), 1, "Trakt was read once per pair")
-        self.assertEqual(service.last_run_cache_hits, 1)
+        self.assertEqual(service.last_run_provider_reads, 3)
+        self.assertEqual(service.last_run_cache_hits, 3)
 
     def test_a_shared_target_sees_what_an_earlier_pair_wrote(self) -> None:
         # The dangerous case: two sources feeding one target. Without the write
@@ -975,7 +1028,13 @@ class BatchReadCacheTests(unittest.TestCase):
         trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
         pmdb = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: []})
         simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("9")]})
-        service = CrossSyncService({"trakt": trakt, "pmdb": pmdb, "simkl": simkl})
+        # Both routes need a settled baseline, or the first-run protection would
+        # stop the removal before the cache ever came into it.
+        store = _established_store([item_key(_movie("9"))], pair_id="a")
+        store.commit("b", CATEGORY_WATCHLIST, items=store.baseline("a", CATEGORY_WATCHLIST).items)
+        service = CrossSyncService(
+            {"trakt": trakt, "pmdb": pmdb, "simkl": simkl}, state_store=store,
+        )
 
         results = service.run_pairs([
             _pair(pair_id="a", source="trakt", target="simkl", removal_mode=REMOVAL_MIRROR),
@@ -1042,7 +1101,9 @@ class BatchReadCacheTests(unittest.TestCase):
             _pair(pair_id="b", target="pmdb"),
         ])
 
-        self.assertEqual(results[0].cached_reads, 0)
+        # Both routes read their shared source from the cache the ownership
+        # pre-pass filled, so both report a saving rather than only the second.
+        self.assertEqual(results[0].cached_reads, 1)
         self.assertEqual(results[1].cached_reads, 1)
         self.assertEqual(results[1].to_dict()["cached_reads"], 1)
 
@@ -1515,6 +1576,13 @@ class RemovalGuardTests(unittest.TestCase):
     def _run(self, source_items, target_items, **service_kwargs):
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: source_items})
         target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: target_items})
+        service_kwargs.setdefault(
+            # The guard is about *size*, so these routes need a settled baseline
+            # — otherwise the first-run protection would stop them first and the
+            # threshold would never be reached.
+            "state_store",
+            _established_store([item_key(i) for i in target_items]),
+        )
         service = CrossSyncService({"trakt": source, "simkl": target}, **service_kwargs)
         result = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
         return result, target
@@ -1566,7 +1634,13 @@ class RemovalGuardTests(unittest.TestCase):
         managed = {"p1": {CATEGORY_WATCHLIST: [
             item_key(enrich_identity(item)) for item in first_items
         ]}}
-        service = CrossSyncService({"trakt": first, "simkl": second}, managed_keys=managed)
+        keys = [item_key(enrich_identity(item)) for item in first_items]
+        service = CrossSyncService(
+            {"trakt": first, "simkl": second}, managed_keys=managed,
+            # Both sides held all 40 at the last agreement, so 39 having gone
+            # from SIMKL is a real deletion — which is what the guard then pauses.
+            state_store=_established_store(keys, managed=keys),
+        )
         result = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED, mode="two_way"))
         category = result.categories[0]
         self.assertEqual(category.removed, 0)
@@ -1706,3 +1780,466 @@ class MultiplePlayHistoryTests(unittest.TestCase):
         self.assertEqual(
             [i["watched_at"] for i in first.added[0][1]], ["2024-03-01T20:00:00Z"],
         )
+
+
+class SamePlayToleranceTests(unittest.TestCase):
+    """The same viewing, reported twice, is one play — not two.
+
+    Services do not agree on *when* a play happened: Trakt stamps the scrobble,
+    SIMKL stamps when its server recorded it, an importer stamps whatever it was
+    handed. Matched on the exact second, the same watch looked like a fresh
+    rewatch at every hop, so one viewing multiplied into one play per service
+    and kept growing on every run.
+    """
+
+    def _run(self, target_stamps, source_stamps):
+        source = FakeAdapter(
+            "trakt",
+            {CATEGORY_HISTORY: [_episode("42", 1, 3, ts) for ts in source_stamps]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "pmdb",
+            {CATEGORY_HISTORY: [_episode("42", 1, 3, ts) for ts in target_stamps]},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = True
+        result = CrossSyncService({"trakt": source, "pmdb": target}).run_pair(
+            _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
+        )
+        return result, target
+
+    def test_seconds_of_drift_is_the_same_play(self) -> None:
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"], ["2024-01-01T20:00:37Z"],
+        )
+        self.assertEqual(result.added, 0)
+        self.assertFalse(target.added)
+
+    def test_a_minute_of_drift_is_the_same_play(self) -> None:
+        result, _ = self._run(["2024-01-01T20:00:00Z"], ["2024-01-01T20:01:00Z"])
+        self.assertEqual(result.added, 0)
+
+    def test_a_genuine_rewatch_still_gets_through(self) -> None:
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"], ["2024-06-01T20:00:00Z"],
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(
+            [i["watched_at"] for i in target.added[0][1]], ["2024-06-01T20:00:00Z"],
+        )
+
+    def test_two_drifting_source_rows_are_not_both_written(self) -> None:
+        # The ledger updates as rows are accepted, so a source that reports the
+        # same viewing twice cannot write it twice either.
+        result, target = self._run(
+            ["2024-01-01T20:00:00Z"],
+            ["2024-06-01T20:00:00Z", "2024-06-01T20:00:40Z"],
+        )
+        self.assertEqual(result.added, 1)
+        self.assertEqual(len(target.added[0][1]), 1)
+
+    def test_repeated_runs_converge(self) -> None:
+        # The failure the user saw: the count grew on every sync.
+        stamps = ["2024-01-01T20:00:00Z"]
+        for _ in range(3):
+            result, target = self._run(stamps, ["2024-01-01T20:00:29Z"])
+            self.assertEqual(result.added, 0)
+
+
+class FirstRunProtectionTests(unittest.TestCase):
+    """A route may not delete until it has one confirmed sync behind it.
+
+    This is a deliberate behaviour change, and it is the whole reason the
+    baseline exists. Without one, "absent from the source" cannot be told apart
+    from "the source never had it" — so the first run of a route, including the
+    first run of every existing route after this shipped, adds but never
+    removes. The run after that has a baseline and behaves normally.
+    """
+
+    def _service(self, store=None):
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1"), _movie("99")]})
+        service = CrossSyncService(
+            {"trakt": source, "simkl": target},
+            managed_keys={"p1": {CATEGORY_WATCHLIST: ["movie:tmdb:1", "movie:tmdb:99"]}},
+            state_store=store,
+        )
+        return source, target, service
+
+    def test_a_route_with_no_baseline_removes_nothing(self) -> None:
+        _source, target, service = self._service()
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+        self.assertEqual(stats.removed, 0)
+        self.assertEqual(target.removed, [])
+
+    def test_it_still_adds_on_that_first_run(self) -> None:
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        service = CrossSyncService({"trakt": source, "simkl": target})
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+        self.assertEqual(stats.added, 1)
+
+    def test_adopted_ownership_alone_does_not_authorise_a_deletion(self) -> None:
+        # The migration from pair_managed_keys records what a pair wrote, but
+        # never what the source looked like, so it cannot justify a removal.
+        import tempfile
+        from pathlib import Path
+        from src.sync.state_store import SyncStateStore
+
+        store = SyncStateStore(Path(tempfile.mkdtemp()) / "state.json")
+        store.adopt_managed_keys({"p1": {CATEGORY_WATCHLIST: ["movie:tmdb:99"]}})
+        _source, target, service = self._service(store)
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED))
+        self.assertEqual(stats.removed, 0)
+        self.assertEqual(target.removed, [])
+
+    def test_once_a_baseline_exists_the_removal_happens(self) -> None:
+        store = _established_store(
+            ["movie:tmdb:1", "movie:tmdb:99"], managed=["movie:tmdb:99"],
+        )
+        _source, target, service = self._service(store)
+        stats = service.run_pair(_pair(removal_mode=REMOVAL_MANAGED))
+        self.assertEqual(stats.removed, 1)
+        self.assertEqual([i["tmdb_id"] for i in target.removed[0][1]], ["99"])
+
+    def test_history_is_planned_and_still_carries_a_play(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = True
+        service = CrossSyncService({"trakt": source, "pmdb": target})
+        stats = service.run_pair(
+            _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
+        )
+        self.assertEqual(stats.added, 1)
+        self.assertIn(("p1", CATEGORY_HISTORY), service.plans)
+
+    def test_resume_is_planned_and_still_upserts_a_moved_position(self) -> None:
+        # The distinction a membership planner would lose: an item on both sides
+        # still needs writing because the position moved.
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [_resume("1", 60_000)]},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [_resume("1", 20_000)]},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        service = CrossSyncService({"trakt": source, "library": target})
+        result = service.run_pair(_pair(target="library", categories=[CATEGORY_RESUME]))
+        self.assertEqual(result.added, 1)
+        self.assertEqual(target.added[0][1][0]["position_ms"], 60_000)
+        self.assertIn(("p1", CATEGORY_RESUME), service.plans)
+
+
+class CrossRouteOwnershipTests(unittest.TestCase):
+    """An item two routes both feed must not be deleted by one of them.
+
+        SIMKL   -> Trakt
+        MDBList -> Trakt
+
+    Both want Movie X on Trakt. If it leaves SIMKL, the first route sees a
+    managed item its source no longer has and removes it — and the second route,
+    whose source still lists it, re-adds it on the next run. The item flickers
+    and both routes report work they should not be doing.
+    """
+
+    def _run(self, simkl_items, mdblist_items, trakt_items, store=None):
+        simkl = FakeAdapter("simkl", {CATEGORY_WATCHLIST: simkl_items})
+        mdblist = FakeAdapter("mdblist", {CATEGORY_WATCHLIST: mdblist_items})
+        trakt = FakeAdapter("trakt", {CATEGORY_WATCHLIST: trakt_items})
+        keys = [item_key(enrich_identity(i)) for i in trakt_items]
+        service = CrossSyncService(
+            {"simkl": simkl, "mdblist": mdblist, "trakt": trakt},
+            managed_keys={
+                "from-simkl": {CATEGORY_WATCHLIST: keys},
+                "from-mdblist": {CATEGORY_WATCHLIST: keys},
+            },
+            state_store=store or _established_store(
+                keys, pair_id="from-simkl", managed=keys,
+            ),
+        )
+        results = service.run_pairs([
+            _pair(pair_id="from-simkl", source="simkl", target="trakt",
+                  removal_mode=REMOVAL_MANAGED),
+            _pair(pair_id="from-mdblist", source="mdblist", target="trakt",
+                  removal_mode=REMOVAL_MANAGED),
+        ])
+        return results, trakt
+
+    def test_an_item_another_route_still_requires_is_kept(self) -> None:
+        # X left SIMKL but MDBList still lists it, so Trakt keeps it.
+        results, trakt = self._run(
+            simkl_items=[_movie("1")],
+            mdblist_items=[_movie("1"), _movie("2")],
+            trakt_items=[_movie("1"), _movie("2")],
+        )
+        self.assertEqual(results[0].removed, 0)
+        self.assertEqual(trakt.removed, [])
+
+    def test_it_goes_once_no_route_requires_it(self) -> None:
+        results, trakt = self._run(
+            simkl_items=[_movie("1")],
+            mdblist_items=[_movie("1")],
+            trakt_items=[_movie("1"), _movie("2")],
+        )
+        self.assertEqual(sum(r.removed for r in results), 1)
+        self.assertEqual([i["tmdb_id"] for i in trakt.removed[0][1]], ["2"])
+
+    def test_the_kept_item_is_not_then_re_added_by_the_other_route(self) -> None:
+        # The flicker this exists to stop: nothing was removed, so nothing needs
+        # putting back.
+        results, trakt = self._run(
+            simkl_items=[_movie("1")],
+            mdblist_items=[_movie("1"), _movie("2")],
+            trakt_items=[_movie("1"), _movie("2")],
+        )
+        self.assertEqual(trakt.added, [])
+        self.assertTrue(all(r.added == 0 for r in results))
+
+
+class HistoryIdempotencyThroughTheServiceTests(unittest.TestCase):
+    """A watch synced repeatedly stays one play.
+
+    The planner is unit-tested separately; this drives the whole service, which
+    is where the baseline round-trip either works or quietly does not.
+    """
+
+    def setUp(self) -> None:
+        self.store = _fresh_store()
+        self.pair = _pair(
+            source="trakt", target="pmdb", categories=[CATEGORY_HISTORY],
+        )
+
+    def _target(self, records_plays=True, rows=()):
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_HISTORY: list(rows)},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = records_plays
+        return target
+
+    def _run(self, source, target):
+        return CrossSyncService(
+            {"trakt": source, "pmdb": target}, state_store=self.store,
+        ).run_pair(self.pair)
+
+    def test_the_second_and_third_syncs_write_nothing(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self.assertEqual(self._run(source, target).added, 1)
+        for _ in range(2):
+            self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 1)
+
+    def test_a_genuine_rewatch_adds_exactly_one_more(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self._run(source, target)
+        source._contents[CATEGORY_HISTORY].append(
+            _episode("42", 1, 1, "2024-08-20T20:00:00Z")
+        )
+        self.assertEqual(self._run(source, target).added, 1)
+        self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 2)
+
+    def test_the_destination_reporting_its_own_write_back_is_not_a_new_play(self) -> None:
+        # Providers re-timestamp what they store. Read back a minute off, the
+        # play must still be recognised as the one this route wrote.
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self._run(source, target)
+        target._contents[CATEGORY_HISTORY] = [
+            _episode("42", 1, 1, "2024-01-01T20:00:41Z")
+        ]
+        self.assertEqual(self._run(source, target).added, 0)
+
+    def test_a_state_only_destination_is_never_sent_a_rewatch(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [
+                _episode("42", 1, 1, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 1, "2024-08-20T20:00:00Z"),
+            ]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target(records_plays=False)
+        self.assertEqual(self._run(source, target).added, 1)
+        self.assertEqual(self._run(source, target).added, 0)
+
+    def test_history_is_never_removed_by_an_additive_route(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: []}, reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target(rows=[_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        result = self._run(source, target)
+        self.assertEqual(result.removed, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 1)
+
+
+class ResumePlannerThroughTheServiceTests(unittest.TestCase):
+    def _run(self, source_item, target_item):
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [source_item] if source_item else []},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [target_item] if target_item else []},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        result = CrossSyncService({"trakt": source, "library": target}).run_pair(
+            _pair(target="library", categories=[CATEGORY_RESUME])
+        )
+        return result, target
+
+    def test_a_further_position_is_written(self) -> None:
+        result, target = self._run(_resume("1", 60_000), _resume("1", 20_000))
+        self.assertEqual(result.added, 1)
+        self.assertEqual(target.added[0][1][0]["position_ms"], 60_000)
+
+    def test_a_barely_started_item_is_not_synced(self) -> None:
+        # An accidental open is not progress, and writing it could overwrite a
+        # real position on the other side.
+        result, target = self._run(_resume("1", 1_000), None)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(target.added, [])
+
+    def test_a_finished_item_is_not_pushed_on_as_a_resume_point(self) -> None:
+        result, target = self._run(_resume("1", 95_000), None)
+        self.assertEqual(result.added, 0)
+
+    def test_the_destination_is_never_rewound(self) -> None:
+        result, target = self._run(_resume("1", 20_000), _resume("1", 60_000))
+        self.assertEqual(result.added, 0)
+        self.assertEqual(target.added, [])
+
+    def test_a_settled_resume_route_writes_nothing(self) -> None:
+        result, _ = self._run(_resume("1", 40_000), _resume("1", 40_000))
+        self.assertEqual(result.added, 0)
+
+
+class TwoWayHistoryTests(unittest.TestCase):
+    """Both sides end holding the union, and stay there.
+
+    The failure this guards is ping-pong: a play carried A→B coming back as if
+    B had invented it. Ordering cannot prevent that — only the baseline's record
+    of what was already carried can.
+    """
+
+    def setUp(self) -> None:
+        self.store = _fresh_store()
+        self.pair = _pair(
+            source="trakt", target="simkl", mode="two_way",
+            categories=[CATEGORY_HISTORY], removal_mode=REMOVAL_MANAGED,
+        )
+
+    def _side(self, key, rows):
+        adapter = FakeAdapter(
+            key, {CATEGORY_HISTORY: list(rows)},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        adapter.records_plays = True
+        return adapter
+
+    def _run(self, a, b):
+        return CrossSyncService(
+            {"trakt": a, "simkl": b}, state_store=self.store,
+        ).run_pair(self.pair)
+
+    def test_each_side_gains_what_the_other_had(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 2, "2024-02-02T20:00:00Z")])
+        self._run(a, b)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+        self.assertEqual(len(b._contents[CATEGORY_HISTORY]), 2)
+
+    def test_later_runs_write_nothing(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 2, "2024-02-02T20:00:00Z")])
+        self._run(a, b)
+        for _ in range(3):
+            self.assertEqual(self._run(a, b).added, 0)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+
+    def test_a_new_play_on_one_side_propagates_once(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        self._run(a, b)
+        b._contents[CATEGORY_HISTORY].append(
+            _episode("42", 1, 3, "2024-09-09T20:00:00Z")
+        )
+        self.assertEqual(self._run(a, b).added, 1)
+        self.assertEqual(self._run(a, b).added, 0)
+        self.assertEqual(len(a._contents[CATEGORY_HISTORY]), 2)
+        self.assertEqual(len(b._contents[CATEGORY_HISTORY]), 2)
+
+    def test_history_is_never_removed_from_either_side(self) -> None:
+        a = self._side("trakt", [_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        b = self._side("simkl", [])
+        result = self._run(a, b)
+        self.assertEqual(result.removed, 0)
+
+
+class RemovalVerificationTests(unittest.TestCase):
+    """A large deletion is re-read to check it actually took.
+
+    "deleted: 12" is what the adapter *sent*, not always what the provider did.
+    For a big removal that difference is worth one extra request: a silent no-op
+    would leave the next run planning the same deletion forever, and the count
+    going down gives nobody a reason to look.
+    """
+
+    @staticmethod
+    def _movies(count, offset=0):
+        return [_movie(str(2000 + i), f"Film {i}") for i in range(offset, offset + count)]
+
+    def _run(self, target):
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: self._movies(1)})
+        keys = [item_key(enrich_identity(i)) for i in target._contents[CATEGORY_WATCHLIST]]
+        service = CrossSyncService(
+            {"trakt": source, "simkl": target},
+            state_store=_established_store(keys, managed=keys),
+            guard_large_removals=False,
+        )
+        return service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+
+    def test_a_removal_that_took_is_not_reported_as_a_problem(self) -> None:
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: self._movies(20)})
+        result = self._run(target)
+        self.assertEqual(result.categories[0].errors, [])
+
+    def test_a_removal_the_provider_ignored_is_reported(self) -> None:
+        class Stubborn(FakeAdapter):
+            def remove(self, category, items, target_list=""):
+                # Reports success and changes nothing, which is the failure
+                # mode a count alone can never reveal.
+                self.removed.append((category, list(items)))
+                return {"deleted": len(items)}
+
+        target = Stubborn("simkl", {CATEGORY_WATCHLIST: self._movies(20)})
+        result = self._run(target)
+        errors = result.categories[0].errors
+        self.assertTrue(errors)
+        self.assertIn("still on", errors[0])
+
+    def test_a_small_removal_is_not_re_read(self) -> None:
+        # The point is to catch expensive mistakes, not to double every sync's
+        # request count.
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: self._movies(4)})
+        before = len(target.fetched)
+        self._run(target)
+        self.assertEqual(len(target.fetched), before + 1)

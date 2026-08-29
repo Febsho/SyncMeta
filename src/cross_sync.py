@@ -25,11 +25,34 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from .sync.executor import execute_plan
+from .sync.ownership import OwnershipIndex, destination_scope
+from .sync.history import plan_history
+from .sync.progress import plan_progress
+from .sync.planner import (
+    SyncPlan,
+    normalize_policy,
+    plan_membership,
+    plan_two_way,
+)
+from .sync.safety import SafetyPolicy, enforce as enforce_safety, evaluate as evaluate_safety
+from .sync.models import (
+    ItemState,
+    RouteBaseline,
+    STATE_ABSENT,
+    STATE_PRESENT,
+    FetchOutcome,
+    FetchStatus,
+    ItemState,
+    RouteObservation,
+)
 from .providers import (
+    CATEGORY_COLLECTION,
     CATEGORY_HISTORY,
     CATEGORY_RESUME,
+    CATEGORY_WATCHLIST,
     MODE_ONE_WAY,
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
@@ -38,8 +61,8 @@ from .providers import (
     VISIBILITY_PRIVATE,
     enrich_identity,
     has_portable_identity,
+    PlaySet,
     item_key,
-    normalize_watched_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,31 +195,41 @@ def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, targ
     it keeps the first and silently discards every rewatch, which is why a
     second viewing never reached the other service.
 
-    So a play is matched on identity *and* its timestamp, but only where the
-    target can hold more than one: a service that reports watched *state* hands
-    back a single row however many plays it was sent, so writing the extra ones
-    would leave them looking missing on every subsequent run and the pair would
-    re-send them forever. ``records_plays`` on the adapter decides that, and
-    ``target_plays`` is empty when it is false.
+    But nor can an exact timestamp. Services do not agree on *when* a play
+    happened — Trakt stamps the scrobble, SIMKL stamps when its server recorded
+    it — so the same viewing arrives seconds apart and, matched exactly, looked
+    like a fresh rewatch at every hop. Plays are therefore matched within
+    ``PLAY_MATCH_WINDOW_SECONDS`` (see ``providers.PlaySet``).
 
-    An episode the target does not have at all is always added, whichever kind
-    of target it is — that is the ordinary first-play case.
+    The ledger starts from what the target already holds and is updated as rows
+    are accepted, so two source rows that are themselves a few seconds apart
+    cannot both be written either.
+
+    A rewatch only goes to a target that can hold one: a service reporting
+    watched *state* hands back a single row however many plays it was sent, so
+    the extra would look missing on every later run and be re-sent forever.
+    ``records_plays`` decides that, and ``target_plays`` is empty when it is
+    false. An episode the target lacks entirely is always added.
     """
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    ledgers: dict[str, PlaySet] = {}
     for key, item in source_rows:
-        stamp = normalize_watched_at(item.get("watched_at"))
-        if key in target_by_key:
-            known = target_plays.get(key)
-            if not known:
-                # Already watched there, and the target keeps no per-play
-                # record to add a rewatch to.
-                continue
-            if not stamp or stamp in known:
-                continue
-        if (key, stamp) in seen:
+        present = key in target_by_key
+        known = target_plays.get(key)
+        if present and not known:
+            # Already watched there, and the target keeps no per-play record to
+            # attach a rewatch to.
             continue
-        seen.add((key, stamp))
+        ledger = ledgers.get(key)
+        if ledger is None:
+            ledger = PlaySet(known or ())
+            ledgers[key] = ledger
+        stamp = item.get("watched_at")
+        if present and not ledger.stamped:
+            continue
+        if ledger.matches(stamp):
+            continue
+        ledger.add(stamp)
         out.append(item)
     return out
 
@@ -204,6 +237,9 @@ def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, targ
 #: A list has to be big enough, and lose enough, for a mass deletion to be
 #: surprising. Below these the guard stays silent — removing 2 of 3 items is a
 #: perfectly ordinary edit and pausing it would be noise.
+#: Categories the baseline planner owns. Membership only — see _plan_category.
+_PLANNED_CATEGORIES = frozenset({CATEGORY_WATCHLIST, CATEGORY_COLLECTION})
+
 _GUARD_MIN_TARGET_SIZE = 10
 _GUARD_MIN_REMOVALS = 5
 
@@ -237,6 +273,10 @@ class PairCategoryStats:
     #: stopped. Reported rather than raised: nothing was deleted, and the user
     #: decides whether the run was right.
     blocked_removals: list[dict] = field(default_factory=list)
+    #: Two-way only: items both sides changed since the baseline, in ways that
+    #: disagree. Reported rather than resolved — letting run order pick a winner
+    #: silently discards one of the user's two edits.
+    conflicts_detected: int = 0
     changes: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -252,6 +292,7 @@ class PairCategoryStats:
             "cached_reads": self.cached_reads,
             "added_back": self.added_back,
             "removed_back": self.removed_back,
+            "conflicts_detected": self.conflicts_detected,
             "blocked_removals": [dict(entry) for entry in self.blocked_removals],
             "changes": [dict(entry) for entry in self.changes],
             "errors": list(self.errors),
@@ -333,8 +374,14 @@ class CrossSyncService:
         status_callback=None,
         guard_large_removals: bool = True,
         guard_removal_percent: int = 20,
+        state_store=None,
+        allow_destructive_override: bool = False,
     ):
         self._adapters = dict(adapters or {})
+        # Baselines, when the caller has them. Optional so every existing test
+        # and call site keeps working; without one the planner simply reports
+        # from an empty baseline, which is the safe reading.
+        self._state_store = state_store
         self._dry_run = bool(dry_run)
         # A run that would empty a list is far more often a provider hiccup — a
         # half-read source, a revoked token that returned nothing — than a user
@@ -346,6 +393,11 @@ class CrossSyncService:
         except (TypeError, ValueError):
             percent = 20
         self._guard_removal_percent = min(100, max(1, percent))
+        # Only a person acting on a preview may waive the size thresholds. An
+        # automatic run leaves this False and therefore cannot, and no override
+        # ever waives a *hard* block — an unreadable source or a missing
+        # baseline is bad evidence, not a decision anyone gets to make.
+        self._allow_destructive_override = bool(allow_destructive_override)
         # {pair_id: {category: [key, ...]}} — keys this pair has written before.
         self._managed_keys = {
             str(pair_id): {
@@ -354,6 +406,17 @@ class CrossSyncService:
             }
             for pair_id, categories in (managed_keys or {}).items()
         }
+        # What each route actually observed this run, for the baseline store.
+        # Server-side only: these key sets are far too large to ride /status,
+        # which is why they are not folded into PairCategoryStats.
+        self._route_states: dict[tuple[str, str], RouteObservation] = {}
+        # Plans built alongside the live decision. Reported, not yet obeyed —
+        # switching execution onto them is the next step, and running them in
+        # parallel first is what makes that switch reviewable against real data.
+        self._plans: dict[tuple[str, str], SyncPlan] = {}
+        self._plan_verdicts: dict = {}
+        self._plan_blocked_items: dict = {}
+        self._ownership = OwnershipIndex()
         self._cancel_requested_callback = cancel_requested_callback
         self._status_callback = status_callback
         # Set only while a batch is in flight; see _batch_cache().
@@ -396,6 +459,21 @@ class CrossSyncService:
                 self._status_callback(message)
             except Exception:
                 logger.debug("Cross-sync status callback failed", exc_info=True)
+
+    @property
+    def plans(self) -> dict:
+        """The plan each route/category produced this run."""
+        return dict(self._plans)
+
+    @property
+    def plan_verdicts(self) -> dict:
+        """What the safety guard concluded about each plan."""
+        return dict(self._plan_verdicts)
+
+    @property
+    def route_states(self) -> dict:
+        """Per (route_id, category) observation of this run. Never serialized."""
+        return dict(self._route_states)
 
     @property
     def managed_keys(self) -> dict:
@@ -591,6 +669,12 @@ class CrossSyncService:
             message = f"Could not read {category} from {source.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+            # A read that failed is not an empty list, and the baseline must
+            # record that difference rather than the zero items it got back.
+            self._observe_failure(
+                pair, category, message,
+                source_fetch=self._fetch_outcome(source, category, error=exc),
+            )
             return result
 
         try:
@@ -611,6 +695,11 @@ class CrossSyncService:
             message = f"Could not read {category} from {target.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+            self._observe_failure(
+                pair, category, message,
+                source_fetch=self._fetch_outcome(source, category, count=len(source_items)),
+                destination_fetch=self._fetch_outcome(target, category, error=exc),
+            )
             return result
 
         result.source_items = len(source_items)
@@ -645,37 +734,84 @@ class CrossSyncService:
                 source_rows.append((key, item))
 
         target_by_key: dict[str, dict] = {}
-        target_plays: dict[str, set[str]] = {}
+        target_plays: dict[str, list] = {}
         keeps_plays = is_history and bool(getattr(target, "records_plays", False))
         for raw_item in target_items:
             item = enrich_identity(raw_item)
             key = self._comparison_key(item, target_list)
             target_by_key.setdefault(key, item)
             if keeps_plays:
-                stamp = normalize_watched_at(item.get("watched_at"))
-                if stamp:
-                    target_plays.setdefault(key, set()).add(stamp)
+                target_plays.setdefault(key, []).append(item.get("watched_at"))
 
+        source_outcome = self._fetch_outcome(source, category, count=len(source_items))
+        history_plan = None
+
+        # Every category is now planned against the baseline, but each kind of
+        # data gets its own planner: membership asks "is it on the list",
+        # history asks "did this happen and have we already carried it", and
+        # resume asks "is this further along". Sharing one would collapse the
+        # distinctions each of them exists to keep.
         if is_history:
-            to_add = _history_adds(source_rows, target_by_key, target_plays)
-            result.skipped_existing = max(0, len(source_rows) - len(to_add))
+            history_plan = self._plan_history_category(
+                pair, category, source_rows=[item for _key, item in source_rows],
+                target_items=[enrich_identity(row) for row in target_items],
+                source=source, target=target,
+            )
+            plan = history_plan.plan if history_plan is not None else None
+            if plan is None:
+                to_add = _history_adds(source_rows, target_by_key, target_plays)
+                result.skipped_existing = max(0, len(source_rows) - len(to_add))
+        elif category == CATEGORY_RESUME:
+            plan = self._plan_progress_category(
+                pair, category, source_by_key=source_by_key,
+                target_by_key=target_by_key, source=source, target=target,
+            )
+            if plan is None:
+                to_add = [
+                    item for key, item in source_by_key.items()
+                    if key not in target_by_key
+                    or not self._resume_matches(item, target_by_key[key])
+                ]
+                result.skipped_existing = len(source_by_key) - len(to_add)
         else:
             to_add = [
                 item for key, item in source_by_key.items()
                 if key not in target_by_key
-                or (category == CATEGORY_RESUME and not self._resume_matches(item, target_by_key[key]))
             ]
             result.skipped_existing = len(source_by_key) - len(to_add)
-
-        to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
-        blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
-        if blocked:
-            self._note_blocked(
-                pair, category, result,
-                removals=len(to_remove), target_size=len(target_by_key),
-                percent=percent, where=target.label, items=to_remove,
+            plan = self._plan_category(
+                pair, category,
+                source_by_key=source_by_key, target_by_key=target_by_key,
+                source=source, target=target,
+                source_trustworthy=source_outcome.trustworthy_for_removals,
             )
-            to_remove = []
+        if plan is not None:
+            # Updates ride with additions: every adapter's `add` is an upsert for
+            # the categories that have them (a resume position, a progress count).
+            to_add = [action.item for action in plan.additions + plan.updates]
+            to_remove = [action.item for action in plan.removals]
+            result.skipped_existing = len(plan.skipped)
+            verdict = self._plan_verdicts.get((str(pair.pair_id), str(category)))
+            if verdict is not None and verdict.blocked:
+                self._note_blocked(
+                    pair, category, result,
+                    removals=verdict.removals, target_size=len(target_by_key),
+                    percent=verdict.percent, where=target.label,
+                    items=self._plan_blocked_items.get(
+                        (str(pair.pair_id), str(category)), [],
+                    ),
+                    detail=verdict.explain(),
+                )
+        else:
+            to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
+            blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
+            if blocked:
+                self._note_blocked(
+                    pair, category, result,
+                    removals=len(to_remove), target_size=len(target_by_key),
+                    percent=percent, where=target.label, items=to_remove,
+                )
+                to_remove = []
 
         self._set_status(
             f"{pair.display_name()}: {len(to_add)} to add, {len(to_remove)} to remove on {target.label}"
@@ -718,6 +854,9 @@ class CrossSyncService:
                     result.removed = _total(totals, "deleted")
                     wrote_removed = to_remove[:result.removed]
                     result.changes.extend(self._change_rows(wrote_removed, "removed", category))
+                    self._verify_removals(
+                        pair, category, target, target_list, wrote_removed, result,
+                    )
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
@@ -734,6 +873,24 @@ class CrossSyncService:
             )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
+        if is_history:
+            self._commit_history_baseline(pair, category, result, history_plan, wrote_added)
+        self._commit_baseline(
+            pair, category, result,
+            source_by_key=source_by_key, target_by_key=target_by_key,
+            added=wrote_added, removed=wrote_removed, target_list=target_list,
+        )
+        self._observe_route(
+            pair, category,
+            source_by_key=source_by_key,
+            target_by_key=target_by_key,
+            added=wrote_added if not self._dry_run else [],
+            removed=wrote_removed if not self._dry_run else [],
+            result=result,
+            source_fetch=self._fetch_outcome(source, category, count=len(source_items)),
+            destination_fetch=self._fetch_outcome(target, category, count=len(target_items)),
+            target_list=target_list,
+        )
         return result
 
     def _run_category_two_way(self, pair, first, second, category: str) -> PairCategoryStats:
@@ -797,7 +954,7 @@ class CrossSyncService:
             """Index by identity, and for history also keep every play row."""
             out: dict[str, dict] = {}
             rows: list[tuple[str, dict]] = []
-            plays: dict[str, set[str]] = {}
+            plays: dict[str, list] = {}
             for raw in raw_items:
                 item = enrich_identity(raw)
                 if count_unmapped and not has_portable_identity(item):
@@ -807,15 +964,39 @@ class CrossSyncService:
                 out.setdefault(key, item)
                 if is_history:
                     rows.append((key, item))
-                    stamp = normalize_watched_at(item.get("watched_at"))
-                    if stamp:
-                        plays.setdefault(key, set()).add(stamp)
+                    plays.setdefault(key, []).append(item.get("watched_at"))
             return out, rows, plays
 
         first_by_key, first_rows, first_plays = _index(sides["first"], True)
         second_by_key, second_rows, second_plays = _index(sides["second"], True)
         result.source_items = len(first_by_key)
         result.target_items = len(second_by_key)
+
+        # Membership reconciles from the baseline: it can tell which side moved,
+        # which set arithmetic on the managed keys cannot. History and resume
+        # keep the path below until their own two-way handling lands.
+        if category in _PLANNED_CATEGORIES:
+            planned = self._run_two_way_planned(
+                pair, first, second, category, result,
+                first_by_key=first_by_key, second_by_key=second_by_key,
+            )
+            if planned is not None:
+                return planned
+        elif is_history:
+            planned = self._run_two_way_history(
+                pair, first, second, category, result,
+                first_rows=[item for _key, item in first_rows],
+                second_rows=[item for _key, item in second_rows],
+            )
+            if planned is not None:
+                return planned
+        elif category == CATEGORY_RESUME:
+            planned = self._run_two_way_progress(
+                pair, first, second, category, result,
+                first_by_key=first_by_key, second_by_key=second_by_key,
+            )
+            if planned is not None:
+                return planned
 
         first_keys, second_keys = set(first_by_key), set(second_by_key)
         known = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
@@ -1040,10 +1221,59 @@ class CrossSyncService:
             })
         return rows
 
+    #: Below this a removal is small enough that a re-read costs more than it is
+    #: worth. Above it, the run has done something a person would want to be
+    #: sure of, and one extra request is cheap next to being wrong.
+    _VERIFY_REMOVALS_ABOVE = 10
+
+    def _verify_removals(
+        self, pair, category: str, target, target_list: str,
+        removed: list[dict], result,
+    ) -> None:
+        """Re-read the destination after a large deletion and check it took.
+
+        An adapter reporting "deleted: 12" is reporting what it *sent*, not
+        always what the provider did. For a big removal that difference is worth
+        one request: a silent no-op leaves the next run planning the same
+        deletion forever, and a person watching the count go down would have no
+        reason to look.
+
+        Deliberately not done for small removals — the point is to catch the
+        expensive mistakes, not to double the request count of every sync.
+        """
+        if self._dry_run or len(removed) < self._VERIFY_REMOVALS_ABOVE:
+            return
+        try:
+            current = target.fetch_target(category, target_list) or []
+        except Exception:
+            # Verification failing is not the run failing; the removal already
+            # happened and the next run will see the truth either way.
+            logger.debug("Could not verify removals on %s", target.label, exc_info=True)
+            return
+        present = {
+            self._comparison_key(enrich_identity(item), target_list) for item in current
+        }
+        survivors = [
+            item for item in removed
+            if self._comparison_key(item, target_list) in present
+        ]
+        if not survivors:
+            logger.info(
+                "Pair %s: verified %d %s removal(s) on %s",
+                pair.display_name(), len(removed), category, target.label,
+            )
+            return
+        message = (
+            f"{len(survivors)} of {len(removed)} {category} items are still on "
+            f"{target.label} after the removal was reported as done"
+        )
+        result.errors.append(message)
+        logger.warning("Pair %s: %s", pair.display_name(), message)
+
     def _note_blocked(
         self, pair, category: str, result: PairCategoryStats,
         *, removals: int, target_size: int, percent: int, where: str,
-        items: list[dict] | None = None,
+        items: list[dict] | None = None, detail: str = "",
     ) -> None:
         review_items = []
         for item in items or []:
@@ -1062,12 +1292,15 @@ class CrossSyncService:
             "percent": percent,
             "target": where,
             "items": review_items,
+            # The exact threshold or condition that stopped it, so the Issues
+            # page can say why rather than only that.
+            "detail": detail,
         })
         logger.warning(
-            "Pair %s: refusing to remove %d of %d %s items (%d%%) from %s — "
-            "over the %d%% safety threshold; nothing was deleted",
-            pair.display_name(), removals, target_size, category, percent,
-            where, self._guard_removal_percent,
+            "Pair %s: refusing to remove %d of %d %s items (%s%%) from %s — %s; "
+            "nothing was deleted",
+            pair.display_name(), removals, target_size, category, percent, where,
+            detail or f"over the {self._guard_removal_percent}% safety threshold",
         )
         self._set_status(
             f"{pair.display_name()}: paused an unusually large removal "
@@ -1101,6 +1334,621 @@ class CrossSyncService:
 
         return [target_by_key[key] for key in stale_keys]
 
+    def _run_two_way_planned(
+        self, pair, first, second, category: str, result,
+        *, first_by_key, second_by_key,
+    ):
+        """Reconcile a two-way membership category from the baseline.
+
+        Returns the finished stats, or None to fall back to the legacy pass if a
+        plan could not be built — a planner failure must not take a run with it.
+        """
+        baseline = None
+        if self._state_store is not None:
+            try:
+                baseline = self._state_store.baseline(pair.pair_id, category)
+            except Exception:
+                logger.debug("Could not read baseline for two-way plan", exc_info=True)
+        if baseline is None:
+            baseline = RouteBaseline(route_id=str(pair.pair_id), category=str(category))
+        try:
+            two_way = plan_two_way(
+                route_id=str(pair.pair_id), category=str(category),
+                first_by_key=first_by_key, second_by_key=second_by_key,
+                baseline=baseline, policy=normalize_policy(pair.removal_mode),
+                first_provider=first.key, second_provider=second.key,
+                first_trustworthy=first.last_read_complete(),
+                second_trustworthy=second.last_read_complete(),
+            )
+        except Exception:
+            logger.warning("Could not build two-way sync plan", exc_info=True)
+            return None
+
+        self._plans[(str(pair.pair_id), str(category))] = two_way.forward
+        result.skipped_existing = len(set(first_by_key) & set(second_by_key))
+
+        target_list = self._effective_target_list(pair, category)
+        performed: list = []
+        for plan, writer_target, other, destination_list in (
+            (two_way.forward, second, first, target_list),
+            (two_way.backward, first, second, ""),
+        ):
+            verdict = evaluate_safety(
+                plan,
+                policy=SafetyPolicy(
+                    enabled=self._guard_large_removals,
+                    max_removal_percent=self._guard_removal_percent,
+                    allow_destructive_override=self._allow_destructive_override,
+                ),
+                destination_size=len(second_by_key if writer_target is second else first_by_key),
+                source_size=len(first_by_key if writer_target is second else second_by_key),
+                source_trustworthy=other.last_read_complete(),
+                baseline_established=baseline.allows_removals,
+            )
+            if verdict.blocked and plan.removals:
+                self._note_blocked(
+                    pair, category, result,
+                    removals=verdict.removals,
+                    target_size=verdict.destination_size,
+                    percent=verdict.percent, where=writer_target.label,
+                    items=[a.item for a in plan.removals], detail=verdict.explain(),
+                )
+            plan = enforce_safety(plan, verdict)
+            performed.append(plan)
+            self._apply_two_way_side(
+                pair, category, plan, writer_target, result, destination_list,
+            )
+
+        result.conflicts_detected = len(two_way.conflicts)
+        # Ownership is the union both sides now hold, minus what actually went.
+        # Taken from the *enforced* plans, so a removal the guard paused stays in
+        # the agreed set — the next run then sees the same situation rather than
+        # treating those items as never synced.
+        gone = {a.key for plan in performed for a in plan.removals}
+        agreed = sorted((set(first_by_key) | set(second_by_key)) - gone)
+        if not self._dry_run:
+            self._managed_keys.setdefault(pair.pair_id, {})[category] = agreed
+        result.managed_keys = agreed
+
+        if self._state_store is not None and not self._dry_run and not result.errors:
+            try:
+                applied_forward = {a.key for a in two_way.forward.additions}
+                applied_backward = {a.key for a in two_way.backward.additions}
+                gone_forward = {a.key for a in two_way.forward.removals}
+                gone_backward = {a.key for a in two_way.backward.removals}
+                items = {}
+                for key in set(first_by_key) | set(second_by_key):
+                    on_first = (
+                        key in first_by_key or key in applied_backward
+                    ) and key not in gone_backward
+                    on_second = (
+                        key in second_by_key or key in applied_forward
+                    ) and key not in gone_forward
+                    items[key] = ItemState(
+                        source=STATE_PRESENT if on_first else STATE_ABSENT,
+                        destination=STATE_PRESENT if on_second else STATE_ABSENT,
+                        synced=STATE_PRESENT if (on_first and on_second) else STATE_ABSENT,
+                        managed=True,
+                    )
+                self._state_store.commit(pair.pair_id, category, items=items)
+            except Exception:
+                logger.warning("Could not record two-way baseline", exc_info=True)
+        return result
+
+    def _run_two_way_history(
+        self, pair, first, second, category, result, *, first_rows, second_rows,
+    ):
+        """Carry watch events both ways, from one pair of reads.
+
+        History is a union, so both directions are simply planned — there is no
+        deletion to order and therefore no way for run order to change the
+        outcome. Both plans are built from the *same* snapshots, so a play only
+        on one side is carried to the other and neither is re-read mid-run.
+
+        Ping-pong across runs is prevented by the baseline rather than by
+        ordering: once a play is recorded as carried, it is recognised on the
+        way back and never returned to where it came from.
+        """
+        baseline = self._baseline_for(pair, category)
+        try:
+            forward = plan_history(
+                route_id=str(pair.pair_id), source_rows=first_rows,
+                destination_rows=second_rows, baseline=baseline,
+                target_records_plays=bool(getattr(second, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=first.key, destination_provider=second.key,
+                category=str(category),
+            )
+            backward = plan_history(
+                route_id=str(pair.pair_id), source_rows=second_rows,
+                destination_rows=first_rows, baseline=baseline,
+                target_records_plays=bool(getattr(first, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=second.key, destination_provider=first.key,
+                category=str(category),
+            )
+        except Exception:
+            logger.warning("Could not build two-way history plan", exc_info=True)
+            return None
+
+        self._plans[(str(pair.pair_id), str(category))] = forward.plan
+        for plan, target in ((forward.plan, second), (backward.plan, first)):
+            self._apply_two_way_side(pair, category, plan, target, result)
+
+        if self._state_store is not None and not self._dry_run and not result.errors:
+            try:
+                # Both directions' records, merged: after this run each side
+                # holds what the other had, and the baseline has to say so or
+                # the next run carries it all again.
+                items = dict(baseline.items)
+                for planned in (forward, backward):
+                    for key, projected in planned.projected.items():
+                        existing = items.get(key)
+                        if existing is None:
+                            items[key] = projected
+                            continue
+                        merged_plays = tuple(dict.fromkeys(
+                            tuple(existing.plays) + tuple(projected.plays)
+                        ))
+                        merged_events = tuple(dict.fromkeys(
+                            tuple(existing.event_ids) + tuple(projected.event_ids)
+                        ))
+                        items[key] = ItemState(
+                            source=STATE_PRESENT, destination=STATE_PRESENT,
+                            synced=STATE_PRESENT, managed=True,
+                            plays=merged_plays, event_ids=merged_events,
+                        )
+                self._state_store.commit(pair.pair_id, category, items=items)
+            except Exception:
+                logger.warning("Could not record two-way history baseline", exc_info=True)
+        return result
+
+    def _run_two_way_progress(
+        self, pair, first, second, category, result, *, first_by_key, second_by_key,
+    ):
+        """Reconcile resume points both ways, which is furthest-wins by itself.
+
+        Each direction refuses to write when the destination is already further
+        along, so planning both and applying both leaves each side at the
+        furthest valid position — without either side's turn deciding it.
+        """
+        baseline = self._baseline_for(pair, category)
+        try:
+            forward = plan_progress(
+                route_id=str(pair.pair_id), source_by_key=first_by_key,
+                destination_by_key=second_by_key, baseline=baseline,
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=first.key, destination_provider=second.key,
+                category=str(category),
+            ).plan
+            backward = plan_progress(
+                route_id=str(pair.pair_id), source_by_key=second_by_key,
+                destination_by_key=first_by_key, baseline=baseline,
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=second.key, destination_provider=first.key,
+                category=str(category),
+            ).plan
+        except Exception:
+            logger.warning("Could not build two-way progress plan", exc_info=True)
+            return None
+
+        self._plans[(str(pair.pair_id), str(category))] = forward
+        result.conflicts_detected = len(forward.conflicts) + len(backward.conflicts)
+        for plan, target in ((forward, second), (backward, first)):
+            self._apply_two_way_side(pair, category, plan, target, result)
+        return result
+
+    def _apply_two_way_side(
+        self, pair, category, plan, target, result, target_list: str = "",
+    ) -> None:
+        """Write one direction of a reconciled two-way plan."""
+        forward = target.key == pair.target
+        if plan.removals and not self._dry_run:
+            try:
+                totals = target.remove(
+                    category, [a.item for a in plan.removals], target_list,
+                ) or {}
+                count = _total(totals, "deleted")
+            except Exception as exc:
+                message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
+                result.errors.append(message)
+                logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                count = 0
+            if forward:
+                result.removed += count
+            else:
+                result.removed_back += count
+                result.removed += count
+        elif plan.removals:
+            result.removed += len(plan.removals)
+            if not forward:
+                result.removed_back += len(plan.removals)
+
+        # Updates ride with additions: `add` is an upsert for the categories
+        # that have them, and resume produces nothing else.
+        writes = list(plan.additions) + list(plan.updates)
+        if writes and not self._dry_run:
+            try:
+                totals = target.add(
+                    category, [a.item for a in writes], target_list,
+                    **_add_kwargs(target, pair),
+                ) or {}
+                count = _total(totals, "added")
+                result.unmapped += _total(totals, "not_found")
+            except Exception as exc:
+                message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
+                result.errors.append(message)
+                logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+                count = 0
+            if forward:
+                result.added += count
+            else:
+                result.added_back += count
+                result.added += count
+        elif writes:
+            result.added += len(writes)
+            if not forward:
+                result.added_back += len(writes)
+
+    def _baseline_for(self, pair, category: str):
+        if self._state_store is not None:
+            try:
+                return self._state_store.baseline(pair.pair_id, category)
+            except Exception:
+                logger.debug("Could not read baseline", exc_info=True)
+        return RouteBaseline(route_id=str(pair.pair_id), category=str(category))
+
+    def _plan_history_category(self, pair, category, *, source_rows, target_items, source, target):
+        """Plan watch history: a union, deduped in three layers.
+
+        A failure here falls back to the legacy diff rather than taking the run
+        with it — that path is already play-aware and additive-safe.
+        """
+        try:
+            planned = plan_history(
+                route_id=str(pair.pair_id),
+                source_rows=source_rows, destination_rows=target_items,
+                baseline=self._baseline_for(pair, category),
+                target_records_plays=bool(getattr(target, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                category=str(category),
+            )
+            self._plans[(str(pair.pair_id), str(category))] = planned.plan
+            return planned
+        except Exception:
+            logger.warning("Could not build history plan", exc_info=True)
+            return None
+
+    def _plan_progress_category(self, pair, category, *, source_by_key, target_by_key, source, target):
+        """Plan resume points: never rewind, never push a finished title on."""
+        try:
+            planned = plan_progress(
+                route_id=str(pair.pair_id),
+                source_by_key=source_by_key, destination_by_key=target_by_key,
+                baseline=self._baseline_for(pair, category),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                category=str(category),
+            )
+        except Exception:
+            logger.warning("Could not build progress plan", exc_info=True)
+            return None
+        self._plans[(str(pair.pair_id), str(category))] = planned.plan
+        return planned.plan
+
+    def _commit_history_baseline(self, pair, category, result, history_plan, wrote_added) -> None:
+        """Record the plays this run actually carried across.
+
+        Only confirmed writes enter the record. A play written down as carried
+        when it was not would never be retried; one left out would be sent
+        again, which for history means a duplicate.
+        """
+        if self._state_store is None or self._dry_run or history_plan is None:
+            return
+        try:
+            if result.errors:
+                self._state_store.record_failure(
+                    pair.pair_id, category, "; ".join(result.errors)[:500],
+                )
+                return
+            written = {id(item) for item in wrote_added or []}
+            baseline = self._baseline_for(pair, category)
+            items = dict(baseline.items)
+            confirmed_keys = {
+                action.key for action in history_plan.plan.additions
+                if id(action.item) in written
+            }
+            for key, projected in history_plan.projected.items():
+                if key in confirmed_keys or key not in {
+                    a.key for a in history_plan.plan.additions
+                }:
+                    items[key] = projected
+                else:
+                    # Planned but not confirmed: keep what was already agreed so
+                    # the next run tries again rather than believing it done.
+                    items.setdefault(key, ItemState())
+            self._state_store.commit(pair.pair_id, category, items=items)
+        except Exception:
+            logger.warning("Could not record history baseline", exc_info=True)
+
+    def _commit_baseline(
+        self, pair, category: str, result, *,
+        source_by_key, target_by_key, added, removed, target_list,
+    ) -> None:
+        """Record what this run agreed on, so the next one can compare with it.
+
+        The engine keeps its own state rather than leaving it to whoever called
+        it: a second run in the same process has to see the first run's
+        agreement, or two-way reconciliation and the removal protections only
+        work when a particular caller remembers to persist for them.
+
+        A dry run agrees to nothing. Neither does a run that errored — its
+        writes are in an unknown state, so the previous agreement stands and the
+        next run works the problem again.
+        """
+        if self._state_store is None or self._dry_run:
+            return
+        if category not in _PLANNED_CATEGORIES:
+            return
+        added_keys = {self._comparison_key(i, target_list) for i in added or []}
+        removed_keys = {self._comparison_key(i, target_list) for i in removed or []}
+        managed = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
+        try:
+            if result.errors:
+                self._state_store.record_failure(
+                    pair.pair_id, category, "; ".join(result.errors)[:500],
+                )
+                return
+            items = {}
+            for key in set(source_by_key) | set(target_by_key) | added_keys:
+                on_source = key in source_by_key
+                on_destination = (
+                    key in target_by_key or key in added_keys
+                ) and key not in removed_keys
+                items[key] = ItemState(
+                    source=STATE_PRESENT if on_source else STATE_ABSENT,
+                    destination=STATE_PRESENT if on_destination else STATE_ABSENT,
+                    synced=STATE_PRESENT if (on_source and on_destination) else STATE_ABSENT,
+                    managed=key in managed,
+                )
+            self._state_store.commit(pair.pair_id, category, items=items)
+        except Exception:
+            logger.warning(
+                "Could not record baseline for %s/%s", pair.display_name(), category,
+                exc_info=True,
+            )
+
+    def _index_ownership(self, pairs) -> None:
+        """Record which routes still require each item on each destination.
+
+        An item may only be deleted when *no* active route's source still lists
+        it. Without this, two routes feeding one destination fight: the first
+        removes what left its source, and the second re-adds it on the next run
+        because its own source still has it.
+        """
+        self._ownership = OwnershipIndex()
+        for pair in pairs:
+            source = self._adapters.get(pair.source)
+            if source is None:
+                continue
+            scope = destination_scope(pair)
+            for category in getattr(pair, "categories", ()) or ():
+                if category not in _PLANNED_CATEGORIES:
+                    continue
+                try:
+                    items = self._read_for_ownership(source, category, pair)
+                except Exception:
+                    # Its own run will report this properly; here a failed read
+                    # simply contributes no claim, which is the safe direction.
+                    logger.debug(
+                        "Ownership pre-pass could not read %s/%s",
+                        pair.source, category, exc_info=True,
+                    )
+                    continue
+                keys = set()
+                for raw in items:
+                    item = enrich_identity(raw)
+                    if has_portable_identity(item):
+                        keys.add(item_key(item))
+                self._ownership.record(
+                    pair.pair_id, scope, category,
+                    required_keys=keys,
+                    managed_keys=self._managed_keys.get(pair.pair_id, {}).get(category, []),
+                )
+
+    def _read_for_ownership(self, source, category: str, pair) -> list:
+        lists = getattr(pair, "source_lists", None)
+        if self._read_cache is None:
+            return source.fetch(category, lists) or []
+        return self._read_cache.get_or_fetch(
+            source.key, category, lists, lambda: source.fetch(category, lists),
+        )
+
+    def _plan_category(
+        self, pair, category: str, *, source_by_key, target_by_key,
+        source, target, source_trustworthy=True,
+    ):
+        """Plan the category from the baseline, then let the guard rule on it.
+
+        Returns the plan the run may actually perform, or None for a category
+        this planner does not cover yet.
+
+        Only *membership* categories are planned here — "is this item on this
+        list". History is an append-only event log with its own dedupe rules,
+        and resume is a progress value where an item present on both sides may
+        still need writing because the position moved. Handing either to a
+        membership planner would silently turn "changed" into "already in sync",
+        so both keep the legacy path until their own planners land.
+        """
+        if category not in _PLANNED_CATEGORIES:
+            return None
+        baseline = None
+        if self._state_store is not None:
+            try:
+                baseline = self._state_store.baseline(pair.pair_id, category)
+            except Exception:
+                logger.debug("Could not read baseline for plan", exc_info=True)
+        if baseline is None:
+            baseline = RouteBaseline(route_id=str(pair.pair_id), category=str(category))
+        try:
+            plan = plan_membership(
+                route_id=str(pair.pair_id), category=str(category),
+                source_by_key=source_by_key, destination_by_key=target_by_key,
+                baseline=baseline, policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                source_trustworthy=source_trustworthy,
+            )
+        except Exception:
+            # A planner failure must not take the run with it; the caller falls
+            # back to the legacy diff, which is additive-safe.
+            logger.warning("Could not build sync plan", exc_info=True)
+            return None
+
+        verdict = evaluate_safety(
+            plan,
+            policy=SafetyPolicy(
+                enabled=self._guard_large_removals,
+                max_removal_percent=self._guard_removal_percent,
+                allow_destructive_override=self._allow_destructive_override,
+            ),
+            destination_size=len(target_by_key),
+            source_size=len(source_by_key),
+            source_trustworthy=source_trustworthy,
+            baseline_established=baseline.allows_removals,
+        )
+        # An item another active route still requires must not go, whatever this
+        # route's own view of it is — otherwise the two fight over it forever.
+        contested = self._ownership.blocked_removals(
+            pair.pair_id, destination_scope(pair), category,
+            [action.key for action in plan.removals],
+        )
+        if contested:
+            kept = tuple(a for a in plan.removals if a.key in contested)
+            plan = replace(
+                plan,
+                removals=tuple(a for a in plan.removals if a.key not in contested),
+                skipped=plan.skipped + tuple(
+                    replace(
+                        a, kind="skip", destructive=False,
+                        reason="Another sync route still requires this item",
+                    )
+                    for a in kept
+                ),
+            )
+            logger.info(
+                "Pair %s: keeping %d %s item(s) another route still requires",
+                pair.display_name(), len(contested), category,
+            )
+
+        key = (str(pair.pair_id), str(category))
+        if verdict.blocked:
+            # Kept before enforcement demotes them: the Issues page lists what
+            # *would* have been deleted, and a demoted action no longer says so.
+            self._plan_blocked_items[key] = [action.item for action in plan.removals]
+        plan = enforce_safety(plan, verdict)
+        self._plans[key] = plan
+        self._plan_verdicts[key] = verdict
+        return plan
+
+    # ── baseline observation ───────────────────────────────────────────────
+    #
+    # These record what the run *saw*, for `sync.state_store`. They change no
+    # decision in this class: the planner that consumes them lands separately.
+    # Recording them from the first run means that planner has real baselines to
+    # work with rather than starting blind.
+
+    @staticmethod
+    def _fetch_outcome(adapter, category: str, *, count: int = 0, error=None) -> FetchOutcome:
+        """Classify one provider read.
+
+        `PARTIAL` is not produced yet: no client currently reports that it read
+        only some of its pages. When they learn to, this is the one place that
+        has to change — everything downstream already refuses to conclude a
+        removal from a fetch that is not `trustworthy_for_removals`.
+        """
+        if error is not None:
+            return FetchOutcome(
+                provider=str(getattr(adapter, "key", "") or ""),
+                category=str(category),
+                status=CrossSyncService._error_status(error),
+                error=str(error)[:300],
+            )
+        complete = True
+        try:
+            complete = bool(adapter.last_read_complete())
+        except Exception:
+            logger.debug("Could not read fetch completeness", exc_info=True)
+        return FetchOutcome(
+            provider=str(getattr(adapter, "key", "") or ""),
+            category=str(category),
+            # A 200 carrying real items is still not trustworthy for removals if
+            # a page never arrived, so completeness rides separately from status.
+            status=(
+                FetchStatus.PARTIAL if not complete
+                else FetchStatus.SUCCESS_WITH_ITEMS if count
+                else FetchStatus.SUCCESS_EMPTY
+            ),
+            item_count=int(count),
+            complete=complete,
+        )
+
+    @staticmethod
+    def _error_status(error) -> FetchStatus:
+        text = f"{type(error).__name__}: {error}".lower()
+        if "timeout" in text or "timed out" in text:
+            return FetchStatus.TIMEOUT
+        if "429" in text or "rate limit" in text:
+            return FetchStatus.RATE_LIMITED
+        if "401" in text or "403" in text or "unauthor" in text or "invalid_grant" in text:
+            return FetchStatus.UNAUTHORIZED
+        return FetchStatus.FAILED
+
+    def _observe_failure(self, pair, category: str, error: str, **fetches) -> None:
+        self._route_states[(str(pair.pair_id), str(category))] = RouteObservation(
+            route_id=str(pair.pair_id), category=str(category),
+            complete=False, error=str(error)[:500], **fetches,
+        )
+
+    def _observe_route(
+        self, pair, category: str, *, source_by_key, target_by_key,
+        added, removed, result, source_fetch, destination_fetch, target_list,
+    ) -> None:
+        """Build the per-item agreement this run establishes.
+
+        The destination side is the state *after* the writes this run made, not
+        the state it was read in — otherwise the next run would see everything
+        this one just wrote as missing and write it all again.
+        """
+        added_keys = {self._comparison_key(item, target_list) for item in added or []}
+        removed_keys = {self._comparison_key(item, target_list) for item in removed or []}
+        managed = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
+
+        items: dict[str, ItemState] = {}
+        for key in set(source_by_key) | set(target_by_key) | added_keys:
+            on_source = key in source_by_key
+            on_destination = (key in target_by_key or key in added_keys) and key not in removed_keys
+            state = ItemState(
+                source=STATE_PRESENT if on_source else STATE_ABSENT,
+                destination=STATE_PRESENT if on_destination else STATE_ABSENT,
+                synced=STATE_PRESENT if (on_source and on_destination) else STATE_ABSENT,
+                managed=key in managed,
+            )
+            if key in added_keys:
+                state.action = "added"
+            elif key in removed_keys:
+                state.action = "removed"
+            items[key] = state
+
+        self._route_states[(str(pair.pair_id), str(category))] = RouteObservation(
+            route_id=str(pair.pair_id), category=str(category), items=items,
+            source_fetch=source_fetch, destination_fetch=destination_fetch,
+            # A write that raised leaves the destination in a state this run
+            # cannot describe, so the agreement must not be advanced from it.
+            complete=not result.errors,
+            error="; ".join(result.errors)[:500],
+        )
+
     def _record_managed_keys(
         self, pair, category: str, source_by_key: dict, removed: list[dict], result: PairCategoryStats,
     ) -> None:
@@ -1119,6 +1967,11 @@ class CrossSyncService:
     def run_pairs(self, pairs) -> list[PairRunStats]:
         out: list[PairRunStats] = []
         with self._batch_cache() as cache:
+            active = [pair for pair in pairs if getattr(pair, "enabled", True)]
+            # Every route's source is read before any route writes, so a removal
+            # can ask whether another route still needs the item. The batch cache
+            # makes this nearly free: the same reads serve the run itself.
+            self._index_ownership(active)
             for pair in pairs:
                 if not getattr(pair, "enabled", True):
                     logger.info("Pair %s is disabled; skipping", pair.display_name())
