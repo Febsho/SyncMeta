@@ -2192,3 +2192,54 @@ class TwoWayHistoryTests(unittest.TestCase):
         b = self._side("simkl", [])
         result = self._run(a, b)
         self.assertEqual(result.removed, 0)
+
+
+class RemovalVerificationTests(unittest.TestCase):
+    """A large deletion is re-read to check it actually took.
+
+    "deleted: 12" is what the adapter *sent*, not always what the provider did.
+    For a big removal that difference is worth one extra request: a silent no-op
+    would leave the next run planning the same deletion forever, and the count
+    going down gives nobody a reason to look.
+    """
+
+    @staticmethod
+    def _movies(count, offset=0):
+        return [_movie(str(2000 + i), f"Film {i}") for i in range(offset, offset + count)]
+
+    def _run(self, target):
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: self._movies(1)})
+        keys = [item_key(enrich_identity(i)) for i in target._contents[CATEGORY_WATCHLIST]]
+        service = CrossSyncService(
+            {"trakt": source, "simkl": target},
+            state_store=_established_store(keys, managed=keys),
+            guard_large_removals=False,
+        )
+        return service.run_pair(_pair(removal_mode=REMOVAL_MIRROR))
+
+    def test_a_removal_that_took_is_not_reported_as_a_problem(self) -> None:
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: self._movies(20)})
+        result = self._run(target)
+        self.assertEqual(result.categories[0].errors, [])
+
+    def test_a_removal_the_provider_ignored_is_reported(self) -> None:
+        class Stubborn(FakeAdapter):
+            def remove(self, category, items, target_list=""):
+                # Reports success and changes nothing, which is the failure
+                # mode a count alone can never reveal.
+                self.removed.append((category, list(items)))
+                return {"deleted": len(items)}
+
+        target = Stubborn("simkl", {CATEGORY_WATCHLIST: self._movies(20)})
+        result = self._run(target)
+        errors = result.categories[0].errors
+        self.assertTrue(errors)
+        self.assertIn("still on", errors[0])
+
+    def test_a_small_removal_is_not_re_read(self) -> None:
+        # The point is to catch expensive mistakes, not to double every sync's
+        # request count.
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: self._movies(4)})
+        before = len(target.fetched)
+        self._run(target)
+        self.assertEqual(len(target.fetched), before + 1)

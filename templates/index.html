@@ -1052,6 +1052,9 @@
     }
 
     /* ── Sync preview ────────────────────────────────────────────────────── */
+    .hub-recommendation{padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--z950);margin-bottom:14px}
+    .hub-recommendation-title{font-size:13px;font-weight:600;color:var(--z100);margin-bottom:4px}
+    .hub-recommendation-copy{font-size:12px;color:var(--z400);line-height:1.6}
     .topology-note{display:flex;gap:10px;align-items:flex-start;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--z950);font-size:12px;color:var(--z300);line-height:1.5;margin-bottom:8px}
     .topology-note-warn{border-color:rgba(251,191,36,.28)}
     .topology-note-dot{width:6px;height:6px;border-radius:50%;background:var(--z600);margin-top:6px;flex:none}
@@ -1788,6 +1791,7 @@
                 <div><div class="sync-builder-title">Send several services to one place</div><div class="sync-builder-copy">Choose a destination once, then select every service that should feed it. SyncMeta creates and manages the routes for you.</div></div>
                 <span class="pair-badge">Quick setup</span>
               </div>
+              <div id="multi-sync-recommendation" class="hub-recommendation hidden"></div>
               <div class="sync-builder-grid">
                 <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">1</span>Destination</div><select id="multi-sync-target" aria-label="Sync destination"></select></div>
                 <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">2</span>Sources</div><div class="sync-source-grid" id="multi-sync-sources"></div></div>
@@ -10400,6 +10404,38 @@
       return (pairsState.categories || []).filter(category => reads.has(category.key) && writes.has(category.key));
     }
 
+    // With three or more services connected, routing them through the Library
+    // is fewer routes and fewer provider requests than wiring each pair
+    // directly — N routes instead of N×(N−1), and no loops to reason about.
+    // It is a recommendation, never a migration: existing direct routes keep
+    // working and "Add advanced route" still builds them.
+    function renderHubRecommendation(remoteSourceCount) {
+      const host = el('multi-sync-recommendation');
+      if (!host) return;
+      const connected = (pairsState.providers || [])
+        .filter(provider => provider.configured && provider.key !== 'library');
+      const alreadyHubbed = (pairsState.pairs || []).some(
+        pair => pair.source === 'library' || pair.target === 'library'
+      );
+      if (connected.length < 3 || alreadyHubbed) {
+        host.classList.add('hidden');
+        host.innerHTML = '';
+        return;
+      }
+      const direct = connected.length * (connected.length - 1);
+      host.classList.remove('hidden');
+      host.innerHTML = `
+        <div class="hub-recommendation-title">Recommended: use the Library as the hub</div>
+        <div class="hub-recommendation-copy">
+          You have ${connected.length} services connected. Pointing each of them at the
+          local Library is ${connected.length} two-way routes instead of the ${direct} it
+          would take to wire every pair directly — the Library holds SyncMeta's own
+          copy, so each service is read once per sync rather than once per route, and
+          there are no loops for a deletion to travel around.
+          Direct service-to-service routes still work; add one below.
+        </div>`;
+    }
+
     function updateMultiSyncBuilder() {
       const targetNode = el('multi-sync-target');
       const sourcesNode = el('multi-sync-sources');
@@ -10433,6 +10469,8 @@
         const checked = supported && (previousCategories.size ? previousCategories.has(category.key) : category.key === 'watchlist');
         return `<label class="sync-choice"><input type="checkbox" value="${escAttr(category.key)}" data-multi-category ${checked ? 'checked' : ''} ${supported ? '' : 'disabled'}><span>${esc(category.label)}</span></label>`;
       }).join('');
+
+      renderHubRecommendation(sources.length);
 
       const chosenCategories = Array.from(categoriesNode.querySelectorAll('input:checked')).length;
       if (summaryNode) summaryNode.textContent = selectedSources.length

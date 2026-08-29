@@ -96,6 +96,7 @@ from src.providers import (
 from src.library_store import LibraryStore
 from src.sync.state_store import SyncStateStore
 from src.sync.topology import analyze as analyze_topology
+from src.sync.duplicates import redundant_plays as duplicate_redundant_plays, scan as scan_duplicates
 from src.media_kind import ALL_KINDS, KIND_LABELS, matches_filter
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
@@ -4484,6 +4485,92 @@ def api_profile_activity_history_clear():
         return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
 
     return jsonify({"status": "cleared", "deleted_count": deleted_count, "profile": profile})
+
+
+@app.route("/api/profile/history/duplicates", methods=["POST"])
+def api_profile_history_duplicates():
+    """Find plays that were recorded twice, and optionally remove them.
+
+    Two modes, and the split is deliberate. Scanning reads history and reports;
+    it changes nothing and is the default. Repair deletes play records from
+    PublicMetaDB, which cannot be undone, so it requires `confirm: true` *and*
+    an explicit count that matches what the scan found — a stale page must not
+    be able to delete more than the person looking at it agreed to.
+    """
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _json_error("Sign in first", 401)
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    config = _config_from_profile(profile)
+    if not config.pmdb.api_key:
+        return _json_error("Save your PublicMetaDB API key first", 409)
+
+    body = request.get_json(silent=True) or {}
+    confirm = bool(body.get("confirm"))
+    expected = body.get("expected_redundant")
+
+    client = PublicMetaDBClient(config.pmdb)
+    try:
+        rows = client.get_watched_history() or []
+    except Exception as exc:
+        logger.exception("Could not read PublicMetaDB history for duplicate scan")
+        return _json_error(f"Could not read watch history: {exc}", 502)
+    if not client.last_read_complete:
+        # Half the history looks like half the duplicates, and the repair would
+        # then be reasoning about a set it never saw.
+        return _json_error(
+            "PublicMetaDB returned only part of the watch history, so a "
+            "duplicate scan would be incomplete. Try again shortly.", 503,
+        )
+
+    normalized = []
+    for entry in rows:
+        item = PmdbAdapter._normalize_pmdb_entry(entry)
+        if not item:
+            continue
+        for field_name in ("season", "episode", "watched_at"):
+            if entry.get(field_name) is not None:
+                item[field_name] = entry[field_name]
+        normalized.append(item)
+
+    report = scan_duplicates(normalized)
+    payload = report.to_dict()
+
+    if not confirm:
+        return jsonify({"status": "scanned", **payload})
+
+    doomed = duplicate_redundant_plays(report)
+    if expected is not None and int(expected) != len(doomed):
+        # The page the person approved from is not the state on the server now.
+        return _json_error(
+            f"The history changed since it was scanned ({len(doomed)} redundant "
+            f"plays now, {int(expected)} when you looked). Scan again first.", 409,
+        )
+
+    deleted = 0
+    failed = 0
+    for play in doomed:
+        record_id = play.get("pmdb_item_id")
+        if not record_id:
+            failed += 1
+            continue
+        try:
+            if client.delete_watched_entry(str(record_id)):
+                deleted += 1
+        except Exception:
+            failed += 1
+            logger.warning("Could not delete watch record %s", record_id, exc_info=True)
+    logger.info(
+        "Duplicate repair for profile %s: removed %d redundant play(s), %d failed",
+        profile_id[:8], deleted, failed,
+    )
+    return jsonify({
+        "status": "repaired", "deleted": deleted, "failed": failed, **payload,
+    })
 
 
 @app.route("/api/profile/sync/stop", methods=["POST"])

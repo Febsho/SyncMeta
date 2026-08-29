@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -3804,3 +3805,103 @@ class WebTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DuplicatePlayRepairEndpointTests(unittest.TestCase):
+    """Scanning is safe and is the default; repairing deletes and is not.
+
+    Deleting a play record cannot be undone, and what separates a duplicate from
+    a genuine rewatch is a timestamp window rather than a certainty — so the
+    destructive path needs both an explicit confirmation and agreement about
+    what is being deleted.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        web._profile_store = web.ProfileStore(Path(self.tmpdir.name) / "profiles.json")
+        web._session_store = web.ServerSessionStore(ttl_seconds=3600)
+        web._login_limiter = web.LoginAttemptLimiter(max_attempts=5, window_seconds=60)
+        web.SITE_ACCESS_PASSWORD = ""
+        self.client = web.app.test_client()
+        profile = web._profile_store.create_profile(
+            "secret", {"pmdb": {"api_key": "pm-key"}}, {"auto_sync": False},
+        )
+        self.client.post("/api/profile/login", json={
+            "profile_id": profile["profile_id"], "password": "secret",
+        })
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    @staticmethod
+    def _rows():
+        def row(record_id, watched_at, episode=1):
+            return {
+                "id": record_id, "tmdb_id": "1396", "media_type": "tv",
+                "title": "Breaking Bad", "season": 1, "episode": episode,
+                "watched_at": watched_at,
+            }
+        return [
+            row("a", "2024-01-01T20:00:00Z"),
+            row("b", "2024-01-01T20:00:37Z"),          # same viewing, relayed
+            row("c", "2024-08-20T20:00:00Z"),          # a genuine rewatch
+        ]
+
+    def _patched(self, rows=None, complete=True):
+        client = mock.MagicMock()
+        client.get_watched_history.return_value = self._rows() if rows is None else rows
+        client.last_read_complete = complete
+        client.delete_watched_entry.return_value = True
+        return mock.patch.object(web, "PublicMetaDBClient", return_value=client), client
+
+    def test_a_scan_reports_without_deleting(self) -> None:
+        patch, client = self._patched()
+        with patch:
+            response = self.client.post("/api/profile/history/duplicates", json={})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["status"], "scanned")
+        self.assertEqual(body["redundant_plays"], 1)
+        self.assertEqual(body["affected_episodes"], 1)
+        client.delete_watched_entry.assert_not_called()
+
+    def test_a_confirmed_repair_removes_only_the_redundant_play(self) -> None:
+        patch, client = self._patched()
+        with patch:
+            response = self.client.post(
+                "/api/profile/history/duplicates",
+                json={"confirm": True, "expected_redundant": 1},
+            )
+        body = response.get_json()
+        self.assertEqual(body["status"], "repaired")
+        self.assertEqual(body["deleted"], 1)
+        # The relayed copy goes; the first play and the real rewatch stay.
+        client.delete_watched_entry.assert_called_once_with("b")
+
+    def test_a_stale_confirmation_is_refused(self) -> None:
+        # The page the person approved from is not the server's state now.
+        patch, client = self._patched()
+        with patch:
+            response = self.client.post(
+                "/api/profile/history/duplicates",
+                json={"confirm": True, "expected_redundant": 9},
+            )
+        self.assertEqual(response.status_code, 409)
+        client.delete_watched_entry.assert_not_called()
+
+    def test_an_incomplete_read_refuses_to_scan_at_all(self) -> None:
+        # Half the history looks like half the duplicates, and a repair would
+        # then be reasoning about a set it never saw.
+        patch, client = self._patched(complete=False)
+        with patch:
+            response = self.client.post(
+                "/api/profile/history/duplicates",
+                json={"confirm": True, "expected_redundant": 1},
+            )
+        self.assertEqual(response.status_code, 503)
+        client.delete_watched_entry.assert_not_called()
+
+    def test_signing_in_is_required(self) -> None:
+        self.client.post("/api/profile/logout", json={})
+        response = self.client.post("/api/profile/history/duplicates", json={})
+        self.assertEqual(response.status_code, 401)

@@ -854,6 +854,9 @@ class CrossSyncService:
                     result.removed = _total(totals, "deleted")
                     wrote_removed = to_remove[:result.removed]
                     result.changes.extend(self._change_rows(wrote_removed, "removed", category))
+                    self._verify_removals(
+                        pair, category, target, target_list, wrote_removed, result,
+                    )
                 except Exception as exc:
                     message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
                     result.errors.append(message)
@@ -1217,6 +1220,55 @@ class CrossSyncService:
                 "new": "absent" if change_type == "removed" else "present",
             })
         return rows
+
+    #: Below this a removal is small enough that a re-read costs more than it is
+    #: worth. Above it, the run has done something a person would want to be
+    #: sure of, and one extra request is cheap next to being wrong.
+    _VERIFY_REMOVALS_ABOVE = 10
+
+    def _verify_removals(
+        self, pair, category: str, target, target_list: str,
+        removed: list[dict], result,
+    ) -> None:
+        """Re-read the destination after a large deletion and check it took.
+
+        An adapter reporting "deleted: 12" is reporting what it *sent*, not
+        always what the provider did. For a big removal that difference is worth
+        one request: a silent no-op leaves the next run planning the same
+        deletion forever, and a person watching the count go down would have no
+        reason to look.
+
+        Deliberately not done for small removals — the point is to catch the
+        expensive mistakes, not to double the request count of every sync.
+        """
+        if self._dry_run or len(removed) < self._VERIFY_REMOVALS_ABOVE:
+            return
+        try:
+            current = target.fetch_target(category, target_list) or []
+        except Exception:
+            # Verification failing is not the run failing; the removal already
+            # happened and the next run will see the truth either way.
+            logger.debug("Could not verify removals on %s", target.label, exc_info=True)
+            return
+        present = {
+            self._comparison_key(enrich_identity(item), target_list) for item in current
+        }
+        survivors = [
+            item for item in removed
+            if self._comparison_key(item, target_list) in present
+        ]
+        if not survivors:
+            logger.info(
+                "Pair %s: verified %d %s removal(s) on %s",
+                pair.display_name(), len(removed), category, target.label,
+            )
+            return
+        message = (
+            f"{len(survivors)} of {len(removed)} {category} items are still on "
+            f"{target.label} after the removal was reported as done"
+        )
+        result.errors.append(message)
+        logger.warning("Pair %s: %s", pair.display_name(), message)
 
     def _note_blocked(
         self, pair, category: str, result: PairCategoryStats,

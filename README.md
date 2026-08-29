@@ -190,6 +190,21 @@ minutes apart, so an exact match would make every hop look like a rewatch. A
 genuine second viewing is still a second play, and only goes to services that
 can store one.
 
+**Cleaning up duplicate plays.** Earlier versions matched plays on the exact
+second, so one watch relayed through several services could be recorded more
+than once. That no longer happens, but plays already written stay where they
+are — the engine will never remove them on its own, because to a union a
+duplicate looks exactly like a rewatch it should preserve.
+
+`POST /api/profile/history/duplicates` scans for them and reports what it found;
+it changes nothing. To actually delete, repeat the call with
+`{"confirm": true, "expected_redundant": N}` where N is the count the scan
+returned — a stale page cannot delete more than you agreed to. The earliest play
+of each group is kept, being the one closest to when you actually watched, and
+a genuine rewatch weeks later is never touched. If PublicMetaDB returns only
+part of your history the scan refuses to run at all, since half the history
+looks like half the duplicates.
+
 **Route shapes.** The route editor warns about configurations that fight — two
 one-way routes pointing at each other (better as one two-way route) and loops
 (A → B → C → A, where no service is the authority). Neither is forbidden.

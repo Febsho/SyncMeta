@@ -327,6 +327,32 @@ why `pair_managed_keys` — a fraction of the size — already had to be dropped
 deliberately *not* folded into `PairCategoryStats`, which is serialized into
 `last_pair_results` and does ride the poll.
 
+**A large deletion is verified, a small one is not.** `_verify_removals` re-reads
+the destination after removing `_VERIFY_REMOVALS_ABOVE` items or more and
+reports any that are still there. An adapter's "deleted: 12" is what it *sent*,
+and a provider that silently no-ops leaves the next run planning the same
+deletion forever while the count going down gives nobody a reason to look. Small
+removals are deliberately not verified — the point is to catch the expensive
+mistakes, not to double every sync's request count.
+
+**Duplicate plays are found by scanning, and removed only on request.**
+`sync/duplicates.py` applies the same tolerance window backwards over stored
+history: plays of one episode chained within the window are one viewing recorded
+several times, plays weeks apart are separate viewings. The engine will never do
+this on its own — to a union a duplicate is indistinguishable from a rewatch it
+must preserve — so `/api/profile/history/duplicates` scans by default and
+requires `confirm` *plus* an `expected_redundant` count matching the scan before
+it deletes anything. The earliest play of each cluster is kept, and an
+incomplete PMDB read refuses the scan outright, since half the history looks
+like half the duplicates.
+
+**The Library hub is recommended, never imposed.** With three or more services
+connected and no Library route yet, the quick-setup builder explains why N
+two-way routes through the Library beat the N×(N−1) it takes to wire every pair
+directly: each service is read once per sync rather than once per route, and
+there are no loops for a deletion to travel. Existing direct routes keep working
+and "Add advanced route" still builds them.
+
 **Route shapes are named, never refused.** `sync/topology.py` flags two one-way
 routes pointing at each other (one two-way route reconciles from a single
 baseline; two decide independently and re-add each other's deletions) and cycles
