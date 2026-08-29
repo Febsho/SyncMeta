@@ -12,6 +12,7 @@ data/*.key
 data/cache/
 # One store per profile, written at runtime (and by the test suite).
 data/library/
+data/sync_state/
 !data/.gitkeep
 
 tmp_script_check.js
