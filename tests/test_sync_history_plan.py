@@ -298,3 +298,33 @@ class ProgressPlanTests(unittest.TestCase):
     def test_a_settled_route_writes_nothing(self) -> None:
         plan = self._plan(self._resume(40_000), self._resume(40_000))
         self.assertTrue(plan.is_noop)
+
+
+class StateOnlyTargetBatchTests(unittest.TestCase):
+    """Two plays of one episode in a single run, to a state-only destination.
+
+    The check has to read the ledger rather than the destination's initial
+    contents: the first row makes the episode known, and the second must then be
+    refused. Looking only at what was there before the run let both through.
+    """
+
+    def test_two_plays_in_one_batch_send_only_one(self) -> None:
+        result = plan_history(
+            route_id="r1",
+            source_rows=[_ep("2024-01-01T20:00:00Z"), _ep("2024-08-20T20:00:00Z")],
+            destination_rows=[], baseline=_baseline(),
+            target_records_plays=False, source_provider="trakt",
+            destination_provider="simkl",
+        )
+        self.assertEqual(len(result.plan.additions), 1)
+        self.assertEqual(result.counts.duplicates, 1)
+
+    def test_a_play_recording_destination_takes_both(self) -> None:
+        result = plan_history(
+            route_id="r1",
+            source_rows=[_ep("2024-01-01T20:00:00Z"), _ep("2024-08-20T20:00:00Z")],
+            destination_rows=[], baseline=_baseline(),
+            target_records_plays=True, source_provider="trakt",
+            destination_provider="pmdb",
+        )
+        self.assertEqual(len(result.plan.additions), 2)

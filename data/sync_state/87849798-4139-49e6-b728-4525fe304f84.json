@@ -1,0 +1,1 @@
+{"version": 1, "routes": {"trakt-simkl-1\twatchlist": {"route_id": "trakt-simkl-1", "category": "watchlist", "phase": "established", "sync_version": 1, "last_successful_sync": "2026-08-29T10:27:26Z", "last_attempt": "2026-08-29T10:27:26Z", "last_error": "", "items": {"movie:tmdb:1": ["1", "1", "1", 1], "movie:tmdb:2": ["1", "1", "1", 1]}}}}

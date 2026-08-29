@@ -227,7 +227,11 @@ def plan_history(
             state.plays = tuple(state.plays) + (str(row.get("watched_at") or ""),)
             continue
 
-        known_episode = key in destination_plays or bool(baseline.state(key).plays)
+        # From the ledger, not from the initial read: once this run has decided
+        # to write a play for the episode, a second play of it must not also go
+        # to a destination that cannot hold one — otherwise two rows in the same
+        # batch slip past a check that only looked at what was there before.
+        known_episode = ledger.stamped or key in destination_plays
         if known_episode and not target_records_plays:
             # The destination reports watched state: it would hand back one row
             # however many plays it was sent, so the extra would look missing

@@ -29,6 +29,8 @@ from dataclasses import dataclass, field, replace
 
 from .sync.executor import execute_plan
 from .sync.ownership import OwnershipIndex, destination_scope
+from .sync.history import plan_history
+from .sync.progress import plan_progress
 from .sync.planner import (
     SyncPlan,
     normalize_policy,
@@ -741,28 +743,52 @@ class CrossSyncService:
             if keeps_plays:
                 target_plays.setdefault(key, []).append(item.get("watched_at"))
 
+        source_outcome = self._fetch_outcome(source, category, count=len(source_items))
+        history_plan = None
+
+        # Every category is now planned against the baseline, but each kind of
+        # data gets its own planner: membership asks "is it on the list",
+        # history asks "did this happen and have we already carried it", and
+        # resume asks "is this further along". Sharing one would collapse the
+        # distinctions each of them exists to keep.
         if is_history:
-            to_add = _history_adds(source_rows, target_by_key, target_plays)
-            result.skipped_existing = max(0, len(source_rows) - len(to_add))
+            history_plan = self._plan_history_category(
+                pair, category, source_rows=[item for _key, item in source_rows],
+                target_items=[enrich_identity(row) for row in target_items],
+                source=source, target=target,
+            )
+            plan = history_plan.plan if history_plan is not None else None
+            if plan is None:
+                to_add = _history_adds(source_rows, target_by_key, target_plays)
+                result.skipped_existing = max(0, len(source_rows) - len(to_add))
+        elif category == CATEGORY_RESUME:
+            plan = self._plan_progress_category(
+                pair, category, source_by_key=source_by_key,
+                target_by_key=target_by_key, source=source, target=target,
+            )
+            if plan is None:
+                to_add = [
+                    item for key, item in source_by_key.items()
+                    if key not in target_by_key
+                    or not self._resume_matches(item, target_by_key[key])
+                ]
+                result.skipped_existing = len(source_by_key) - len(to_add)
         else:
             to_add = [
                 item for key, item in source_by_key.items()
                 if key not in target_by_key
-                or (category == CATEGORY_RESUME and not self._resume_matches(item, target_by_key[key]))
             ]
             result.skipped_existing = len(source_by_key) - len(to_add)
-
-        # The planner decides membership categories from the baseline; history
-        # keeps the legacy diff until its own planner lands.
-        source_outcome = self._fetch_outcome(source, category, count=len(source_items))
-        plan = self._plan_category(
-            pair, category,
-            source_by_key=source_by_key, target_by_key=target_by_key,
-            source=source, target=target,
-            source_trustworthy=source_outcome.trustworthy_for_removals,
-        )
+            plan = self._plan_category(
+                pair, category,
+                source_by_key=source_by_key, target_by_key=target_by_key,
+                source=source, target=target,
+                source_trustworthy=source_outcome.trustworthy_for_removals,
+            )
         if plan is not None:
-            to_add = [action.item for action in plan.additions]
+            # Updates ride with additions: every adapter's `add` is an upsert for
+            # the categories that have them (a resume position, a progress count).
+            to_add = [action.item for action in plan.additions + plan.updates]
             to_remove = [action.item for action in plan.removals]
             result.skipped_existing = len(plan.skipped)
             verdict = self._plan_verdicts.get((str(pair.pair_id), str(category)))
@@ -844,6 +870,8 @@ class CrossSyncService:
             )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
+        if is_history:
+            self._commit_history_baseline(pair, category, result, history_plan, wrote_added)
         self._commit_baseline(
             pair, category, result,
             source_by_key=source_by_key, target_by_key=target_by_key,
@@ -1388,6 +1416,88 @@ class CrossSyncService:
             result.added += len(plan.additions)
             if not forward:
                 result.added_back += len(plan.additions)
+
+    def _baseline_for(self, pair, category: str):
+        if self._state_store is not None:
+            try:
+                return self._state_store.baseline(pair.pair_id, category)
+            except Exception:
+                logger.debug("Could not read baseline", exc_info=True)
+        return RouteBaseline(route_id=str(pair.pair_id), category=str(category))
+
+    def _plan_history_category(self, pair, category, *, source_rows, target_items, source, target):
+        """Plan watch history: a union, deduped in three layers.
+
+        A failure here falls back to the legacy diff rather than taking the run
+        with it — that path is already play-aware and additive-safe.
+        """
+        try:
+            planned = plan_history(
+                route_id=str(pair.pair_id),
+                source_rows=source_rows, destination_rows=target_items,
+                baseline=self._baseline_for(pair, category),
+                target_records_plays=bool(getattr(target, "records_plays", False)),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                category=str(category),
+            )
+            self._plans[(str(pair.pair_id), str(category))] = planned.plan
+            return planned
+        except Exception:
+            logger.warning("Could not build history plan", exc_info=True)
+            return None
+
+    def _plan_progress_category(self, pair, category, *, source_by_key, target_by_key, source, target):
+        """Plan resume points: never rewind, never push a finished title on."""
+        try:
+            planned = plan_progress(
+                route_id=str(pair.pair_id),
+                source_by_key=source_by_key, destination_by_key=target_by_key,
+                baseline=self._baseline_for(pair, category),
+                policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                category=str(category),
+            )
+        except Exception:
+            logger.warning("Could not build progress plan", exc_info=True)
+            return None
+        self._plans[(str(pair.pair_id), str(category))] = planned.plan
+        return planned.plan
+
+    def _commit_history_baseline(self, pair, category, result, history_plan, wrote_added) -> None:
+        """Record the plays this run actually carried across.
+
+        Only confirmed writes enter the record. A play written down as carried
+        when it was not would never be retried; one left out would be sent
+        again, which for history means a duplicate.
+        """
+        if self._state_store is None or self._dry_run or history_plan is None:
+            return
+        try:
+            if result.errors:
+                self._state_store.record_failure(
+                    pair.pair_id, category, "; ".join(result.errors)[:500],
+                )
+                return
+            written = {id(item) for item in wrote_added or []}
+            baseline = self._baseline_for(pair, category)
+            items = dict(baseline.items)
+            confirmed_keys = {
+                action.key for action in history_plan.plan.additions
+                if id(action.item) in written
+            }
+            for key, projected in history_plan.projected.items():
+                if key in confirmed_keys or key not in {
+                    a.key for a in history_plan.plan.additions
+                }:
+                    items[key] = projected
+                else:
+                    # Planned but not confirmed: keep what was already agreed so
+                    # the next run tries again rather than believing it done.
+                    items.setdefault(key, ItemState())
+            self._state_store.commit(pair.pair_id, category, items=items)
+        except Exception:
+            logger.warning("Could not record history baseline", exc_info=True)
 
     def _commit_baseline(
         self, pair, category: str, result, *,

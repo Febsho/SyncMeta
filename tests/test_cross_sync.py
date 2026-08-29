@@ -1903,9 +1903,7 @@ class FirstRunProtectionTests(unittest.TestCase):
         self.assertEqual(stats.removed, 1)
         self.assertEqual([i["tmdb_id"] for i in target.removed[0][1]], ["99"])
 
-    def test_history_is_unaffected_by_the_planner(self) -> None:
-        # History keeps the legacy path until its own planner lands, so its
-        # behaviour must not have shifted underneath it.
+    def test_history_is_planned_and_still_carries_a_play(self) -> None:
         source = FakeAdapter(
             "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
             reads=(CATEGORY_HISTORY,), writes=(),
@@ -1914,17 +1912,17 @@ class FirstRunProtectionTests(unittest.TestCase):
             "pmdb", {CATEGORY_HISTORY: []},
             reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
         )
+        target.records_plays = True
         service = CrossSyncService({"trakt": source, "pmdb": target})
         stats = service.run_pair(
             _pair(source="trakt", target="pmdb", categories=[CATEGORY_HISTORY])
         )
         self.assertEqual(stats.added, 1)
-        self.assertEqual(service.plans, {})
+        self.assertIn(("p1", CATEGORY_HISTORY), service.plans)
 
-    def test_resume_is_unaffected_by_the_planner(self) -> None:
-        # Resume needs update semantics: an item on both sides may still need
-        # writing because the position moved. A membership planner would call
-        # that "already in sync".
+    def test_resume_is_planned_and_still_upserts_a_moved_position(self) -> None:
+        # The distinction a membership planner would lose: an item on both sides
+        # still needs writing because the position moved.
         source = FakeAdapter(
             "trakt", {CATEGORY_RESUME: [_resume("1", 60_000)]},
             reads=(CATEGORY_RESUME,), writes=(),
@@ -1936,7 +1934,8 @@ class FirstRunProtectionTests(unittest.TestCase):
         service = CrossSyncService({"trakt": source, "library": target})
         result = service.run_pair(_pair(target="library", categories=[CATEGORY_RESUME]))
         self.assertEqual(result.added, 1)
-        self.assertEqual(service.plans, {})
+        self.assertEqual(target.added[0][1][0]["position_ms"], 60_000)
+        self.assertIn(("p1", CATEGORY_RESUME), service.plans)
 
 
 class CrossRouteOwnershipTests(unittest.TestCase):
@@ -2003,3 +2002,131 @@ class CrossRouteOwnershipTests(unittest.TestCase):
         )
         self.assertEqual(trakt.added, [])
         self.assertTrue(all(r.added == 0 for r in results))
+
+
+class HistoryIdempotencyThroughTheServiceTests(unittest.TestCase):
+    """A watch synced repeatedly stays one play.
+
+    The planner is unit-tested separately; this drives the whole service, which
+    is where the baseline round-trip either works or quietly does not.
+    """
+
+    def setUp(self) -> None:
+        self.store = _fresh_store()
+        self.pair = _pair(
+            source="trakt", target="pmdb", categories=[CATEGORY_HISTORY],
+        )
+
+    def _target(self, records_plays=True, rows=()):
+        target = FakeAdapter(
+            "pmdb", {CATEGORY_HISTORY: list(rows)},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        target.records_plays = records_plays
+        return target
+
+    def _run(self, source, target):
+        return CrossSyncService(
+            {"trakt": source, "pmdb": target}, state_store=self.store,
+        ).run_pair(self.pair)
+
+    def test_the_second_and_third_syncs_write_nothing(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self.assertEqual(self._run(source, target).added, 1)
+        for _ in range(2):
+            self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 1)
+
+    def test_a_genuine_rewatch_adds_exactly_one_more(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self._run(source, target)
+        source._contents[CATEGORY_HISTORY].append(
+            _episode("42", 1, 1, "2024-08-20T20:00:00Z")
+        )
+        self.assertEqual(self._run(source, target).added, 1)
+        self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 2)
+
+    def test_the_destination_reporting_its_own_write_back_is_not_a_new_play(self) -> None:
+        # Providers re-timestamp what they store. Read back a minute off, the
+        # play must still be recognised as the one this route wrote.
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target()
+        self._run(source, target)
+        target._contents[CATEGORY_HISTORY] = [
+            _episode("42", 1, 1, "2024-01-01T20:00:41Z")
+        ]
+        self.assertEqual(self._run(source, target).added, 0)
+
+    def test_a_state_only_destination_is_never_sent_a_rewatch(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [
+                _episode("42", 1, 1, "2024-01-01T20:00:00Z"),
+                _episode("42", 1, 1, "2024-08-20T20:00:00Z"),
+            ]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target(records_plays=False)
+        self.assertEqual(self._run(source, target).added, 1)
+        self.assertEqual(self._run(source, target).added, 0)
+
+    def test_history_is_never_removed_by_an_additive_route(self) -> None:
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: []}, reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = self._target(rows=[_episode("42", 1, 1, "2024-01-01T20:00:00Z")])
+        result = self._run(source, target)
+        self.assertEqual(result.removed, 0)
+        self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 1)
+
+
+class ResumePlannerThroughTheServiceTests(unittest.TestCase):
+    def _run(self, source_item, target_item):
+        source = FakeAdapter(
+            "trakt", {CATEGORY_RESUME: [source_item] if source_item else []},
+            reads=(CATEGORY_RESUME,), writes=(),
+        )
+        target = FakeAdapter(
+            "library", {CATEGORY_RESUME: [target_item] if target_item else []},
+            reads=(CATEGORY_RESUME,), writes=(CATEGORY_RESUME,),
+        )
+        result = CrossSyncService({"trakt": source, "library": target}).run_pair(
+            _pair(target="library", categories=[CATEGORY_RESUME])
+        )
+        return result, target
+
+    def test_a_further_position_is_written(self) -> None:
+        result, target = self._run(_resume("1", 60_000), _resume("1", 20_000))
+        self.assertEqual(result.added, 1)
+        self.assertEqual(target.added[0][1][0]["position_ms"], 60_000)
+
+    def test_a_barely_started_item_is_not_synced(self) -> None:
+        # An accidental open is not progress, and writing it could overwrite a
+        # real position on the other side.
+        result, target = self._run(_resume("1", 1_000), None)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(target.added, [])
+
+    def test_a_finished_item_is_not_pushed_on_as_a_resume_point(self) -> None:
+        result, target = self._run(_resume("1", 95_000), None)
+        self.assertEqual(result.added, 0)
+
+    def test_the_destination_is_never_rewound(self) -> None:
+        result, target = self._run(_resume("1", 20_000), _resume("1", 60_000))
+        self.assertEqual(result.added, 0)
+        self.assertEqual(target.added, [])
+
+    def test_a_settled_resume_route_writes_nothing(self) -> None:
+        result, _ = self._run(_resume("1", 40_000), _resume("1", 40_000))
+        self.assertEqual(result.added, 0)

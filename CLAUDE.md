@@ -208,13 +208,23 @@ second" is worse than reporting the conflict.
 * `sync/safety.py` — threshold and evidence checks over a plan
 * `sync/executor.py` — performs a plan, reporting each action's fate
 
-**Membership now executes from the plan; history and resume do not.**
-`_PLANNED_CATEGORIES` is watchlist and collection only. History is an
-append-only log with its own dedupe rules, and resume is a progress value where
-an item present on both sides may still need writing because the position moved
-— handing either to a *membership* planner would silently turn "changed" into
-"already in sync". Both keep the legacy path until their own planners land, and
-there are tests pinning that.
+**Every category is planned, but each kind of data gets its own planner.**
+Membership (`_PLANNED_CATEGORIES` — watchlist and collection) asks "is it on the
+list"; `sync/history.py` asks "did this happen and have we already carried it";
+`sync/progress.py` asks "is this further along". Sharing one planner would
+collapse exactly the distinctions each exists to keep — a membership planner
+calls a moved playback position "already in sync", and calls a rewatch a
+duplicate. `_run_category` dispatches on the category; each planner falls back to
+the legacy diff if it raises, so a planner bug degrades rather than fails the
+run. The **two-way** path plans membership only — history and resume there still
+use `_history_adds` / `_resume_matches`.
+
+**History's dedupe has to read the live ledger, not the initial destination
+read.** Two plays of one episode arriving in the same batch is the case that
+catches this: the first makes the episode known, and to a destination that
+records watched state rather than plays the second must then be refused. A check
+written against the destination's contents *before* the run let both through,
+which is one duplicate play per batch, forever.
 
 **A route may not delete until it has one confirmed sync behind it.** This is a
 real behaviour change: the first run of every existing route after this shipped
