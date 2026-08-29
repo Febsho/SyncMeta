@@ -998,6 +998,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 status_callback=lambda status: _profile_store.update_sync_status(profile_id, status),
                 guard_large_removals=config.sync.guard_large_removals,
                 guard_removal_percent=config.sync.guard_removal_percent,
+                state_store=_sync_state_store_for(profile_id),
             )
             pair_results = pair_service.run_pairs(pairs)
             pair_result_dicts = [
@@ -4710,6 +4711,7 @@ def api_profile_pairs_run():
             # profile setting remains untouched, so later runs are guarded.
             guard_large_removals=config.sync.guard_large_removals and not bypass_guard,
             guard_removal_percent=config.sync.guard_removal_percent,
+            state_store=_sync_state_store_for(profile_id),
         )
         log_token = _log_profile_id.set(profile_id)
         try:
@@ -4732,6 +4734,10 @@ def api_profile_pairs_run():
             "results": result_dicts,
             "provider_reads": service.last_run_provider_reads,
             "cached_reads": service.last_run_cache_hits,
+            # The baseline planner's reading of the same run. Reported, not yet
+            # obeyed — see CrossSyncService.plan_divergences.
+            "plans": [plan.to_dict() for plan in service.plans.values()],
+            "plan_divergences": service.plan_divergences,
         })
 
     try:

@@ -27,7 +27,13 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .sync.planner import (
+    SyncPlan,
+    normalize_policy,
+    plan_membership,
+)
 from .sync.models import (
+    RouteBaseline,
     STATE_ABSENT,
     STATE_PRESENT,
     FetchOutcome,
@@ -351,8 +357,13 @@ class CrossSyncService:
         status_callback=None,
         guard_large_removals: bool = True,
         guard_removal_percent: int = 20,
+        state_store=None,
     ):
         self._adapters = dict(adapters or {})
+        # Baselines, when the caller has them. Optional so every existing test
+        # and call site keeps working; without one the planner simply reports
+        # from an empty baseline, which is the safe reading.
+        self._state_store = state_store
         self._dry_run = bool(dry_run)
         # A run that would empty a list is far more often a provider hiccup — a
         # half-read source, a revoked token that returned nothing — than a user
@@ -376,6 +387,11 @@ class CrossSyncService:
         # Server-side only: these key sets are far too large to ride /status,
         # which is why they are not folded into PairCategoryStats.
         self._route_states: dict[tuple[str, str], RouteObservation] = {}
+        # Plans built alongside the live decision. Reported, not yet obeyed —
+        # switching execution onto them is the next step, and running them in
+        # parallel first is what makes that switch reviewable against real data.
+        self._plans: dict[tuple[str, str], SyncPlan] = {}
+        self._plan_divergences: list[dict] = []
         self._cancel_requested_callback = cancel_requested_callback
         self._status_callback = status_callback
         # Set only while a batch is in flight; see _batch_cache().
@@ -418,6 +434,22 @@ class CrossSyncService:
                 self._status_callback(message)
             except Exception:
                 logger.debug("Cross-sync status callback failed", exc_info=True)
+
+    @property
+    def plans(self) -> dict:
+        """The plan each route/category produced this run."""
+        return dict(self._plans)
+
+    @property
+    def plan_divergences(self) -> list[dict]:
+        """Where the planner and the live decision disagreed.
+
+        Empty is the goal. Every entry is a case the baseline explains and the
+        presence-only diff does not, so this is the evidence for switching
+        execution over — and, until then, a way to spot a planner bug without
+        anyone's library paying for it.
+        """
+        return list(self._plan_divergences)
 
     @property
     def route_states(self) -> dict:
@@ -769,6 +801,13 @@ class CrossSyncService:
                 added=wrote_added, removed=wrote_removed,
             )
 
+        self._build_shadow_plan(
+            pair, category,
+            source_by_key=source_by_key, target_by_key=target_by_key,
+            source=source, target=target, target_list=target_list,
+            live_add=to_add, live_remove=to_remove,
+            source_trustworthy=True,
+        )
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
         self._observe_route(
             pair, category,
@@ -1145,6 +1184,65 @@ class CrossSyncService:
             return []
 
         return [target_by_key[key] for key in stale_keys]
+
+    def _build_shadow_plan(
+        self, pair, category: str, *, source_by_key, target_by_key,
+        source, target, target_list, live_add, live_remove, source_trustworthy,
+    ) -> None:
+        """Plan the category from the baseline, beside the live decision.
+
+        The plan is recorded and compared; it does not drive this run. The point
+        is to see, on real libraries, every case where the baseline reaches a
+        different conclusion from the presence-only diff — which is exactly the
+        set of cases the redesign exists to fix — before letting it act.
+        """
+        if category == CATEGORY_HISTORY:
+            return  # history has its own semantics; planned separately
+        baseline = None
+        if self._state_store is not None:
+            try:
+                baseline = self._state_store.baseline(pair.pair_id, category)
+            except Exception:
+                logger.debug("Could not read baseline for plan", exc_info=True)
+        if baseline is None:
+            baseline = RouteBaseline(route_id=str(pair.pair_id), category=str(category))
+        try:
+            plan = plan_membership(
+                route_id=str(pair.pair_id), category=str(category),
+                source_by_key=source_by_key, destination_by_key=target_by_key,
+                baseline=baseline, policy=normalize_policy(pair.removal_mode),
+                source_provider=source.key, destination_provider=target.key,
+                source_trustworthy=source_trustworthy,
+            )
+        except Exception:
+            logger.warning("Could not build sync plan", exc_info=True)
+            return
+        self._plans[(str(pair.pair_id), str(category))] = plan
+
+        planned_adds = {a.key for a in plan.additions}
+        planned_removes = {r.key for r in plan.removals}
+        live_adds = {self._comparison_key(i, target_list) for i in live_add or []}
+        live_removes = {self._comparison_key(i, target_list) for i in live_remove or []}
+        if planned_adds == live_adds and planned_removes == live_removes:
+            return
+        divergence = {
+            "route_id": str(pair.pair_id),
+            "category": str(category),
+            "phase": baseline.phase,
+            "adds_only_planned": len(planned_adds - live_adds),
+            "adds_only_live": len(live_adds - planned_adds),
+            "removals_only_planned": len(planned_removes - live_removes),
+            # The one that matters: deletions the old diff wanted and the
+            # baseline cannot justify.
+            "removals_only_live": len(live_removes - planned_removes),
+        }
+        self._plan_divergences.append(divergence)
+        logger.info(
+            "Sync plan differs from the live decision for %s/%s (%s): "
+            "%d removal(s) the baseline would not justify, %d it would add",
+            pair.display_name(), category, baseline.phase,
+            divergence["removals_only_live"], divergence["adds_only_planned"],
+        )
 
     # ── baseline observation ───────────────────────────────────────────────
     #

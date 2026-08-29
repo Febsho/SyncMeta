@@ -176,6 +176,40 @@ provider hiccup. Landed so far:
 * `sync/models.py` — `FetchStatus`/`FetchOutcome`, `ItemState`, `RouteBaseline`,
   `RouteObservation`
 * `sync/state_store.py` — `SyncStateStore`, per-profile baselines
+* `sync/planner.py` — `plan_membership` / `plan_two_way`, the immutable `SyncPlan`
+
+**The planner decides from the baseline; the old diff decided from presence.**
+Comparing a source list against a destination list says only that they differ —
+"missing on the destination" is either an item the user just added on the source
+or one they just deleted on the destination, and those want opposite actions.
+`plan_membership` compares *both* current states against the last agreement, so
+absence on the source is only a deletion when the baseline says the source used
+to have it. Three cases separate it from `_items_to_remove`: a half-read source
+(removals dropped, additions kept), a route with no baseline yet (nothing may be
+deleted, including right after the `pair_managed_keys` migration), and a
+destination item the source never had (kept unless the policy is `mirror`).
+
+**A plan is immutable, and preview and execution must share one.** `SyncPlan` is
+a frozen dataclass of frozen `PlannedAction`s, each carrying the reason a person
+should be shown. Two code paths — one to preview, one to execute — is how a
+preview becomes a lie; there is one planner and the executor consumes what it
+produced.
+
+**Two-way is planned in one pass, and a real conflict is reported, not resolved.**
+`plan_two_way` asks *which side moved* rather than which side differs: one side
+changed and the other did not means the changed side wins in either direction;
+both changed and now agree means nothing to do; both changed and still disagree
+is a conflict, and by default neither side is touched, because letting run order
+pick a winner silently discards one of the user's two edits. `latest_change` is
+deliberately not offered for membership — several providers expose no reliable
+per-item modification time, and a policy that degrades to "whichever we read
+second" is worse than reporting the conflict.
+
+**The planner runs in shadow first.** `CrossSyncService` builds a plan beside the
+live decision and records where they disagree (`plan_divergences`, surfaced on
+`/pairs/run`); it does not yet drive writes. Switching execution over is the next
+step, and running both against real libraries first is what makes that switch
+reviewable rather than hopeful.
 
 **Only a run that actually succeeded may advance the agreement.** `commit` is
 the sole method that moves `last_successful_sync`, bumps `sync_version` and
