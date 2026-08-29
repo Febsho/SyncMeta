@@ -94,6 +94,7 @@ from src.providers import (
     TraktAdapter,
 )
 from src.library_store import LibraryStore
+from src.sync.state_store import SyncStateStore
 from src.media_kind import ALL_KINDS, KIND_LABELS, matches_filter
 from src import log_capture
 from src.connection_health import PROVIDERS as HEALTH_PROVIDERS, check_connections
@@ -1012,6 +1013,7 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 _profile_store.update_pair_last_results(
                     profile_id, pair_result_dicts, dry_run=False,
                 )
+                _persist_route_baselines(profile_id, pair_service, dry_run)
         _profile_store.record_sync_success(
             profile_id,
             result_dicts,
@@ -1189,12 +1191,121 @@ def _library_store_for(profile_id: str) -> LibraryStore:
         return store
 
 
+_sync_state_stores: dict[str, SyncStateStore] = {}
+_sync_state_stores_lock = threading.Lock()
+
+
+def _sync_state_store_for(profile_id: str) -> SyncStateStore:
+    """The profile's per-route sync baselines.
+
+    Beside the Library rather than inside profiles.json: a baseline holds one
+    entry per item per category per route, which is far too much to carry
+    through a file that is rewritten on every profile mutation and deep-copied
+    on every status poll.
+    """
+    key = str(profile_id or "").strip()
+    with _sync_state_stores_lock:
+        store = _sync_state_stores.get(key)
+        if store is None:
+            store = SyncStateStore(PROFILE_STORE_FILE.parent / "sync_state" / f"{key}.json")
+            _sync_state_stores[key] = store
+            _seed_sync_state_from_managed_keys(key, store)
+        return store
+
+
+def _seed_sync_state_from_managed_keys(profile_id: str, store: SyncStateStore) -> None:
+    """Carry existing pair ownership into the baseline store, once.
+
+    `pair_managed_keys` is the one part of the new model that already exists on
+    upgraded profiles. Adopting it keeps a route knowing which destination
+    entries are its own; it deliberately does not mark the route established,
+    because the old store never recorded what the *source* looked like.
+    """
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except Exception:
+        return
+    if not profile:
+        return
+    managed = (profile.get("activity_state") or {}).get("pair_managed_keys") or {}
+    if not managed:
+        return
+    try:
+        adopted = store.adopt_managed_keys(managed)
+    except Exception:
+        logger.warning("Could not seed sync baselines for %s", profile_id, exc_info=True)
+        return
+    if adopted:
+        logger.info(
+            "Seeded %d managed item(s) into sync baselines for profile %s",
+            adopted, profile_id,
+        )
+
+
+def _persist_route_baselines(profile_id: str, service, dry_run: bool) -> None:
+    """Fold a finished pair run into the profile's baselines.
+
+    Only a category that completed cleanly advances the agreement. One that
+    errored records the failure and leaves the previous agreement in place, so a
+    provider outage can never teach the engine that everything it failed to read
+    was deleted.
+    """
+    if dry_run:
+        return
+    observations = getattr(service, "route_states", None) or {}
+    if not observations:
+        return
+    try:
+        store = _sync_state_store_for(profile_id)
+    except Exception:
+        logger.warning("Could not open sync baselines for %s", profile_id, exc_info=True)
+        return
+    for (route_id, category), observed in observations.items():
+        try:
+            if observed.trustworthy:
+                store.commit(
+                    route_id, category,
+                    items=observed.items,
+                    source_fetch=observed.source_fetch,
+                    destination_fetch=observed.destination_fetch,
+                    save=False,
+                )
+            elif observed.items:
+                # Some writes landed; keep them so the next run does not repeat
+                # them, but do not call the result an agreement.
+                store.record_partial(
+                    route_id, category, applied=observed.items,
+                    error=observed.error, save=False,
+                )
+            else:
+                store.record_failure(route_id, category, observed.error, save=False)
+        except Exception:
+            logger.warning(
+                "Could not record baseline for route %s/%s", route_id, category,
+                exc_info=True,
+            )
+    try:
+        store.save()
+    except Exception:
+        logger.warning("Could not save sync baselines for %s", profile_id, exc_info=True)
+
+
 def _purge_profile_runtime_data(profile_ids: list[str]) -> None:
     """Remove runtime state and local Library files for deleted profiles."""
     for profile_id in profile_ids:
         _session_store.destroy_profile_sessions(profile_id)
         _profile_log_store.clear(profile_id)
         _mdblist_pkce_store.clear_profile(profile_id)
+        with _sync_state_stores_lock:
+            state_store = _sync_state_stores.pop(profile_id, None)
+        state_path = (
+            state_store.path if state_store is not None
+            else _profile_store._path.parent / "sync_state" / f"{profile_id}.json"
+        )
+        try:
+            state_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove sync state %s", state_path, exc_info=True)
         with _library_stores_lock:
             store = _library_stores.pop(profile_id, None)
         library_path = (
@@ -4615,6 +4726,7 @@ def api_profile_pairs_run():
             _profile_store.update_pair_managed_keys(profile_id, service.managed_keys)
             _profile_store.update_pair_last_results(profile_id, result_dicts)
             _profile_store.mark_pairs_synced(profile_id, [pair.pair_id for pair in pairs])
+            _persist_route_baselines(profile_id, service, dry_run)
         return jsonify({
             "status": "completed", "dry_run": dry_run,
             "results": result_dicts,

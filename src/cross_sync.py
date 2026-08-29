@@ -27,6 +27,14 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .sync.models import (
+    STATE_ABSENT,
+    STATE_PRESENT,
+    FetchOutcome,
+    FetchStatus,
+    ItemState,
+    RouteObservation,
+)
 from .providers import (
     CATEGORY_HISTORY,
     CATEGORY_RESUME,
@@ -364,6 +372,10 @@ class CrossSyncService:
             }
             for pair_id, categories in (managed_keys or {}).items()
         }
+        # What each route actually observed this run, for the baseline store.
+        # Server-side only: these key sets are far too large to ride /status,
+        # which is why they are not folded into PairCategoryStats.
+        self._route_states: dict[tuple[str, str], RouteObservation] = {}
         self._cancel_requested_callback = cancel_requested_callback
         self._status_callback = status_callback
         # Set only while a batch is in flight; see _batch_cache().
@@ -406,6 +418,11 @@ class CrossSyncService:
                 self._status_callback(message)
             except Exception:
                 logger.debug("Cross-sync status callback failed", exc_info=True)
+
+    @property
+    def route_states(self) -> dict:
+        """Per (route_id, category) observation of this run. Never serialized."""
+        return dict(self._route_states)
 
     @property
     def managed_keys(self) -> dict:
@@ -601,6 +618,12 @@ class CrossSyncService:
             message = f"Could not read {category} from {source.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+            # A read that failed is not an empty list, and the baseline must
+            # record that difference rather than the zero items it got back.
+            self._observe_failure(
+                pair, category, message,
+                source_fetch=self._fetch_outcome(source, category, error=exc),
+            )
             return result
 
         try:
@@ -621,6 +644,11 @@ class CrossSyncService:
             message = f"Could not read {category} from {target.label}: {self._describe_error(exc)}"
             result.errors.append(message)
             logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
+            self._observe_failure(
+                pair, category, message,
+                source_fetch=self._fetch_outcome(source, category, count=len(source_items)),
+                destination_fetch=self._fetch_outcome(target, category, error=exc),
+            )
             return result
 
         result.source_items = len(source_items)
@@ -742,6 +770,17 @@ class CrossSyncService:
             )
 
         self._record_managed_keys(pair, category, source_by_key, to_remove, result)
+        self._observe_route(
+            pair, category,
+            source_by_key=source_by_key,
+            target_by_key=target_by_key,
+            added=wrote_added if not self._dry_run else [],
+            removed=wrote_removed if not self._dry_run else [],
+            result=result,
+            source_fetch=self._fetch_outcome(source, category, count=len(source_items)),
+            destination_fetch=self._fetch_outcome(target, category, count=len(target_items)),
+            target_list=target_list,
+        )
         return result
 
     def _run_category_two_way(self, pair, first, second, category: str) -> PairCategoryStats:
@@ -1106,6 +1145,92 @@ class CrossSyncService:
             return []
 
         return [target_by_key[key] for key in stale_keys]
+
+    # ── baseline observation ───────────────────────────────────────────────
+    #
+    # These record what the run *saw*, for `sync.state_store`. They change no
+    # decision in this class: the planner that consumes them lands separately.
+    # Recording them from the first run means that planner has real baselines to
+    # work with rather than starting blind.
+
+    @staticmethod
+    def _fetch_outcome(adapter, category: str, *, count: int = 0, error=None) -> FetchOutcome:
+        """Classify one provider read.
+
+        `PARTIAL` is not produced yet: no client currently reports that it read
+        only some of its pages. When they learn to, this is the one place that
+        has to change — everything downstream already refuses to conclude a
+        removal from a fetch that is not `trustworthy_for_removals`.
+        """
+        if error is not None:
+            return FetchOutcome(
+                provider=str(getattr(adapter, "key", "") or ""),
+                category=str(category),
+                status=CrossSyncService._error_status(error),
+                error=str(error)[:300],
+            )
+        return FetchOutcome(
+            provider=str(getattr(adapter, "key", "") or ""),
+            category=str(category),
+            status=FetchStatus.SUCCESS_WITH_ITEMS if count else FetchStatus.SUCCESS_EMPTY,
+            item_count=int(count),
+        )
+
+    @staticmethod
+    def _error_status(error) -> FetchStatus:
+        text = f"{type(error).__name__}: {error}".lower()
+        if "timeout" in text or "timed out" in text:
+            return FetchStatus.TIMEOUT
+        if "429" in text or "rate limit" in text:
+            return FetchStatus.RATE_LIMITED
+        if "401" in text or "403" in text or "unauthor" in text or "invalid_grant" in text:
+            return FetchStatus.UNAUTHORIZED
+        return FetchStatus.FAILED
+
+    def _observe_failure(self, pair, category: str, error: str, **fetches) -> None:
+        self._route_states[(str(pair.pair_id), str(category))] = RouteObservation(
+            route_id=str(pair.pair_id), category=str(category),
+            complete=False, error=str(error)[:500], **fetches,
+        )
+
+    def _observe_route(
+        self, pair, category: str, *, source_by_key, target_by_key,
+        added, removed, result, source_fetch, destination_fetch, target_list,
+    ) -> None:
+        """Build the per-item agreement this run establishes.
+
+        The destination side is the state *after* the writes this run made, not
+        the state it was read in — otherwise the next run would see everything
+        this one just wrote as missing and write it all again.
+        """
+        added_keys = {self._comparison_key(item, target_list) for item in added or []}
+        removed_keys = {self._comparison_key(item, target_list) for item in removed or []}
+        managed = set(self._managed_keys.get(pair.pair_id, {}).get(category, []))
+
+        items: dict[str, ItemState] = {}
+        for key in set(source_by_key) | set(target_by_key) | added_keys:
+            on_source = key in source_by_key
+            on_destination = (key in target_by_key or key in added_keys) and key not in removed_keys
+            state = ItemState(
+                source=STATE_PRESENT if on_source else STATE_ABSENT,
+                destination=STATE_PRESENT if on_destination else STATE_ABSENT,
+                synced=STATE_PRESENT if (on_source and on_destination) else STATE_ABSENT,
+                managed=key in managed,
+            )
+            if key in added_keys:
+                state.action = "added"
+            elif key in removed_keys:
+                state.action = "removed"
+            items[key] = state
+
+        self._route_states[(str(pair.pair_id), str(category))] = RouteObservation(
+            route_id=str(pair.pair_id), category=str(category), items=items,
+            source_fetch=source_fetch, destination_fetch=destination_fetch,
+            # A write that raised leaves the destination in a state this run
+            # cannot describe, so the agreement must not be advanced from it.
+            complete=not result.errors,
+            error="; ".join(result.errors)[:500],
+        )
 
     def _record_managed_keys(
         self, pair, category: str, source_by_key: dict, removed: list[dict], result: PairCategoryStats,

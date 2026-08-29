@@ -167,6 +167,50 @@ Key patterns:
 - The dashboard's Cross-Service Pairs panel (`renderPairsDashPanel`) renders each pair as a `.svc-card .svc-card-static` in a `.svc-grid`, the same card language as the service pipelines — it was a flat `.pipe-status-row`, so two panels showing the same kind of thing looked like different eras of the app. It stays its **own** panel (see below); only the card vocabulary is shared. Hidden when no pair exists. It renders from `/status` alone — the public profile already carries both `options.sync_pairs` and `last_pair_results` — so it costs no extra request and needs no `fetchPairs()`. Rows carry `data-dash-pair-run` and are handled by one delegated listener (`bindPairsDashEvents`); a real run calls `_forceStatusRefresh()`, a dry run does not, since it writes nothing the panel reads
 - The dashboard's Live Sync Activity panel appears only while `sync_running`; it tails the session-scoped `/api/logs` stream on its own 2s interval (`startLiveActivityFeed`/`stopLiveActivityFeed`), driven from `renderDashboard` via `updateLiveActivityPanel(profile)`. The sync pipeline logs every list add/remove and history write at INFO so those lines show up here and in the Logs view
 
+**The sync engine is moving into `src/sync/`, incrementally.** `sync_service.py`
+and `cross_sync.py` answer "copy this category from A to B"; `src/sync/` answers
+the question underneath — *what actually changed since the two sides last
+agreed*, which is the only thing that can tell a user's edit apart from a
+provider hiccup. Landed so far:
+
+* `sync/models.py` — `FetchStatus`/`FetchOutcome`, `ItemState`, `RouteBaseline`,
+  `RouteObservation`
+* `sync/state_store.py` — `SyncStateStore`, per-profile baselines
+
+**Only a run that actually succeeded may advance the agreement.** `commit` is
+the sole method that moves `last_successful_sync`, bumps `sync_version` and
+replaces the item states. `record_failure` writes the error and leaves the
+agreement alone; `record_partial` folds in the writes that *did* land — so the
+next run neither repeats them nor believes the rest done — without declaring
+success. A provider outage can therefore never teach the engine that everything
+it failed to read was deleted.
+
+**A read that failed is not an empty list.** Every fetch is classified into a
+`FetchStatus`, and only `SUCCESS_WITH_ITEMS`/`SUCCESS_EMPTY` are
+`trustworthy_for_removals`. A timeout, a 401, a rate limit and a half-read page
+all look identical to "the user deleted everything" if you only count what came
+back. `FetchOutcome.complete` covers the subtle case: a 200 carrying real items
+is fine to add from and still unsafe to delete from if a page never arrived.
+`PARTIAL` is modelled but not yet produced — no client reports incomplete
+pagination today; `cross_sync._fetch_outcome` is the single place that changes
+when they learn to.
+
+**A route with no baseline may add but never remove.** A fresh route sits in
+`baseline_initializing` until one run completes. The migration from
+`pair_managed_keys` adopts ownership — that store already recorded what a pair
+wrote — but deliberately does *not* mark the route established, because it never
+recorded what the *source* looked like and so cannot answer "did this disappear
+since we agreed". Guessing there would let the first run after an upgrade delete
+on the strength of a comparison it never made.
+
+**Baselines live beside the Library, not in `profiles.json`.** One entry per item
+per category per route runs to megabytes; `profiles.json` is rewritten under a
+lock on every profile mutation and deep-copied on every status poll, which is
+why `pair_managed_keys` — a fraction of the size — already had to be dropped from
+`/status`. `CrossSyncService.route_states` is likewise server-side only and is
+deliberately *not* folded into `PairCategoryStats`, which is serialized into
+`last_pair_results` and does ride the poll.
+
 ## Key Invariants
 
 **The scheduler shares the web process, so it must yield to it.** `ProfileScheduler`
