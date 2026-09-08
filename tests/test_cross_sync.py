@@ -820,6 +820,28 @@ class TwoWayPairTests(unittest.TestCase):
         self.assertEqual(second.added, 0, "a settled two-way pair kept writing")
         self.assertEqual(second.removed, 0)
 
+    def test_a_short_two_way_batch_retries_only_the_unconfirmed_item(self) -> None:
+        class ShortAddAdapter(FakeAdapter):
+            def add(self, category, items, target_list=""):
+                # Model an adapter which confirms (and actually stores) only
+                # the first item from a batch, without identifying a failure.
+                self.added.append((category, list(items)))
+                self._contents.setdefault(category, []).extend(items[:1])
+                return {"added": min(1, len(items)), "not_found": 0}
+
+        first = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1"), _movie("2")]})
+        second = ShortAddAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        service = CrossSyncService(
+            {"trakt": first, "simkl": second}, state_store=_fresh_store(),
+        )
+
+        service.run_pair(self._two_way())
+        self.assertEqual(len(second.added[-1][1]), 2)
+        service.run_pair(self._two_way())
+
+        self.assertEqual(len(second.added[-1][1]), 1)
+        self.assertEqual(second.added[-1][1][0]["tmdb_id"], "2")
+
     def test_a_deletion_propagates_instead_of_being_re_added(self) -> None:
         # The case two independent one-way pairs cannot get right: after both
         # sides agreed on an item, removing it from one must remove it from the

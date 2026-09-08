@@ -1246,51 +1246,14 @@ def _seed_sync_state_from_managed_keys(profile_id: str, store: SyncStateStore) -
 
 
 def _persist_route_baselines(profile_id: str, service, dry_run: bool) -> None:
-    """Fold a finished pair run into the profile's baselines.
-
-    Only a category that completed cleanly advances the agreement. One that
-    errored records the failure and leaves the previous agreement in place, so a
-    provider outage can never teach the engine that everything it failed to read
-    was deleted.
-    """
-    if dry_run:
-        return
-    observations = getattr(service, "route_states", None) or {}
-    if not observations:
-        return
-    try:
-        store = _sync_state_store_for(profile_id)
-    except Exception:
-        logger.warning("Could not open sync baselines for %s", profile_id, exc_info=True)
-        return
-    for (route_id, category), observed in observations.items():
-        try:
-            if observed.trustworthy:
-                store.commit(
-                    route_id, category,
-                    items=observed.items,
-                    source_fetch=observed.source_fetch,
-                    destination_fetch=observed.destination_fetch,
-                    save=False,
-                )
-            elif observed.items:
-                # Some writes landed; keep them so the next run does not repeat
-                # them, but do not call the result an agreement.
-                store.record_partial(
-                    route_id, category, applied=observed.items,
-                    error=observed.error, save=False,
-                )
-            else:
-                store.record_failure(route_id, category, observed.error, save=False)
-        except Exception:
-            logger.warning(
-                "Could not record baseline for route %s/%s", route_id, category,
-                exc_info=True,
-            )
-    try:
-        store.save()
-    except Exception:
-        logger.warning("Could not save sync baselines for %s", profile_id, exc_info=True)
+    """Compatibility shim; CrossSyncService owns route-baseline persistence."""
+    # CrossSyncService is the sole baseline owner.  It commits complete runs
+    # and folds only confirmed actions from partial ones while it still has the
+    # per-action execution result.  Reconstructing a second baseline here from
+    # generic observations loses history event IDs and can turn failed writes
+    # into an agreement.
+    del profile_id, service, dry_run
+    return
 
 
 def _purge_profile_runtime_data(profile_ids: list[str]) -> None:

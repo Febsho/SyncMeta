@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 
 from .sync.executor import execute_plan
 from .sync.ownership import OwnershipIndex, destination_scope
-from .sync.history import plan_history
+from .sync.history import event_id, plan_history
 from .sync.progress import plan_progress
 from .sync.planner import (
     SyncPlan,
@@ -1369,6 +1369,7 @@ class CrossSyncService:
 
         target_list = self._effective_target_list(pair, category)
         performed: list = []
+        executions: list = []
         for plan, writer_target, other, destination_list in (
             (two_way.forward, second, first, target_list),
             (two_way.backward, first, second, ""),
@@ -1395,27 +1396,32 @@ class CrossSyncService:
                 )
             plan = enforce_safety(plan, verdict)
             performed.append(plan)
-            self._apply_two_way_side(
+            executions.append(self._apply_two_way_side(
                 pair, category, plan, writer_target, result, destination_list,
-            )
+            ))
 
         result.conflicts_detected = len(two_way.conflicts)
         # Ownership is the union both sides now hold, minus what actually went.
         # Taken from the *enforced* plans, so a removal the guard paused stays in
         # the agreed set — the next run then sees the same situation rather than
         # treating those items as never synced.
-        gone = {a.key for plan in performed for a in plan.removals}
+        gone = {
+            action.key for execution in executions
+            for action in execution.applied_actions()
+            if action.kind == "remove"
+        }
         agreed = sorted((set(first_by_key) | set(second_by_key)) - gone)
         if not self._dry_run:
             self._managed_keys.setdefault(pair.pair_id, {})[category] = agreed
         result.managed_keys = agreed
 
-        if self._state_store is not None and not self._dry_run and not result.errors:
+        complete = not two_way.conflicts and all(execution.complete for execution in executions)
+        if self._state_store is not None and not self._dry_run:
             try:
-                applied_forward = {a.key for a in two_way.forward.additions}
-                applied_backward = {a.key for a in two_way.backward.additions}
-                gone_forward = {a.key for a in two_way.forward.removals}
-                gone_backward = {a.key for a in two_way.backward.removals}
+                applied_forward = {a.key for a in executions[0].applied_actions() if a.kind != "remove"}
+                applied_backward = {a.key for a in executions[1].applied_actions() if a.kind != "remove"}
+                gone_forward = {a.key for a in executions[0].applied_actions() if a.kind == "remove"}
+                gone_backward = {a.key for a in executions[1].applied_actions() if a.kind == "remove"}
                 items = {}
                 for key in set(first_by_key) | set(second_by_key):
                     on_first = (
@@ -1430,7 +1436,20 @@ class CrossSyncService:
                         synced=STATE_PRESENT if (on_first and on_second) else STATE_ABSENT,
                         managed=True,
                     )
-                self._state_store.commit(pair.pair_id, category, items=items)
+                if complete:
+                    self._state_store.commit(pair.pair_id, category, items=items)
+                else:
+                    # Preserve the agreement, folding in only writes the
+                    # provider positively confirmed.  This makes a short batch
+                    # retry just its unconfirmed tail on the next run.
+                    applied = {
+                        key: state for key, state in items.items()
+                        if key in applied_forward | applied_backward | gone_forward | gone_backward
+                    }
+                    self._state_store.record_partial(
+                        pair.pair_id, category, applied=applied,
+                        error="; ".join(result.errors) or "two-way writes were incomplete or conflicted",
+                    )
             except Exception:
                 logger.warning("Could not record two-way baseline", exc_info=True)
         return result
@@ -1472,10 +1491,12 @@ class CrossSyncService:
             return None
 
         self._plans[(str(pair.pair_id), str(category))] = forward.plan
-        for plan, target in ((forward.plan, second), (backward.plan, first)):
+        executions = [
             self._apply_two_way_side(pair, category, plan, target, result)
+            for plan, target in ((forward.plan, second), (backward.plan, first))
+        ]
 
-        if self._state_store is not None and not self._dry_run and not result.errors:
+        if self._state_store is not None and not self._dry_run:
             try:
                 # Both directions' records, merged: after this run each side
                 # holds what the other had, and the baseline has to say so or
@@ -1498,7 +1519,33 @@ class CrossSyncService:
                             synced=STATE_PRESENT, managed=True,
                             plays=merged_plays, event_ids=merged_events,
                         )
-                self._state_store.commit(pair.pair_id, category, items=items)
+                if all(execution.complete for execution in executions):
+                    self._state_store.commit(pair.pair_id, category, items=items)
+                else:
+                    # A history key can have several play events.  Do not use
+                    # ``projected`` here: it contains every planned play for
+                    # the episode, including an unconfirmed batch tail.
+                    applied = {}
+                    for execution in executions:
+                        for action in execution.applied_actions():
+                            existing = applied.get(action.key) or baseline.state(action.key)
+                            watched_at = str(action.item.get("watched_at") or "")
+                            source_event = event_id(action.item)
+                            applied[action.key] = ItemState(
+                                source=STATE_PRESENT, destination=STATE_PRESENT,
+                                synced=STATE_PRESENT, managed=True,
+                                plays=tuple(dict.fromkeys(
+                                    tuple(existing.plays) + ((watched_at,) if watched_at else ())
+                                )),
+                                event_ids=tuple(dict.fromkeys(
+                                    tuple(existing.event_ids) + ((source_event,) if source_event else ())
+                                )),
+                            )
+                    self._state_store.record_partial(
+                        pair.pair_id, category,
+                        applied=applied,
+                        error="; ".join(result.errors) or "two-way history writes were incomplete",
+                    )
             except Exception:
                 logger.warning("Could not record two-way history baseline", exc_info=True)
         return result
@@ -1540,55 +1587,33 @@ class CrossSyncService:
 
     def _apply_two_way_side(
         self, pair, category, plan, target, result, target_list: str = "",
-    ) -> None:
-        """Write one direction of a reconciled two-way plan."""
+    ):
+        """Write one direction and retain every action's confirmed outcome."""
         forward = target.key == pair.target
-        if plan.removals and not self._dry_run:
-            try:
-                totals = target.remove(
-                    category, [a.item for a in plan.removals], target_list,
-                ) or {}
-                count = _total(totals, "deleted")
-            except Exception as exc:
-                message = f"Could not remove {category} from {target.label}: {self._describe_error(exc)}"
-                result.errors.append(message)
-                logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
-                count = 0
-            if forward:
-                result.removed += count
-            else:
-                result.removed_back += count
-                result.removed += count
-        elif plan.removals:
-            result.removed += len(plan.removals)
-            if not forward:
-                result.removed_back += len(plan.removals)
-
-        # Updates ride with additions: `add` is an upsert for the categories
-        # that have them, and resume produces nothing else.
-        writes = list(plan.additions) + list(plan.updates)
-        if writes and not self._dry_run:
-            try:
-                totals = target.add(
-                    category, [a.item for a in writes], target_list,
-                    **_add_kwargs(target, pair),
-                ) or {}
-                count = _total(totals, "added")
-                result.unmapped += _total(totals, "not_found")
-            except Exception as exc:
-                message = f"Could not write {category} to {target.label}: {self._describe_error(exc)}"
-                result.errors.append(message)
-                logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
-                count = 0
-            if forward:
-                result.added += count
-            else:
-                result.added_back += count
-                result.added += count
-        elif writes:
-            result.added += len(writes)
-            if not forward:
-                result.added_back += len(writes)
+        # The executor deliberately accounts for short batch responses item by
+        # item.  Updates are provider upserts, so execute them as additions.
+        executable = replace(
+            plan, additions=tuple(plan.additions) + tuple(plan.updates), updates=(),
+        )
+        execution = execute_plan(
+            executable,
+            add_writer=lambda items: target.add(
+                category, items, target_list, **_add_kwargs(target, pair),
+            ),
+            remove_writer=lambda items: target.remove(category, items, target_list),
+            dry_run=self._dry_run,
+        )
+        result.added += execution.added
+        result.removed += execution.removed
+        result.unmapped += execution.not_found
+        if not forward:
+            result.added_back += execution.added
+            result.removed_back += execution.removed
+        for error in execution.errors:
+            result.errors.append(
+                f"Could not write {category} to {target.label}: {self._describe_error(error)}"
+            )
+        return execution
 
     def _baseline_for(self, pair, category: str):
         if self._state_store is not None:
