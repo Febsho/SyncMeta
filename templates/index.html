@@ -167,7 +167,7 @@
        "AniList: readable only — ...") joined by <br>, which is the one place in
        the app where a service state is not a dot next to a name. */
     .pair-caps{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
-    .sync-builder{padding:18px;border:1px solid rgba(124,109,247,.32);border-radius:14px;background:linear-gradient(145deg,rgba(124,109,247,.11),rgba(10,10,11,.7));margin-bottom:18px}
+    .sync-builder{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--surface);margin-bottom:18px}
     .sync-builder-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
     .sync-builder-title{font-size:16px;font-weight:650;color:var(--white);letter-spacing:-.02em}
     .sync-builder-copy{font-size:12px;color:var(--z400);line-height:1.55;max-width:62ch;margin-top:4px}
@@ -175,16 +175,18 @@
     .sync-builder-step{padding:14px;border:1px solid var(--line);border-radius:10px;background:rgba(10,10,11,.72)}
     .sync-builder-step.wide{grid-column:1/-1}
     .sync-builder-label{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--label);margin-bottom:10px}
-    .sync-builder-num{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:white;font:700 10px var(--mono)}
+    .sync-builder-num{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--z700);color:var(--white);font:700 10px var(--mono)}
     .sync-builder select{width:100%;padding:10px 12px;border-radius:7px;border:1px solid var(--z800);background:var(--z900);color:var(--z100);font:13px inherit}
     .sync-source-grid,.sync-category-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px}
     .sync-choice{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--z950);color:var(--z300);font-size:12px;cursor:pointer;transition:.15s border-color,.15s background}
     .sync-choice:hover{border-color:var(--z600)}
-    .sync-choice:has(input:checked){border-color:rgba(124,109,247,.65);background:rgba(124,109,247,.13);color:var(--white)}
+    .sync-choice:has(input:checked){border-color:var(--z600);background:var(--z800);color:var(--white)}
     .sync-choice:has(input:disabled){opacity:.42;cursor:not-allowed}
-    .sync-choice input{accent-color:var(--accent)}
+    .sync-choice input{accent-color:var(--z400)}
     .sync-builder-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;flex-wrap:wrap}
     .sync-builder-summary{font-size:12px;color:var(--z400)}
+    #btn-multi-sync-add{background:var(--z100);border-color:var(--z100);color:var(--z950)}
+    #btn-multi-sync-add:hover{background:var(--white);border-color:var(--white)}
     .sync-routes-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:4px 0 10px}
     .sync-routes-title{font-size:13px;font-weight:600;color:var(--z200)}
     @media(max-width:720px){.sync-builder-grid{grid-template-columns:1fr}.sync-builder-step.wide{grid-column:auto}.sync-builder-head{flex-direction:column}}

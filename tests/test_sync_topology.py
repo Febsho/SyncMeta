@@ -8,7 +8,7 @@ because their consequences are invisible until data starts moving.
 import unittest
 
 from src.config import SyncPair
-from src.sync.topology import SEVERITY_INFO, SEVERITY_WARNING, analyze
+from src.sync.topology import SEVERITY_WARNING, analyze
 
 
 def _route(source, target, **overrides):
@@ -73,27 +73,9 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(_kinds(notes).count("cycle"), 1)
 
 
-class SharedDestinationTests(unittest.TestCase):
-    def test_two_routes_into_one_destination_are_noted(self) -> None:
-        notes = analyze([_route("simkl", "trakt"), _route("mdblist", "trakt")])
-        note = next(n for n in notes if n.kind == "shared_destination")
-        self.assertEqual(note.severity, SEVERITY_INFO)
-        self.assertIn("only removed once no route still requires it", note.message)
-
-    def test_different_categories_do_not_contend(self) -> None:
-        notes = analyze([
-            _route("simkl", "trakt", categories=["watchlist"]),
-            _route("mdblist", "trakt", categories=["collection"]),
-        ])
-        self.assertNotIn("shared_destination", _kinds(notes))
-
-
 class OrderingAndScopeTests(unittest.TestCase):
     def test_warnings_come_before_information(self) -> None:
-        notes = analyze([
-            _route("simkl", "trakt"), _route("mdblist", "trakt"),
-            _route("trakt", "simkl"),
-        ])
+        notes = analyze([_route("simkl", "trakt"), _route("trakt", "simkl")])
         severities = [note.severity for note in notes]
         self.assertEqual(severities, sorted(severities, key=lambda s: s != SEVERITY_WARNING))
 

@@ -128,27 +128,7 @@ def analyze(routes) -> list[TopologyNote]:
             ),
         ))
 
-    # Several routes writing the same destination category.
-    destinations: dict[tuple, list] = {}
-    for route in active:
-        target = str(getattr(route, "target", "") or "")
-        target_list = str(getattr(route, "target_list", "") or "")
-        for category in getattr(route, "categories", ()) or ():
-            destinations.setdefault((target, target_list, category), []).append(route)
-    for (target, _list, category), group in sorted(destinations.items()):
-        if len(group) < 2:
-            continue
-        notes.append(TopologyNote(
-            kind="shared_destination", severity=SEVERITY_INFO,
-            message=(
-                f"{len(group)} routes write {category} to {target}. That is fine, "
-                f"but an item is only removed once no route still requires it — "
-                f"so a removal may not happen when one of them expects it to."
-            ),
-            routes=tuple(_label(route) for route in group),
-        ))
-
-    order = {SEVERITY_WARNING: 0, SEVERITY_INFO: 1}
+    order = {SEVERITY_WARNING: 0}
     return sorted(notes, key=lambda note: (order.get(note.severity, 9), note.kind))
 
 
