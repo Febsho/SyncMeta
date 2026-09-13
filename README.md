@@ -1,443 +1,912 @@
-
+<div align="center">
 
 # SyncMeta
 
-[![Deploy to Docker](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**Self-hosted synchronization for your watch data.**
 
-Self-hosted web app for synchronizing watchlists, collections, custom lists,
-watch history and resume progress between SIMKL, Trakt, AniList, MDBList,
-[PublicMetaDB](https://publicmetadb.com), and a local Library.
+Keep watchlists, collections, custom lists, watch history and playback progress synchronized across your media services.
 
-You run it in Docker, open it in a browser, connect your accounts, and it syncs
-in the background.
+[![Docker](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Febsho/SyncMeta/actions/workflows/docker-publish.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Quick start
+SIMKL · Trakt · AniList · MDBList · PublicMetaDB · Local Library
+
+</div>
+
+---
+
+## What is SyncMeta?
+
+SyncMeta is a self-hosted web application that synchronizes your media data between multiple tracking services.
+
+Connect your accounts, create sync routes and let SyncMeta keep everything aligned automatically.
+
+It supports:
+
+* Watchlists
+* Collections
+* Custom lists
+* Watch history
+* Episode progress
+* Resume progress
+* Anime mapping
+* One-way and two-way synchronization
+* Automatic scheduled synchronization
+* Local provider-neutral Library
+* Dry-run previews and deletion protection
+
+SyncMeta runs entirely on your own server using Docker.
+
+---
+
+## Supported services
+
+| Service              | Read | Write |
+| -------------------- | :--: | :---: |
+| **SIMKL**            |   ✓  |   ✓   |
+| **Trakt**            |   ✓  |   ✓   |
+| **AniList**          |   ✓  |   ✓   |
+| **MDBList**          |   ✓  |   ✓   |
+| **PublicMetaDB**     |   ✓  |   ✓   |
+| **SyncMeta Library** |   ✓  |   ✓   |
+
+### SIMKL
+
+Supports:
+
+* Watch statuses
+* Movies
+* Shows
+* Anime
+* Watch history
+* Resume progress
+* Watchlist
+* Collection
+
+SIMKL statuses can also be mapped cleanly into Trakt.
+
+For example:
+
+```text
+SIMKL Plan to Watch → Trakt Watchlist
+SIMKL Watching      → Trakt "Watching" list
+SIMKL Completed     → Trakt "Completed" list
+SIMKL On Hold       → Trakt "On Hold" list
+SIMKL Dropped       → Trakt "Dropped" list
+```
+
+### Trakt
+
+Supports:
+
+* Watchlist
+* Collection
+* History
+* Resume progress
+* Personal lists
+* Liked lists
+
+### AniList
+
+Supports:
+
+* Anime status lists
+* Custom lists
+* Episode progress
+* Activity-derived watch history
+
+SyncMeta also handles anime identity mapping between services.
+
+### MDBList
+
+Supports:
+
+* Watchlist
+* Collection
+* History
+* Account lists
+* Public lists
+
+Both API-key and OAuth based connections are supported.
+
+### PublicMetaDB
+
+Supports:
+
+* Watchlist
+* Picks
+* Collection
+* Custom lists
+* History
+* Resume progress
+
+PublicMetaDB is treated like any other provider. It does not have to be the central synchronization service.
+
+### Local Library
+
+SyncMeta includes its own local media Library.
+
+It can be used as both a source and a destination:
+
+```text
+SIMKL ───────┐
+Trakt ───────┤
+AniList ─────┼──→ SyncMeta Library
+MDBList ─────┤
+PublicMetaDB ┘
+```
+
+Other routes can then read from the Library without repeatedly querying remote providers.
+
+---
+
+# Quick Start
+
+## Docker Compose
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/Febsho/SyncMeta.git
 cd SyncMeta
+```
+
+Optional:
+
+```bash
 cp .env.example .env
-docker compose up -d syncmeta
 ```
 
-The `.env` file is optional; `docker compose up -d syncmeta` also works without it.
+Start SyncMeta:
 
-Open `http://127.0.0.1:8080` and:
-
-1. Enter a password and click **Save Profile**. You get a profile UUID back —
-   copy it and keep it with the password. Together they are the only way back
-   into the profile.
-2. In **Settings -> Connections**, connect the services you want to use. A
-   PublicMetaDB connection is optional; the local Library is always available.
-3. In **Settings -> Sync routes**, choose a source, a destination, and the
-   content to synchronize. Quick setup can create several routes to one target.
-4. Click **Preview** to perform a dry run, then save and run the routes.
-
-New routes are manual by default. Enable automatic sync and choose an interval
-on each route when you want it to run in the background.
-
-## What it does
-
-**Sync routes.** A route copies items directly between any two compatible
-services; PublicMetaDB is a normal source or destination, not a required hub. A
-route can be one-way or two-way, chooses what happens when an item disappears
-from one side (never remove, remove only what this route added, or mirror the
-source exactly), and has its own automatic schedule. Where a target can create
-lists, the route can select the destination and its initial visibility. An
-existing list keeps the visibility configured on the service itself.
-
-For SIMKL → Trakt, Plan to Watch maps to Trakt's native watchlist. Watching,
-Completed, On Hold and Dropped are kept in separate Trakt lists that SyncMeta
-creates or reuses, rather than being flattened into Trakt Collection.
-
-| Service | Reads | Writes |
-|---|---|---|
-| SIMKL | Watch statuses for shows, movies and anime; history; resume | Watchlist, history and collection |
-| Trakt | Watchlist, collection, history, personal and liked lists; resume | Watchlist, history, collection and personal lists |
-| AniList | Status lists, custom lists and activity-derived history | Status lists and progress/history with an access token |
-| MDBList | Watchlist, collection, history, account lists and public lists | Watchlist, collection, history and account lists |
-| PublicMetaDB | Watchlist, Picks, collection, custom lists, history and resume | The same |
-| Library (local) | All titles, watchlist, collection, history and resume | The same, always |
-
-The source-list picker loads each provider's actual lists, not only its default
-watchlist. Small catalogs appear as direct choices; larger catalogs can be
-filtered in the picker. PublicMetaDB's native **Watchlist** and **Picks** lists
-are always exposed even when its generic list endpoint omits them.
-
-**Watch history and resume progress.** Both are normal route categories. Resume
-can be read from SIMKL, Trakt, PublicMetaDB or Library, and written to
-PublicMetaDB or Library. The route editor only offers directions that both ends
-actually support.
-
-Watch history is treated as a set of *events*, not a list of items. Syncing the
-same watch twice never produces two plays, and watching something twice does
-produce two — see [How syncing decides](#how-syncing-decides). Resume points are
-never rewound: a position under 2% is treated as an accidental open, 90% or more
-as a finished title rather than something to resume, and a service already
-further along is left alone.
-
-**MDBList OAuth.** An API key is enough to read and may also provide write
-access. For OAuth, create an app at
-[mdblist.com/developer](https://mdblist.com/developer/), paste the client id and
-secret in Connections, and set the exact Redirect URL shown by SyncMeta on the
-MDBList app. Press **Connect MDBList**, approve with **YES**, and the browser
-returns to SyncMeta to finish the connection automatically; there is no code to
-copy. MDBList marks its sync API as beta, so preview with a dry run before
-trusting a real run.
-
-**Provider-neutral behavior.** Scheduling, removal rules, watch history and
-resume progress belong to each route rather than to a PublicMetaDB-only
-pipeline. Older profile data is still understood and converted for
-compatibility, but new configuration happens entirely through Sync routes.
-
-**Anime matching.** Anime is matched across AniList, MAL, SIMKL, TMDB and IMDB
-using the Fribb anime-lists data, with sequel seasons resolved back to the root
-series. Anything it cannot match with confidence is listed as unresolved for you
-to map by hand rather than guessed at.
-
-**Library.** SyncMeta's own local store, and a sync source or target like any
-other service — point every service at it once and any other route can read from
-it without touching a remote API again. It holds **one entry per series with the
-seasons inside it**, the shape Trakt and TVDB use, which is what makes SIMKL's
-per-season anime entries and AniList's per-cour entries land on the same row
-instead of three. Filter by **movies, shows, anime and anime films** (anime is
-tracked as a flag on the TMDB type, so an anime film is a film), by watchlist /
-collection / watched / resume, search by title, and sort or page through large
-libraries. Click a title to see its seasons and exactly which episodes are
-watched. Posters, titles and episode names need a free TMDB API key; without one
-it still works and shows ids and episode numbers.
-
-The same Library page can browse the connected SIMKL, Trakt, AniList, MDBList
-and PublicMetaDB accounts directly. Their native feeds and service lists are
-available as separate choices, including AniList custom lists and PublicMetaDB
-Picks. Remote results support search, sorting and pagination, and AniList
-episode activity is grouped into one series card instead of repeated cards.
-
-**Dashboard.** The sync graph is built from the saved routes, groups routes by
-destination, links to provider details, and can be collapsed when you do not
-want to see it. Live status, recent activity and issues remain visible while a
-background run is in progress.
-
-**Diagnostics.** Per-list results, row-level errors, failed and unresolved
-samples, timings, and the last 25 detailed run records. A dry run previews
-everything without writing.
-
-**Connection health.** The Connections screen verifies every configured
-provider with a read-only request, reports read/write capability and the last
-check time, and offers the appropriate reconnect, edit, or retry action. The
-dashboard shows whether the services required by each configured route are
-ready before you start a run.
-
-**Admin page.** Set `ADMIN_PASSWORD` to enable `/admin`: profile overview, queue
-state, API request counters, anime cache repair and anime mapping refresh.
-
-## How syncing decides
-
-A sync is not a comparison of two lists. Comparing them tells you they differ;
-it cannot tell you *which side moved*, and "missing on the destination" is
-either something you just added on the source or something you just deleted on
-the destination. Those want opposite actions.
-
-So every route keeps a **baseline**: the state both sides were last confirmed to
-agree on. Each run compares both current states against that baseline rather
-than against each other, and builds a plan before writing anything.
-
-    read → normalise → resolve identities → compare against the baseline
-      → plan → safety check → write → record what actually landed
-
-**What this means in practice**
-
-* A route will not delete anything until it has one confirmed sync behind it.
-  The first run of a new route — and the first run of every existing route after
-  upgrading to this version — adds but never removes. The run after that behaves
-  normally.
-* A failed or incomplete provider read never causes a deletion. A timeout, an
-  expired token, a rate limit and a half-read page all look identical to "the
-  user deleted everything" if you only count what came back, so none of them is
-  allowed to justify a removal.
-* An item that was on the destination before the route existed, or that you
-  added by hand, is not the route's to delete. Only `mirror` touches those.
-* An item two routes both feed is only removed once *no* route still requires
-  it, so SIMKL and MDBList both feeding Trakt do not fight over a title that
-  left one of them.
-* A run where some writes failed is recorded as partial. The next run retries
-  what is still outstanding and does not repeat what landed.
-
-**The safety guard.** A removal of more than 25 items, or more than 20% of the
-destination, is paused rather than performed, and the preview says which
-threshold stopped it. Small lists are exempt — emptying a three-item list is
-100% and entirely ordinary. You can override a paused threshold from a preview;
-an automatic run never can. Some blocks cannot be overridden at all: an
-unreadable source or destination, a missing baseline, or a source returning
-nothing while the destination holds plenty. You may decide a large deletion is
-right; nobody can decide that a failed read really was empty.
-
-**Preview.** A dry run shows exactly what would happen, grouped into what will
-be added, updated and removed, plus conflicts, unresolved titles and warnings.
-Every row carries its reason — "Removed from the source since the last sync",
-"Destination item is unmanaged; keeping it". It is generated by the same planner
-that performs the real sync, so it cannot disagree with what actually runs.
-
-**Two-way routes** reconcile in a single pass rather than running one direction
-after the other. If only one side changed since the baseline, that side wins,
-whichever it is. If both changed and now agree, nothing happens. If both changed
-and still disagree, it is reported as a conflict and neither side is touched —
-letting run order pick a winner would silently discard one of your two edits.
-
-**Watch history** is a union. An episode missing from one service is not
-evidence to delete it elsewhere, because services expose different windows of
-the same history. The same watch arriving twice is recognised three ways: by the
-source's own event id, by this route's record of what it already carried, and by
-matching timestamps within a tolerance window — services stamp the same viewing
-minutes apart, so an exact match would make every hop look like a rewatch. A
-genuine second viewing is still a second play, and only goes to services that
-can store one.
-
-**Cleaning up duplicate plays.** Earlier versions matched plays on the exact
-second, so one watch relayed through several services could be recorded more
-than once. That no longer happens, but plays already written stay where they
-are — the engine will never remove them on its own, because to a union a
-duplicate looks exactly like a rewatch it should preserve.
-
-`POST /api/profile/history/duplicates` scans for them and reports what it found;
-it changes nothing. To actually delete, repeat the call with
-`{"confirm": true, "expected_redundant": N}` where N is the count the scan
-returned — a stale page cannot delete more than you agreed to. The earliest play
-of each group is kept, being the one closest to when you actually watched, and
-a genuine rewatch weeks later is never touched. If PublicMetaDB returns only
-part of your history the scan refuses to run at all, since half the history
-looks like half the duplicates.
-
-**Clearing the Library.** The Library page and the Danger Zone both offer
-*Clear Library*, which empties SyncMeta's own copy of your titles, watch history
-and resume points. Nothing is removed from SIMKL, Trakt, AniList, MDBList or
-PublicMetaDB — it only clears the local store.
-
-Routes that use the Library have their baselines dropped along with it, so they
-start over: the next run may add, but will not remove anything until it has
-completed once. Without that, a route reading *from* the Library would see its
-source go from thousands of items to none and read it as a mass deletion.
-
-**Route shapes.** The route editor warns about configurations that fight — two
-one-way routes pointing at each other (better as one two-way route) and loops
-(A → B → C → A, where no service is the authority). Neither is forbidden.
-
-## Profiles and access
-
-Each profile has its own credentials, list choices, history and schedule.
-Credentials are encrypted at rest and are never sent back to the browser.
-
-- Signing in needs the profile UUID and its password.
-- Changing the password needs the current password, whether or not you are
-  signed in. The UUID alone is not enough, because it is not a secret.
-- A password change signs the profile out of every other browser.
-- There is no password recovery. If both are lost, the profile is lost.
-- `SITE_ACCESS_PASSWORD` optionally puts one shared password in front of the
-  whole app before any of this.
-
-## Scheduling
-
-Defaults are deliberately gentle so SyncMeta does not crowd out other containers
-on a small server.
-
-| Sync | Default | Minimum |
-|---|---:|---:|
-| Each sync route | manual | 12h when automatic |
-
-Automatic runs are staggered by a per-profile jitter so profiles do not all
-start at once. Manual sync and dry run are always immediate.
-
-## Environment variables
-
-Only server-level settings belong in `.env`. API keys, list choices and sync
-rules are per profile in the web UI.
-
-Most of the variables below can also be edited in the admin panel
-(`/admin`, needs `ADMIN_PASSWORD`), which is the easier route on Docker: the
-`.env` file lives on the host, so there is nothing to edit from inside the
-container. Panel edits are stored in `data/settings.json` — beside
-`profiles.json`, on the mounted volume, so they survive a rebuild — and applied
-over the environment at startup. Precedence is:
-
-```
-built-in default  <  environment (.env / compose)  <  admin panel
+```bash
+docker compose up -d
 ```
 
-Each setting shows where its current value came from, and whether it needs a
-restart to take effect. `SYNCMETA_MASTER_KEY`, `SYNCMETA_MASTER_KEY_FILE`,
-`SYNCMETA_SESSION_SECRET` and `PROFILE_STORE_FILE` are shown but deliberately
-not editable there — a typo in any of them is data loss, not a bad setting.
+Open:
 
-Worker counts are clamped to the maximum shown; values above it are capped
-rather than rejected. Where the shipped `.env.example` sets something lower than
-the code default, both are listed.
+```text
+http://localhost:8080
+```
 
-### Storage and encryption
+The `.env` file is optional. SyncMeta can start with the defaults included in `docker-compose.yml`.
 
-Sync baselines live in `data/sync_state/<profile>.json`, beside the local
-Library, one file per profile. They hold one entry per item per category per
-route, which is far too much to keep in `profiles.json` — that file is rewritten
-on every profile change and read on every dashboard poll. Deleting a baseline
-file is safe: the affected routes re-enter their initialising state, so they add
-but do not remove until they have completed a run again.
+---
 
+# First Setup
 
-| Variable | Default | Description |
-|---|---:|---|
-| `PROFILE_STORE_FILE` | `/app/data/profiles.json` | Profile database. Mount `/app/data` or you lose everything on redeploy. |
-| `SYNCMETA_MASTER_KEY` | generated | Fernet key encrypting stored credentials. Must stay stable across restarts. |
-| `SYNCMETA_MASTER_KEY_FILE` | `/app/data/profiles.key` | File used when `SYNCMETA_MASTER_KEY` is empty. Never commit it. |
-| `ANILIST_ROOT_CACHE_FILE` | `data/anilist_root_cache.json` | Anime prequel-chain cache location. |
+### 1. Create a profile
 
-### Access control
+Open SyncMeta and enter a password.
 
-| Variable | Default | Description |
-|---|---:|---|
-| `ADMIN_PASSWORD` | empty | Enables `/admin` when set. |
-| `SITE_ACCESS_PASSWORD` | empty | Shared password gate in front of the whole app. |
-| `SYNCMETA_SESSION_SECRET` | master key | Signs browser session cookies. |
-| `SYNCMETA_SESSION_TTL_SECONDS` | `2592000` | Session lifetime, 30 days. |
-| `SYNCMETA_LOGIN_MAX_ATTEMPTS` | `10` | Failed profile sign-ins before a lockout. |
-| `SYNCMETA_LOGIN_WINDOW_SECONDS` | `900` | Lockout window for sign-in and password changes. |
-| `SYNCMETA_ACCESS_MAX_ATTEMPTS` | `10` | Same, for the `SITE_ACCESS_PASSWORD` gate. |
-| `SYNCMETA_ACCESS_WINDOW_SECONDS` | `900` | Lockout window for the site gate. |
+SyncMeta creates a unique profile UUID.
 
-### Scheduler
+Keep both:
 
-| Variable | Default | Description |
-|---|---:|---|
-| `DISABLE_PROFILE_SCHEDULER` | `0` | `1` turns off all automatic background sync. |
-| `SYNCMETA_SCHEDULER_POLL_SECONDS` | `5` | How often due profiles are checked. Minimum 5. |
-| `SYNCMETA_MAX_CONCURRENT_SYNCS` | `1` | Profiles allowed to sync at the same time. |
-| `SYNCMETA_SCHEDULER_STARTUP_GRACE_SECONDS` | `20` | Head start for the web tier before the first claim. `0` disables. |
-| `SYNCMETA_SCHEDULER_CLAIM_BATCH` | max concurrent | Profiles claimed per poll. |
-| `SYNCMETA_SCHEDULE_JITTER_SECONDS` | `900` | Maximum stagger applied to automatic runs. |
-| `SYNCMETA_LIST_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for list sync. |
-| `SYNCMETA_HISTORY_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for watch history. |
-| `SYNCMETA_RESUME_SYNC_JITTER_SECONDS` | schedule jitter | Overrides the above for resume progress. |
+```text
+Profile UUID
++
+Password
+```
 
-### Sync workers
+They are required to access the profile again.
 
-| Variable | Default | `.env.example` | Max | Description |
-|---|---:|---:|---:|---|
-| `SYNCMETA_SOURCE_SYNC_WORKERS` | `3` | `2` | 4 | Services fetched in parallel. |
-| `SYNCMETA_SIMKL_FETCH_WORKERS` | `3` | `2` | 8 | SIMKL status requests in parallel. |
-| `SYNCMETA_LIST_RESOLVE_WORKERS` | `2` | `2` | 6 | Id resolution for list rows. |
-| `SYNCMETA_LIST_WRITE_WORKERS` | `2` | `1` | 4 | Writes into PublicMetaDB lists. |
-| `SYNCMETA_ACTIVITY_SOURCE_WORKERS` | `2` | `2` | 3 | History and resume reads. |
-| `SYNCMETA_ACTIVITY_WRITE_WORKERS` | `1` | `1` | 4 | History and resume writes. |
-| `SYNCMETA_MAPPING_WRITE_WORKERS` | `1` | `1` | 4 | Mapping contribution writes. |
-| `SYNCMETA_PREWARM_WORKERS` | `2` | `2` | 4 | Anime prewarm workers. |
-| `SYNCMETA_ANILIST_PREWARM_LIMIT` | `100` | `50` | 200 | AniList root lookups prewarmed per run. `0` disables. |
+There is no password recovery.
 
-### Sync behaviour
+### 2. Connect services
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `SYNCMETA_PLAY_MATCH_WINDOW` | `900` | Seconds within which two records of the same episode count as one viewing rather than two. Services timestamp the same play differently, so matching on the exact second turns one watch into a new play at every hop. Raise it if duplicate plays appear; lower it only if you rewatch things faster than this. |
+Open:
 
-### Network timeouts
+```text
+Settings → Connections
+```
 
-Raise these on a slow or congested host, lower them to fail faster. Clamped to
-2-180 seconds.
+Connect the services you want to use.
 
-| Variable | Default | Description |
-|---|---:|---|
-| `SYNCMETA_TRAKT_READ_TIMEOUT` | `20` | Read timeout for Trakt. Was effectively 6s, which large watchlists exceeded. |
-| `SYNCMETA_SIMKL_READ_TIMEOUT` | `20` | Read timeout for SIMKL. |
-| `SYNCMETA_MDBLIST_READ_TIMEOUT` | `20` | Read timeout for MDBList. |
-| `SYNCMETA_ANILIST_READ_TIMEOUT` | `20` | Read timeout for AniList. |
-| `SYNCMETA_PMDB_READ_TIMEOUT` | `20` | Read timeout for PublicMetaDB. |
+The local SyncMeta Library is always available.
 
-### Logging and serving
+### 3. Create a sync route
 
-| Variable | Default | Description |
-|---|---:|---|
-| `SYNCMETA_PROFILE_LOG_LIMIT` | `500` | Log lines kept per profile. Minimum 100. |
-| `SYNCMETA_GUNICORN_WORKERS` | `1` | Gunicorn workers. **Keep at 1** — see below. |
-| `SYNCMETA_GUNICORN_THREADS` | `6` | Gunicorn threads. Raise this, not workers. |
-| `SYNCMETA_GUNICORN_TIMEOUT` | `120` | Gunicorn request timeout in seconds. |
+Open:
 
-### Docker limits
+```text
+Settings → Sync Routes
+```
 
-Read by `docker-compose.yml`, not by the app.
+Choose:
 
-| Variable | Default | Description |
-|---|---:|---|
-| `SYNCMETA_CPU_LIMIT` | `1.0` | CPU limit for the container. |
-| `SYNCMETA_MEMORY_LIMIT` | `1536m` | Memory limit. |
-| `SYNCMETA_MEMORY_RESERVATION` | `768m` | Memory reservation. |
+```text
+Source
+↓
+Content
+↓
+Destination
+```
 
-### Two things to know
+Example:
 
+```text
+SIMKL
+  ↓
+Watchlist + History
+  ↓
+Trakt
+```
 
-**Never run more than one Gunicorn worker.** The scheduler and the sync runner
-live inside the web process, so a second worker is a second scheduler claiming
-and running every sync a second time. Raise `SYNCMETA_GUNICORN_THREADS` instead
-— threads share the one process and are what keep the dashboard answering while
-a sync is blocked on a slow provider.
+### 4. Preview
 
-**Provider variables in `src/config.py` are dead.** `SIMKL_*`, `TRAKT_*`,
-`ANILIST_*`, `MDBLIST_*`, `PMDB_API_KEY` and `SYNC_*` are left over from the
-removed command-line entry point; nothing reads them. Configure providers in
-the UI.
+Run **Preview** before the first real synchronization.
 
-## Running on a small VPS
+The dry run shows:
 
-The shipped `docker-compose.yml` already limits SyncMeta to one concurrent sync,
-one PublicMetaDB write worker, and one Gunicorn worker with two threads. Start
-there. If it still competes with your other containers:
+* Items that will be added
+* Items that will be updated
+* Items that will be removed
+* Conflicts
+* Unresolved titles
+* Safety warnings
+
+Nothing is written during a preview.
+
+### 5. Enable automatic sync
+
+Routes are manual by default.
+
+Automatic synchronization can be enabled individually for each route.
+
+---
+
+# Sync Routes
+
+A route describes how data should move between two services.
+
+```text
+Source ───────────→ Destination
+```
+
+or:
+
+```text
+Service A ←──────→ Service B
+```
+
+Each route has its own:
+
+* Source
+* Destination
+* Content types
+* Synchronization direction
+* Removal policy
+* Schedule
+* Baseline
+* Sync history
+
+Services communicate directly.
+
+SyncMeta does not force everything through PublicMetaDB or the local Library.
+
+---
+
+# Safe Synchronization
+
+SyncMeta is designed to avoid destructive synchronization mistakes.
+
+Instead of simply comparing two lists, every route keeps a **baseline** containing the last state that both sides agreed on.
+
+The synchronization pipeline looks roughly like this:
+
+```text
+Read
+  ↓
+Normalize
+  ↓
+Resolve identities
+  ↓
+Compare against baseline
+  ↓
+Create sync plan
+  ↓
+Safety checks
+  ↓
+Write changes
+  ↓
+Update baseline
+```
+
+This lets SyncMeta distinguish between:
+
+```text
+Added on source
+Removed on source
+Added on destination
+Removed on destination
+Changed on both sides
+```
+
+rather than treating every difference as the same thing.
+
+---
+
+## First-run protection
+
+A new route will not immediately start deleting content.
+
+The first successful synchronization establishes its baseline.
+
+Until that baseline exists:
+
+```text
+Adds     → allowed
+Removals → blocked
+```
+
+This also applies when a route's baseline is reset.
+
+---
+
+## Failed reads cannot cause deletions
+
+A provider returning an incomplete response must never look like:
+
+```text
+"The user deleted everything"
+```
+
+Therefore an incomplete or failed provider read cannot justify removing content.
+
+Examples include:
+
+* API timeout
+* Expired token
+* Rate limit
+* Partial pagination
+* Provider outage
+
+---
+
+## Deletion guard
+
+Large removals are paused for confirmation.
+
+By default, SyncMeta stops a removal when it would affect:
+
+```text
+more than 25 items
+
+or
+
+more than 20% of the destination
+```
+
+The preview explains why the operation was stopped.
+
+Automatic synchronization cannot override these safety checks.
+
+---
+
+# Two-Way Sync
+
+Two-way routes reconcile both services in one operation.
+
+```text
+Trakt ←──────→ SIMKL
+```
+
+SyncMeta compares both sides against their previous baseline.
+
+If only one side changed:
+
+```text
+Changed side wins
+```
+
+If both sides changed to the same state:
+
+```text
+No action required
+```
+
+If both sides changed differently:
+
+```text
+Conflict
+```
+
+Neither side is silently overwritten.
+
+---
+
+# Watch History
+
+Watch history is treated as a set of viewing events rather than a simple watched/unwatched list.
+
+SyncMeta attempts to recognize the same playback event when it appears on multiple services.
+
+This prevents a single watch from becoming multiple plays when it travels through several providers.
+
+A genuine rewatch remains a separate play.
+
+---
+
+# Resume Progress
+
+Resume positions can currently be read from compatible providers such as:
+
+```text
+SIMKL
+Trakt
+PublicMetaDB
+SyncMeta Library
+```
+
+Routes only expose combinations supported by both the source and destination.
+
+SyncMeta also avoids moving playback progress backwards.
+
+Very small progress values are treated as accidental opens while nearly completed titles are treated as completed instead of resumable.
+
+---
+
+# Anime Support
+
+Anime synchronization is one of the areas where provider data differs the most.
+
+SyncMeta resolves identities using data from sources such as:
+
+```text
+AniList
+MyAnimeList
+SIMKL
+TMDB
+IMDb
+```
+
+with additional mappings from the Fribb anime-lists project.
+
+It can normalize:
+
+```text
+separate cours
+sequel seasons
+provider-specific season entries
+```
+
+into the same underlying series.
+
+Low-confidence matches are not guessed automatically.
+
+They are shown as unresolved so they can be mapped manually.
+
+---
+
+# SyncMeta Library
+
+The built-in Library provides a provider-neutral representation of your media data.
+
+It supports:
+
+* Movies
+* Shows
+* Anime
+* Anime movies
+* Watchlist
+* Collection
+* History
+* Resume progress
+* Watched episodes
+* Seasons
+* Search
+* Filtering
+* Sorting
+* Pagination
+
+Series are stored as a single title with seasons underneath it.
+
+This helps normalize differences such as:
+
+```text
+SIMKL season entries
+AniList cours
+Trakt series/seasons
+```
+
+into one consistent structure.
+
+A TMDB API key can additionally provide richer metadata such as:
+
+* Titles
+* Posters
+* Season information
+* Episode names
+
+The Library still works without TMDB enrichment.
+
+---
+
+# Dashboard
+
+The dashboard provides an overview of your synchronization setup.
+
+It displays:
+
+* Saved routes
+* Provider status
+* Recent activity
+* Sync progress
+* Warnings
+* Errors
+* Route relationships
+
+Routes are visually grouped by destination so more complex synchronization setups remain understandable.
+
+---
+
+# Diagnostics
+
+Every synchronization records detailed information about what happened.
+
+Diagnostics include:
+
+* Added items
+* Updated items
+* Removed items
+* Failed items
+* Unresolved titles
+* Provider errors
+* Timings
+* Warnings
+* Partial runs
+
+Detailed information for recent synchronization runs is available directly from the web interface.
+
+---
+
+# Connection Health
+
+SyncMeta periodically verifies connected providers using read-only API requests.
+
+The Connections page shows:
+
+```text
+Connection state
+Read capability
+Write capability
+Last health check
+Reconnect actions
+```
+
+Routes can therefore show whether their required providers are ready before synchronization begins.
+
+---
+
+# Profiles & Security
+
+Every SyncMeta profile has its own:
+
+* Connected accounts
+* Credentials
+* Routes
+* Library
+* History
+* Schedules
+* Settings
+
+Provider credentials are encrypted at rest.
+
+They are not returned to the browser after being stored.
+
+A profile is accessed using:
+
+```text
+UUID + password
+```
+
+Changing the password invalidates existing sessions.
+
+---
+
+## Optional site password
+
+A shared password can be placed in front of the complete application:
+
+```env
+SITE_ACCESS_PASSWORD=your-password
+```
+
+---
+
+## Admin interface
+
+Set:
+
+```env
+ADMIN_PASSWORD=your-password
+```
+
+to enable:
+
+```text
+/admin
+```
+
+The admin interface provides access to:
+
+* Profile overview
+* Queue state
+* API counters
+* Runtime configuration
+* Anime cache maintenance
+* Anime mapping refresh
+
+Most server settings can be changed there without editing `.env`.
+
+---
+
+# Configuration
+
+Copy the example configuration if you want to override the defaults:
+
+```bash
+cp .env.example .env
+```
+
+Most provider credentials and synchronization settings should be configured through the web interface.
+
+The `.env` file is primarily for server-level configuration.
+
+---
+
+## Important variables
+
+| Variable                        | Purpose                                   |
+| ------------------------------- | ----------------------------------------- |
+| `ADMIN_PASSWORD`                | Enables the admin interface               |
+| `SITE_ACCESS_PASSWORD`          | Password protecting the whole application |
+| `SYNCMETA_MASTER_KEY`           | Encryption key for stored credentials     |
+| `PROFILE_STORE_FILE`            | Profile database location                 |
+| `SYNCMETA_MAX_CONCURRENT_SYNCS` | Maximum simultaneous synchronization jobs |
+| `SYNCMETA_CPU_LIMIT`            | Docker CPU limit                          |
+| `SYNCMETA_MEMORY_LIMIT`         | Docker memory limit                       |
+| `SYNCMETA_GUNICORN_THREADS`     | HTTP worker threads                       |
+| `DISABLE_PROFILE_SCHEDULER`     | Disable automatic synchronization         |
+
+See [.env.example](.env.example) for all supported options.
+
+---
+
+## Persistent storage
+
+Docker mounts:
+
+```text
+./data → /app/data
+```
+
+Important persistent data includes:
+
+```text
+profiles
+credentials
+local library
+sync baselines
+settings
+anime caches
+```
+
+Do not delete the data directory unless you intentionally want to reset SyncMeta.
+
+---
+
+# Important Docker Note
+
+Keep:
+
+```env
+SYNCMETA_GUNICORN_WORKERS=1
+```
+
+The scheduler and synchronization runner live inside the application process.
+
+Running multiple Gunicorn processes would therefore create multiple schedulers capable of running the same synchronization jobs.
+
+Use additional threads instead:
+
+```env
+SYNCMETA_GUNICORN_THREADS=6
+```
+
+---
+
+# Small VPS Configuration
+
+SyncMeta is designed to run alongside other containers.
+
+The included Docker Compose configuration already uses conservative defaults.
+
+For smaller servers you can reduce its limits further:
 
 ```env
 SYNCMETA_CPU_LIMIT=0.5
 SYNCMETA_MEMORY_LIMIT=1024m
+SYNCMETA_MAX_CONCURRENT_SYNCS=1
 SYNCMETA_ANILIST_PREWARM_LIMIT=0
 ```
 
-Then raise the list sync interval in the UI.
+Longer automatic synchronization intervals can also substantially reduce resource usage.
 
-## Health check
+---
+
+# Health Check
+
+Check whether SyncMeta is running:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
 ```
 
+Expected response:
+
 ```json
-{"ok":true,"service":"syncmeta"}
+{
+  "ok": true,
+  "service": "syncmeta"
+}
 ```
 
-## Development
+Docker also includes a built-in container health check.
+
+---
+
+# Updating
+
+Pull the newest container:
+
+```bash
+docker compose pull
+```
+
+Restart SyncMeta:
+
+```bash
+docker compose up -d
+```
+
+The persistent `data` directory remains untouched.
+
+---
+
+# Development
+
+Clone the repository:
+
+```bash
+git clone https://github.com/Febsho/SyncMeta.git
+cd SyncMeta
+```
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-python web.py                      # http://127.0.0.1:8080
-python -m unittest discover -v     # full suite, no exclusions
 ```
 
-If `cryptography` fails to import with a `pyo3_runtime.PanicException`, the
-distro package is broken; reinstall the wheel:
+Start the development server:
 
 ```bash
-pip install --ignore-installed "cryptography>=42,<44"
+python web.py
 ```
 
-## Troubleshooting
+Open:
 
-- **High CPU.** Keep one concurrent sync, raise the sync intervals, set
-  `SYNCMETA_ANILIST_PREWARM_LIMIT=0`, keep write workers at 1.
-- **Wrong anime matches.** Use the unresolved mapping tools on the dashboard, or
-  the anime cache repair action in `/admin`.
-- **Stale anime data.** `/admin` -> Update Anime Lists. Refresh is ETag-aware and
-  keeps the current data if it fails.
-- **Expired tokens.** Reconnect that service in Settings -> Connections.
-- **PublicMetaDB write errors.** Latest Sync Results -> Details, or Sync History
-  -> Details, for the row-level error.
-- **Empty local Library.** Add and run a route with **Library** as its target.
-  A TMDB API key is optional and only enriches titles, posters and episodes.
-- **A provider list is missing.** Check that the account is connected, refresh
-  the Library tab, and confirm the credential can read private/account lists.
+```text
+http://127.0.0.1:8080
+```
 
-## License
+Run the test suite:
 
-MIT. See [LICENSE](LICENSE).
+```bash
+python -m unittest discover -v
+```
+
+---
+
+# Troubleshooting
+
+### Provider connection stopped working
+
+Reconnect the provider under:
+
+```text
+Settings → Connections
+```
+
+Expired OAuth tokens are a common cause.
+
+### Anime was matched incorrectly
+
+Use the unresolved mapping tools or the repair tools available from the admin interface.
+
+### Provider list is missing
+
+Verify that:
+
+* The provider is connected
+* The credential can access private lists
+* The Library/provider view has been refreshed
+
+### Local Library is empty
+
+Create a route where:
+
+```text
+Destination → Library
+```
+
+and run it once.
+
+### High CPU usage
+
+Reduce concurrency and background work:
+
+```env
+SYNCMETA_MAX_CONCURRENT_SYNCS=1
+SYNCMETA_ANILIST_PREWARM_LIMIT=0
+```
+
+and increase automatic synchronization intervals.
+
+### Sync failed
+
+Open the latest synchronization result and inspect its details.
+
+SyncMeta stores row-level errors and provider failures to make failed items identifiable without guessing.
+
+---
+
+# Project Philosophy
+
+SyncMeta is built around three principles:
+
+### Provider neutral
+
+No provider is required to be the central source of truth.
+
+```text
+SIMKL → Trakt
+
+Trakt → MDBList
+
+AniList → Library
+
+Library → PublicMetaDB
+```
+
+are all valid setups.
+
+### Safe by default
+
+Synchronization should never turn an API outage into a mass deletion.
+
+Baseline tracking, previews and deletion guards are built directly into the sync engine.
+
+### Observable
+
+SyncMeta should show what it plans to change, what it actually changed and why.
+
+The same planner used for previews performs the real synchronization.
+
+---
+
+# License
+
+SyncMeta is released under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+
+**Sync your watch data without locking it to a single service.**
+
+[Source](https://github.com/Febsho/SyncMeta) · [Issues](https://github.com/Febsho/SyncMeta/issues)
+
+</div>
