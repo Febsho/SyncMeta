@@ -145,6 +145,7 @@ def _batch(
     count_key: str,
     result: ExecutionResult,
     dry_run: bool,
+    verifier=None,
 ) -> list[PlannedAction]:
     """Send one batch and record an outcome for every action in it."""
     if not actions:
@@ -152,6 +153,10 @@ def _batch(
     if dry_run:
         for action in actions:
             result.outcomes.append(ActionOutcome(action, STATUS_SKIPPED))
+        if count_key == "added":
+            result.added += len(actions)
+        else:
+            result.removed += len(actions)
         return []
 
     items = [action.item for action in actions]
@@ -166,16 +171,48 @@ def _batch(
         logger.warning("Sync write failed for %d action(s)", len(actions), exc_info=True)
         return []
 
-    # The adapter says how many landed but not which. Treat the batch in order:
-    # the confirmed ones succeeded, the remainder stays outstanding rather than
-    # being claimed either way.
-    confirmed = max(0, min(_count(totals, count_key), len(actions)))
-    applied = actions[:confirmed]
-    rest = actions[confirmed:]
-    # The provider may say how many it could not match. Those are permanent;
-    # anything left over is simply unaccounted for and stays outstanding.
-    reported_missing = max(0, min(_count(totals, "not_found"), len(rest)))
-    unmatched, unconfirmed = rest[:reported_missing], rest[reported_missing:]
+    by_key = {str(action.key): action for action in actions}
+
+    def _reported_keys(*names: str) -> set[str]:
+        found: set[str] = set()
+        for name in names:
+            raw = totals.get(name)
+            if isinstance(raw, dict):
+                raw = raw.keys()
+            if not isinstance(raw, (list, tuple, set)):
+                continue
+            found.update(str(value) for value in raw if str(value) in by_key)
+        return found
+
+    confirmed_keys = _reported_keys("confirmed_keys", "accepted_keys", "applied_keys")
+    missing_keys = _reported_keys("not_found_keys", "unresolved_keys", "rejected_keys")
+    reported_confirmed = max(0, min(_count(totals, count_key), len(actions)))
+    reported_missing = max(0, min(_count(totals, "not_found"), len(actions)))
+
+    if confirmed_keys or missing_keys:
+        # Exact provider receipts are authoritative. Anything not explicitly
+        # accounted for remains outstanding; a count may describe the batch but
+        # cannot identify an item.
+        applied = [action for action in actions if action.key in confirmed_keys]
+        unmatched = [action for action in actions if action.key in missing_keys]
+        accounted = confirmed_keys | missing_keys
+        unconfirmed = [action for action in actions if action.key not in accounted]
+    elif reported_confirmed == len(actions) and reported_missing == 0:
+        # A full-batch acknowledgement identifies every item even without keys.
+        applied, unmatched, unconfirmed = list(actions), [], []
+    else:
+        # A short aggregate response does *not* identify which items landed.
+        # The previous implementation assigned success to the first N actions,
+        # which could permanently advance the wrong baseline entries.
+        verified = set()
+        if verifier is not None:
+            try:
+                verified = {str(key) for key in (verifier(actions) or ())}
+            except Exception:
+                logger.warning("Could not verify an ambiguous sync response", exc_info=True)
+        applied = [action for action in actions if action.key in verified]
+        unmatched = []
+        unconfirmed = [action for action in actions if action.key not in verified]
 
     for action in applied:
         result.outcomes.append(ActionOutcome(action, STATUS_SUCCESS))
@@ -217,6 +254,8 @@ def execute_plan(
     *,
     add_writer=None,
     remove_writer=None,
+    add_verifier=None,
+    remove_verifier=None,
     dry_run: bool = False,
 ) -> ExecutionResult:
     """Carry out ``plan``, one batch per kind, recording every action's fate.
@@ -245,6 +284,7 @@ def execute_plan(
         _batch(
             list(plan.removals), remove_writer,
             count_key="deleted", result=result, dry_run=dry_run,
+            verifier=remove_verifier,
         )
 
     if plan.additions and add_writer is None and not dry_run:
@@ -256,6 +296,7 @@ def execute_plan(
         _batch(
             list(plan.additions), add_writer,
             count_key="added", result=result, dry_run=dry_run,
+            verifier=add_verifier,
         )
 
     if dry_run:

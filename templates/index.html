@@ -9627,6 +9627,9 @@
       const year = action.year ? ` <span class="c-dim">(${escAttr(action.year)})</span>` : '';
       return `
         <div class="preview-item">
+          ${['additions', 'updates', 'removals'].includes(section.key)
+            ? `<input type="checkbox" class="plan-action-choice" data-action-id="${escAttr(action.action_id || '')}" checked aria-label="Select ${escAttr(action.title || 'change')}">`
+            : ''}
           <span class="preview-item-sign ${section.tone}">${section.sign}</span>
           <span>
             ${esc(action.title || 'Unknown')}${year}
@@ -9761,7 +9764,33 @@
       document.addEventListener('keydown', onKey);
       el('preview-dialog-cancel').onclick = close;
       overlay.onclick = (event) => { if (event.target === overlay) close(); };
-      if (apply) apply.onclick = () => { close(); runPairs(null, false); };
+      if (apply) apply.onclick = async () => {
+        const selected = (plans || []).flatMap(plan =>
+          ['additions', 'updates', 'removals'].flatMap(key =>
+            (plan[key] || []).map(action => action.action_id).filter(Boolean)));
+        const unchecked = new Set([...body.querySelectorAll('.plan-action-choice:not(:checked)')]
+          .map(node => node.dataset.actionId).filter(Boolean));
+        const reviewed = selected.filter(actionId => !unchecked.has(actionId));
+        const fingerprints = {};
+        (plans || []).forEach(plan => {
+          fingerprints[`${plan.route_id}:${plan.category}`] = plan.plan_fingerprint;
+        });
+        close();
+        const response = await apiPost('/api/profile/pairs/run', {
+          dry_run: false, background: false,
+          bypass_large_removal_guard: blocked,
+          selected_action_ids: reviewed,
+          expected_plan_fingerprints: fingerprints,
+        });
+        if (!response.ok) {
+          showToast(formatApiError(response.data, 'Could not apply the reviewed changes.'), true, false);
+          return;
+        }
+        renderPairResults(response.data.results || [], false);
+        showToast(`Applied ${reviewed.length} reviewed change${reviewed.length === 1 ? '' : 's'}.`, false, true);
+        await fetchPairs();
+        _forceStatusRefresh();
+      };
       el('preview-dialog-cancel').focus();
     }
 
@@ -11501,6 +11530,8 @@
         name: '',
         source: source,
         target: target,
+        source_instance: 'default',
+        target_instance: 'default',
         categories: ['watchlist'],
         source_lists: [],
         target_list: '',
@@ -11521,6 +11552,8 @@
         name: pair.name || '',
         source: pair.source,
         target: pair.target,
+        source_instance: pair.source_instance || 'default',
+        target_instance: pair.target_instance || 'default',
         categories: pair.categories || [],
         source_lists: pair.source_lists || [],
         target_list: pair.target_list || '',

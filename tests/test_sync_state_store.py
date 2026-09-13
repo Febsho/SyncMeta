@@ -94,6 +94,27 @@ class BaselineLifecycleTests(unittest.TestCase):
             for key in keys
         }
 
+    def test_tombstone_blocks_stale_resurrection_but_not_new_activity(self) -> None:
+        self.store.record_tombstone("r1", "watchlist", "movie:tmdb:1")
+        self.assertTrue(self.store.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", {"title": "Old"},
+        ))
+        self.assertFalse(self.store.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", {"added_at": "2999-01-01T00:00:00Z"},
+        ))
+
+    def test_retries_and_captures_survive_reopen(self) -> None:
+        self.store.record_retry(
+            "r1", "watchlist", "add", "movie:tmdb:1",
+            {"title": "Dune", "tmdb_id": 1}, "unconfirmed",
+        )
+        capture_id = self.store.create_capture(
+            "r1", "watchlist", "trakt", "", [{"title": "Dune", "tmdb_id": 1}],
+        )
+        reopened = SyncStateStore(self.path)
+        self.assertEqual(reopened.pending_retries()[0]["attempts"], 1)
+        self.assertEqual(reopened.capture(capture_id)["items"][0]["title"], "Dune")
+
     def test_a_route_that_never_ran_may_not_remove(self) -> None:
         baseline = self.store.baseline("r1", "watchlist")
         self.assertEqual(baseline.phase, PHASE_INITIALIZING)

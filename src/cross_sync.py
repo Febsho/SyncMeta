@@ -27,11 +27,20 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
-from .sync.executor import execute_plan
+from .sync.executor import (
+    STATUS_BLOCKED,
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    STATUS_UNCONFIRMED,
+    execute_plan,
+)
 from .sync.ownership import OwnershipIndex, destination_scope
 from .sync.history import event_id, plan_history
 from .sync.progress import plan_progress
 from .sync.planner import (
+    ACTION_ADD,
+    ACTION_REMOVE,
+    ACTION_SKIP,
     SyncPlan,
     normalize_policy,
     plan_membership,
@@ -66,6 +75,14 @@ from .providers import (
 )
 
 logger = logging.getLogger(__name__)
+
+REASON_TOMBSTONED = "A recent deletion from another route blocks stale resurrection"
+REASON_NOT_SELECTED = "Not selected in the reviewed preview"
+REASON_UNCERTAIN_HISTORY = "A previous history write was unconfirmed; not replaying it automatically"
+
+
+class StalePlanError(RuntimeError):
+    """The live provider state no longer matches the preview being applied."""
 
 
 def _total(totals: dict, key: str) -> int:
@@ -376,6 +393,8 @@ class CrossSyncService:
         guard_removal_percent: int = 20,
         state_store=None,
         allow_destructive_override: bool = False,
+        selected_action_ids=None,
+        expected_plan_fingerprints=None,
     ):
         self._adapters = dict(adapters or {})
         # Baselines, when the caller has them. Optional so every existing test
@@ -398,6 +417,13 @@ class CrossSyncService:
         # ever waives a *hard* block — an unreadable source or a missing
         # baseline is bad evidence, not a decision anyone gets to make.
         self._allow_destructive_override = bool(allow_destructive_override)
+        self._selected_action_ids = (
+            None if selected_action_ids is None
+            else {str(value) for value in selected_action_ids if str(value)}
+        )
+        self._expected_plan_fingerprints = {
+            str(key): str(value) for key, value in (expected_plan_fingerprints or {}).items()
+        }
         # {pair_id: {category: [key, ...]}} — keys this pair has written before.
         self._managed_keys = {
             str(pair_id): {
@@ -410,9 +436,8 @@ class CrossSyncService:
         # Server-side only: these key sets are far too large to ride /status,
         # which is why they are not folded into PairCategoryStats.
         self._route_states: dict[tuple[str, str], RouteObservation] = {}
-        # Plans built alongside the live decision. Reported, not yet obeyed —
-        # switching execution onto them is the next step, and running them in
-        # parallel first is what makes that switch reviewable against real data.
+        # The immutable plans used by both preview and execution. Keeping the
+        # exact objects makes the UI's explanation match the writes performed.
         self._plans: dict[tuple[str, str], SyncPlan] = {}
         self._plan_verdicts: dict = {}
         self._plan_blocked_items: dict = {}
@@ -483,10 +508,17 @@ class CrossSyncService:
             for pair_id, categories in self._managed_keys.items()
         }
 
+    def _adapter_for(self, pair, side: str):
+        provider = str(getattr(pair, side, "") or "")
+        instance = str(getattr(pair, f"{side}_instance", "default") or "default")
+        return self._adapters.get(
+            provider if instance == "default" else f"{provider}@{instance}"
+        )
+
     def validate_pair(self, pair) -> str:
         """Return an empty string when the pair can run, else why it cannot."""
-        source = self._adapters.get(pair.source)
-        target = self._adapters.get(pair.target)
+        source = self._adapter_for(pair, "source")
+        target = self._adapter_for(pair, "target")
         if source is None:
             return f"Source '{pair.source}' is not configured."
         if target is None:
@@ -609,8 +641,8 @@ class CrossSyncService:
             logger.warning("Skipping pair %s: %s", pair.display_name(), problem)
             return stats
 
-        source = self._adapters[pair.source]
-        target = self._adapters[pair.target]
+        source = self._adapter_for(pair, "source")
+        target = self._adapter_for(pair, "target")
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
         if two_way:
@@ -657,7 +689,7 @@ class CrossSyncService:
                 return adapter.fetch(category, lists) or []
             before = cache.hits
             items = cache.get_or_fetch(
-                adapter.key, category, lists, lambda: adapter.fetch(category, lists),
+                adapter.identity, category, lists, lambda: adapter.fetch(category, lists),
             )
             if cache.hits > before:
                 result.cached_reads += 1
@@ -684,7 +716,7 @@ class CrossSyncService:
             else:
                 before = cache.hits
                 target_items = cache.get_or_fetch(
-                    target.key, category, [target_list] if target_list else None,
+                    target.identity, category, [target_list] if target_list else None,
                     lambda: target.fetch_target(category, target_list),
                 )
                 if cache.hits > before:
@@ -820,7 +852,61 @@ class CrossSyncService:
         wrote_added: list[dict] = []
         wrote_removed: list[dict] = []
 
-        if to_add:
+        if plan is not None:
+            plan = self._reviewed_plan(plan)
+            plan = self._filter_tombstoned_adds(pair, category, plan)
+            self._plans[(str(pair.pair_id), str(category))] = plan
+            self._capture_plan(pair, category, target, target_list, plan)
+            executable = replace(
+                plan, additions=tuple(plan.additions) + tuple(plan.updates), updates=(),
+            )
+
+            def _add(items):
+                write_items = [
+                    {**item, "_syncmeta_source_provider": source.key}
+                    for item in items
+                ] if target.key == "library" else items
+                return target.add(
+                    category, write_items, target_list, **_add_kwargs(target, pair),
+                )
+
+            execution = execute_plan(
+                executable, add_writer=_add,
+                remove_writer=lambda items: target.remove(category, items, target_list),
+                add_verifier=self._membership_verifier(
+                    target, category, target_list, removing=False,
+                ) if category in _PLANNED_CATEGORIES else None,
+                remove_verifier=self._membership_verifier(
+                    target, category, target_list, removing=True,
+                ) if category in _PLANNED_CATEGORIES else None,
+                dry_run=self._dry_run,
+            )
+            result.added = execution.added
+            result.removed = execution.removed
+            result.unmapped += execution.not_found
+            wrote_added = [
+                outcome.action.item for outcome in execution.outcomes
+                if outcome.status == STATUS_SUCCESS and outcome.action.kind != ACTION_REMOVE
+            ]
+            wrote_removed = [
+                outcome.action.item for outcome in execution.outcomes
+                if outcome.status == STATUS_SUCCESS and outcome.action.kind == ACTION_REMOVE
+            ]
+            if execution.outstanding():
+                result.errors.append(
+                    f"{len(execution.outstanding())} {category} write(s) were not confirmed"
+                )
+            if cache is not None and (execution.errors or execution.outstanding()):
+                cache.invalidate_provider(target.identity)
+            result.changes.extend(self._change_rows(wrote_added, "added", category))
+            result.changes.extend(self._change_rows(wrote_removed, "removed", category))
+            self._record_execution_state(
+                pair, category, execution, source=source.key, target=target.key,
+            )
+            self._verify_removals(
+                pair, category, target, target_list, wrote_removed, result,
+            )
+        elif to_add:
             if self._dry_run:
                 result.added = len(to_add)
             else:
@@ -843,9 +929,9 @@ class CrossSyncService:
                     # A partial write may have landed; the cached view of this
                     # target can no longer be trusted by later pairs.
                     if cache is not None:
-                        cache.invalidate_provider(target.key)
+                        cache.invalidate_provider(target.identity)
 
-        if to_remove:
+        if plan is None and to_remove:
             if self._dry_run:
                 result.removed = len(to_remove)
             else:
@@ -862,17 +948,17 @@ class CrossSyncService:
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
                     if cache is not None:
-                        cache.invalidate_provider(target.key)
+                        cache.invalidate_provider(target.identity)
 
         # Keep the batch cache honest: another pair writing to this same target
         # must see what this one just did, or it would re-add the same items.
         if cache is not None and not self._dry_run and (wrote_added or wrote_removed):
             cache.apply_write(
-                target.key, category, [target_list] if target_list else None,
+                target.identity, category, [target_list] if target_list else None,
                 added=wrote_added, removed=wrote_removed,
             )
 
-        self._record_managed_keys(pair, category, source_by_key, to_remove, result)
+        self._record_managed_keys(pair, category, wrote_added, wrote_removed, result)
         if is_history:
             self._commit_history_baseline(pair, category, result, history_plan, wrote_added)
         self._commit_baseline(
@@ -926,7 +1012,7 @@ class CrossSyncService:
                 return loader() or []
             before = cache.hits
             items = cache.get_or_fetch(
-                adapter.key, category, lists, loader,
+                adapter.identity, category, lists, loader,
             )
             if cache.hits > before:
                 result.cached_reads += 1
@@ -1112,7 +1198,7 @@ class CrossSyncService:
                         result.unmapped += _total(totals, "not_found")
                     if cache is not None:
                         cache.apply_write(
-                            adapter.key, category,
+                            adapter.identity, category,
                             None if reverse else ([target_list] if target_list else None),
                             added=items if verb == "add" else [],
                             removed=items if verb == "remove" else [],
@@ -1125,7 +1211,7 @@ class CrossSyncService:
                     result.errors.append(message)
                     logger.warning("Pair %s: %s", pair.display_name(), message, exc_info=True)
                     if cache is not None:
-                        cache.invalidate_provider(adapter.key)
+                        cache.invalidate_provider(adapter.identity)
                     continue
             if verb == "add":
                 if reverse:
@@ -1364,7 +1450,11 @@ class CrossSyncService:
             logger.warning("Could not build two-way sync plan", exc_info=True)
             return None
 
-        self._plans[(str(pair.pair_id), str(category))] = two_way.forward
+        combined_plan = self._combined_two_way_plan(
+            two_way.forward, two_way.backward, two_way.conflicts,
+        )
+        self._reviewed_plan(combined_plan)  # freshness check for the whole preview
+        self._plans[(str(pair.pair_id), str(category))] = combined_plan
         result.skipped_existing = len(set(first_by_key) & set(second_by_key))
 
         target_list = self._effective_target_list(pair, category)
@@ -1374,6 +1464,7 @@ class CrossSyncService:
             (two_way.forward, second, first, target_list),
             (two_way.backward, first, second, ""),
         ):
+            plan = self._reviewed_plan(plan, check_freshness=False)
             verdict = evaluate_safety(
                 plan,
                 policy=SafetyPolicy(
@@ -1490,10 +1581,14 @@ class CrossSyncService:
             logger.warning("Could not build two-way history plan", exc_info=True)
             return None
 
-        self._plans[(str(pair.pair_id), str(category))] = forward.plan
+        combined_plan = self._combined_two_way_plan(forward.plan, backward.plan)
+        self._reviewed_plan(combined_plan)
+        forward_plan = self._reviewed_plan(forward.plan, check_freshness=False)
+        backward_plan = self._reviewed_plan(backward.plan, check_freshness=False)
+        self._plans[(str(pair.pair_id), str(category))] = combined_plan
         executions = [
             self._apply_two_way_side(pair, category, plan, target, result)
-            for plan, target in ((forward.plan, second), (backward.plan, first))
+            for plan, target in ((forward_plan, second), (backward_plan, first))
         ]
 
         if self._state_store is not None and not self._dry_run:
@@ -1579,7 +1674,11 @@ class CrossSyncService:
             logger.warning("Could not build two-way progress plan", exc_info=True)
             return None
 
-        self._plans[(str(pair.pair_id), str(category))] = forward
+        combined_plan = self._combined_two_way_plan(forward, backward)
+        self._reviewed_plan(combined_plan)
+        forward = self._reviewed_plan(forward, check_freshness=False)
+        backward = self._reviewed_plan(backward, check_freshness=False)
+        self._plans[(str(pair.pair_id), str(category))] = combined_plan
         result.conflicts_detected = len(forward.conflicts) + len(backward.conflicts)
         for plan, target in ((forward, second), (backward, first)):
             self._apply_two_way_side(pair, category, plan, target, result)
@@ -1589,9 +1688,11 @@ class CrossSyncService:
         self, pair, category, plan, target, result, target_list: str = "",
     ):
         """Write one direction and retain every action's confirmed outcome."""
-        forward = target.key == pair.target
+        forward = target is self._adapter_for(pair, "target")
         # The executor deliberately accounts for short batch responses item by
         # item.  Updates are provider upserts, so execute them as additions.
+        plan = self._filter_tombstoned_adds(pair, category, plan)
+        self._capture_plan(pair, category, target, target_list, plan)
         executable = replace(
             plan, additions=tuple(plan.additions) + tuple(plan.updates), updates=(),
         )
@@ -1601,6 +1702,12 @@ class CrossSyncService:
                 category, items, target_list, **_add_kwargs(target, pair),
             ),
             remove_writer=lambda items: target.remove(category, items, target_list),
+            add_verifier=self._membership_verifier(
+                target, category, target_list, removing=False,
+            ) if category in _PLANNED_CATEGORIES else None,
+            remove_verifier=self._membership_verifier(
+                target, category, target_list, removing=True,
+            ) if category in _PLANNED_CATEGORIES else None,
             dry_run=self._dry_run,
         )
         result.added += execution.added
@@ -1613,7 +1720,173 @@ class CrossSyncService:
             result.errors.append(
                 f"Could not write {category} to {target.label}: {self._describe_error(error)}"
             )
+        self._record_execution_state(
+            pair, category, execution,
+            source=pair.source if forward else pair.target, target=target.key,
+        )
         return execution
+
+    def _filter_tombstoned_adds(self, pair, category: str, plan: SyncPlan) -> SyncPlan:
+        if self._state_store is None:
+            return plan
+        uncertain_history = set()
+        if category == CATEGORY_HISTORY:
+            try:
+                retry_entries = [
+                    entry for entry in self._state_store.pending_retries(pair.pair_id, category)
+                    if entry.get("operation") == "add"
+                ]
+                planned_ids = {
+                    action.action_id for action in plan.additions + plan.updates
+                }
+                uncertain_history = {
+                    str(entry.get("item_key") or "") for entry in retry_entries
+                    if str(entry.get("item_key") or "") in planned_ids
+                }
+                # If the new plan no longer asks for the event, the fresh
+                # destination read or baseline now accounts for it.
+                for entry in retry_entries:
+                    handle = str(entry.get("item_key") or "")
+                    if handle and handle not in planned_ids:
+                        self._state_store.clear_retry(
+                            pair.pair_id, category, "add", handle, save=False,
+                        )
+                if retry_entries:
+                    self._state_store.save()
+            except Exception:
+                uncertain_history = set()
+        blocked = []
+        additions = []
+        updates = []
+        for bucket, kept in ((plan.additions, additions), (plan.updates, updates)):
+            for action in bucket:
+                if action.action_id in uncertain_history:
+                    blocked.append(replace(
+                        action, kind=ACTION_SKIP, destructive=False,
+                        reason=REASON_UNCERTAIN_HISTORY,
+                    ))
+                    continue
+                try:
+                    is_blocked = self._state_store.tombstone_blocks(
+                        category, action.key, action.item,
+                    )
+                except Exception:
+                    is_blocked = False
+                if is_blocked:
+                    blocked.append(replace(
+                        action, kind=ACTION_SKIP, destructive=False,
+                        reason=REASON_TOMBSTONED,
+                    ))
+                else:
+                    kept.append(action)
+        if not blocked:
+            return plan
+        return replace(
+            plan, additions=tuple(additions), updates=tuple(updates),
+            skipped=plan.skipped + tuple(blocked),
+        )
+
+    def _membership_verifier(self, target, category: str, target_list: str, *, removing: bool):
+        """Re-read membership after an ambiguous short provider response."""
+        def verify(actions):
+            live = target.fetch_target(category, target_list) or []
+            present = {
+                self._comparison_key(enrich_identity(item), target_list)
+                for item in live
+            }
+            if removing:
+                return {action.key for action in actions if action.key not in present}
+            return {action.key for action in actions if action.key in present}
+        return verify
+
+    def _reviewed_plan(self, plan: SyncPlan, *, check_freshness: bool = True) -> SyncPlan:
+        """Validate freshness and retain exactly the actions the user selected."""
+        expected = self._expected_plan_fingerprints.get(
+            f"{plan.route_id}:{plan.category}"
+        ) if check_freshness else None
+        if expected and expected != plan.fingerprint:
+            raise StalePlanError(
+                f"The {plan.category} preview is stale; refresh it before applying changes."
+            )
+        if self._selected_action_ids is None:
+            return plan
+        skipped = list(plan.skipped)
+
+        def selected(actions):
+            kept = []
+            for action in actions:
+                if action.action_id in self._selected_action_ids:
+                    kept.append(action)
+                else:
+                    skipped.append(replace(
+                        action, kind=ACTION_SKIP, destructive=False,
+                        reason=REASON_NOT_SELECTED,
+                    ))
+            return tuple(kept)
+
+        return replace(
+            plan,
+            additions=selected(plan.additions),
+            updates=selected(plan.updates),
+            removals=selected(plan.removals),
+            skipped=tuple(skipped),
+        )
+
+    @staticmethod
+    def _combined_two_way_plan(forward: SyncPlan, backward: SyncPlan, conflicts=()) -> SyncPlan:
+        """Expose both write directions as the single plan a person reviews."""
+        return replace(
+            forward,
+            additions=forward.additions + backward.additions,
+            updates=forward.updates + backward.updates,
+            removals=forward.removals + backward.removals,
+            conflicts=tuple(conflicts) + forward.conflicts + backward.conflicts,
+            unresolved=forward.unresolved + backward.unresolved,
+            skipped=forward.skipped + backward.skipped,
+            warnings=forward.warnings + backward.warnings,
+        )
+
+    def _capture_plan(self, pair, category: str, target, target_list: str, plan: SyncPlan) -> None:
+        if self._state_store is None or self._dry_run or not plan.removals:
+            return
+        try:
+            self._state_store.create_capture(
+                pair.pair_id, category, target.key, target_list,
+                [dict(action.item) for action in plan.removals],
+            )
+        except Exception:
+            logger.warning("Could not create pre-removal capture", exc_info=True)
+
+    def _record_execution_state(self, pair, category: str, execution, *, source: str, target: str) -> None:
+        if self._state_store is None or self._dry_run:
+            return
+        for outcome in execution.outcomes:
+            action = outcome.action
+            operation = "remove" if action.kind == ACTION_REMOVE else "add"
+            retry_handle = action.action_id if category == CATEGORY_HISTORY else action.key
+            try:
+                if outcome.status == STATUS_SUCCESS:
+                    self._state_store.clear_retry(
+                        pair.pair_id, category, operation, retry_handle, save=False,
+                    )
+                    if operation == "remove":
+                        self._state_store.record_tombstone(
+                            pair.pair_id, category, action.key,
+                            source=source, target=target, save=False,
+                        )
+                    else:
+                        self._state_store.clear_tombstone(category, action.key, save=False)
+                elif outcome.status in (STATUS_FAILED, STATUS_UNCONFIRMED, STATUS_BLOCKED):
+                    self._state_store.record_retry(
+                        pair.pair_id, category, operation, retry_handle,
+                        action.item, outcome.error or outcome.status, save=False,
+                    )
+            except Exception:
+                logger.warning("Could not update sync retry/tombstone state", exc_info=True)
+        try:
+            self._state_store.save()
+        except Exception:
+            logger.warning("Could not persist sync execution state", exc_info=True)
 
     def _baseline_for(self, pair, category: str):
         if self._state_store is not None:
@@ -1754,7 +2027,7 @@ class CrossSyncService:
         """
         self._ownership = OwnershipIndex()
         for pair in pairs:
-            source = self._adapters.get(pair.source)
+            source = self._adapter_for(pair, "source")
             if source is None:
                 continue
             scope = destination_scope(pair)
@@ -1787,7 +2060,7 @@ class CrossSyncService:
         if self._read_cache is None:
             return source.fetch(category, lists) or []
         return self._read_cache.get_or_fetch(
-            source.key, category, lists, lambda: source.fetch(category, lists),
+            source.identity, category, lists, lambda: source.fetch(category, lists),
         )
 
     def _plan_category(
@@ -1796,15 +2069,14 @@ class CrossSyncService:
     ):
         """Plan the category from the baseline, then let the guard rule on it.
 
-        Returns the plan the run may actually perform, or None for a category
-        this planner does not cover yet.
+        Returns the plan the run may actually perform, or None if planning fails.
 
         Only *membership* categories are planned here — "is this item on this
         list". History is an append-only event log with its own dedupe rules,
         and resume is a progress value where an item present on both sides may
         still need writing because the position moved. Handing either to a
         membership planner would silently turn "changed" into "already in sync",
-        so both keep the legacy path until their own planners land.
+        so both use their dedicated planners.
         """
         if category not in _PLANNED_CATEGORIES:
             return None
@@ -1975,14 +2247,14 @@ class CrossSyncService:
         )
 
     def _record_managed_keys(
-        self, pair, category: str, source_by_key: dict, removed: list[dict], result: PairCategoryStats,
+        self, pair, category: str, added: list[dict], removed: list[dict], result: PairCategoryStats,
     ) -> None:
         """Track which keys this pair is responsible for on the target."""
         if self._dry_run:
             return
         pair_keys = self._managed_keys.setdefault(pair.pair_id, {})
         existing = set(pair_keys.get(category, []))
-        existing.update(source_by_key.keys())
+        existing.update(item_key(item) for item in added)
         for item in removed:
             existing.discard(item_key(item))
         ordered = sorted(existing)

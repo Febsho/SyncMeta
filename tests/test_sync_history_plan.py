@@ -31,7 +31,9 @@ from src.sync.progress import (
     REASON_ALREADY_THERE,
     REASON_COMPLETED,
     REASON_DESTINATION_FURTHER,
+    REASON_DESTINATION_NEWER,
     REASON_FURTHER,
+    REASON_NEWER_SESSION,
     REASON_NEW_POSITION,
     REASON_TOO_EARLY,
     plan_progress,
@@ -244,12 +246,15 @@ class ProgressPlanTests(unittest.TestCase):
     """Resume: the risk is rewinding somebody's playback."""
 
     @staticmethod
-    def _resume(position_ms, runtime_ms=100_000):
-        return {
+    def _resume(position_ms, runtime_ms=100_000, paused_at=""):
+        item = {
             "title": "Dune", "media_type": "movie", "tmdb_id": "438631",
             "ids": {"tmdb": "438631"},
             "position_ms": position_ms, "runtime_ms": runtime_ms,
         }
+        if paused_at:
+            item["paused_at"] = paused_at
+        return item
 
     def _plan(self, source, destination):
         return plan_progress(
@@ -284,6 +289,22 @@ class ProgressPlanTests(unittest.TestCase):
         plan = self._plan(self._resume(20_000), self._resume(60_000))
         self.assertEqual(plan.updates, ())
         self.assertEqual(plan.skipped[0].reason, REASON_DESTINATION_FURTHER)
+
+    def test_a_newer_session_may_restart_the_title(self) -> None:
+        plan = self._plan(
+            self._resume(10_000, paused_at="2026-09-13T12:00:00Z"),
+            self._resume(70_000, paused_at="2026-09-12T12:00:00Z"),
+        )
+        self.assertEqual(len(plan.updates), 1)
+        self.assertEqual(plan.updates[0].reason, REASON_NEWER_SESSION)
+
+    def test_an_older_further_position_does_not_overwrite_newer_progress(self) -> None:
+        plan = self._plan(
+            self._resume(70_000, paused_at="2026-09-12T12:00:00Z"),
+            self._resume(10_000, paused_at="2026-09-13T12:00:00Z"),
+        )
+        self.assertEqual(plan.updates, ())
+        self.assertEqual(plan.skipped[0].reason, REASON_DESTINATION_NEWER)
 
     def test_a_completed_destination_is_never_rewound(self) -> None:
         # The 95% -> 2% case: a stale record must not clobber a finished one.

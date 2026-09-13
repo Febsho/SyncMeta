@@ -26,6 +26,7 @@ guessed at.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from ..providers import item_key
 from .models import RouteBaseline
@@ -49,6 +50,9 @@ COMPLETED_PERCENT = 90.0
 SUSPICIOUS_REWIND_PERCENT = 50.0
 #: Positions this close together are the same place; writing would be noise.
 POSITION_TOLERANCE_MS = 1000
+#: Provider clocks and serialization frequently differ by a few seconds. A
+#: timestamp has to be newer by this much before it may justify a rewind.
+TIMESTAMP_TOLERANCE_SECONDS = 60
 
 REASON_NEW_POSITION = "Not yet on the destination"
 REASON_FURTHER = "The source is further along"
@@ -57,6 +61,8 @@ REASON_DESTINATION_FURTHER = "The destination is further along; leaving it"
 REASON_TOO_EARLY = "Barely started; not a real resume point"
 REASON_COMPLETED = "Finished on the source; not a resume point"
 REASON_SUSPICIOUS_REWIND = "Would rewind the destination a long way"
+REASON_NEWER_SESSION = "A newer playback session restarted this title"
+REASON_DESTINATION_NEWER = "The destination playback event is newer; leaving it"
 
 
 def _percent(item: dict) -> float:
@@ -82,6 +88,28 @@ def _position(item: dict) -> float:
         return float(item.get("position_ms") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _progress_epoch(item: dict) -> int | None:
+    """Return a provider playback-event timestamp when one is available."""
+    for field in (
+        "progress_at", "paused_at", "updated_at", "last_played",
+        "last_viewed_at", "lastViewedAt",
+    ):
+        value = item.get(field)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return int(value)
+            text = str(value).strip().replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return None
 
 
 @dataclass
@@ -138,22 +166,42 @@ def plan_progress(
         if abs(_position(item) - _position(existing)) <= POSITION_TOLERANCE_MS:
             skipped.append(_action("skip", item, key, reason=REASON_ALREADY_THERE))
             continue
+        source_epoch = _progress_epoch(item)
+        destination_epoch = _progress_epoch(existing)
+        source_is_newer = (
+            source_epoch is not None and destination_epoch is not None
+            and source_epoch > destination_epoch + TIMESTAMP_TOLERANCE_SECONDS
+        )
+        destination_is_newer = (
+            source_epoch is not None and destination_epoch is not None
+            and destination_epoch > source_epoch + TIMESTAMP_TOLERANCE_SECONDS
+        )
+
+        if source_is_newer:
+            updates.append(_action(
+                ACTION_UPDATE, item, key,
+                reason=REASON_NEWER_SESSION if source_percent < destination_percent else REASON_FURTHER,
+            ))
+            continue
+        if destination_is_newer:
+            skipped.append(_action(
+                "skip", item, key, reason=REASON_DESTINATION_NEWER,
+            ))
+            continue
         if destination_percent >= COMPLETED_PERCENT:
             skipped.append(_action(
                 "skip", item, key, reason=REASON_DESTINATION_FURTHER,
             ))
             continue
-        if source_percent <= destination_percent:
-            skipped.append(_action(
-                "skip", item, key, reason=REASON_DESTINATION_FURTHER,
-            ))
-            continue
         if destination_percent - source_percent >= SUSPICIOUS_REWIND_PERCENT:
-            # Cannot happen given the check above, but kept explicit: a large
-            # backwards jump is reported rather than performed.
             conflicts.append(_action(
                 "conflict", item, key, reason=REASON_SUSPICIOUS_REWIND,
                 confidence=CONFIDENCE_LIKELY,
+            ))
+            continue
+        if source_percent <= destination_percent:
+            skipped.append(_action(
+                "skip", item, key, reason=REASON_DESTINATION_FURTHER,
             ))
             continue
         updates.append(_action(ACTION_UPDATE, item, key, reason=REASON_FURTHER))

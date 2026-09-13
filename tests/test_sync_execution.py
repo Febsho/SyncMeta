@@ -188,17 +188,17 @@ class ExecutionTests(unittest.TestCase):
                             if o.action.kind == "add"))
 
     def test_a_partly_confirmed_batch_keeps_the_rest_outstanding(self) -> None:
-        # The adapter says 1 of 2 landed but not which. The unconfirmed one is
-        # left outstanding rather than claimed either way.
+        # The adapter says 1 of 2 landed but not which. Neither item may be
+        # assigned that success by position.
         plan = self._plan(adds=("a", "b"))
         result = execute_plan(plan, add_writer=lambda items: {"added": 1})
-        self.assertEqual(result.added, 1)
-        self.assertEqual(result.unconfirmed, 1)
-        self.assertEqual(len(result.outstanding()), 1)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.unconfirmed, 2)
+        self.assertEqual(len(result.outstanding()), 2)
         self.assertFalse(result.complete)
         self.assertEqual(
             [o.status for o in result.outcomes if o.action.kind == "add"],
-            [STATUS_SUCCESS, STATUS_UNCONFIRMED],
+            [STATUS_UNCONFIRMED, STATUS_UNCONFIRMED],
         )
 
     def test_an_item_the_provider_cannot_match_does_not_hold_the_route_back(self) -> None:
@@ -206,7 +206,10 @@ class ExecutionTests(unittest.TestCase):
         # agreeing on anything.
         plan = self._plan(adds=("a", "b"))
         result = execute_plan(
-            plan, add_writer=lambda items: {"added": 1, "not_found": 1},
+            plan, add_writer=lambda items: {
+                "added": 1, "confirmed_keys": ["a"],
+                "not_found": 1, "not_found_keys": ["b"],
+            },
         )
         self.assertEqual(result.not_found, 1)
         self.assertEqual(result.unconfirmed, 0)
@@ -215,7 +218,9 @@ class ExecutionTests(unittest.TestCase):
 
     def test_only_confirmed_writes_enter_the_agreement(self) -> None:
         plan = self._plan(adds=("a", "b"))
-        result = execute_plan(plan, add_writer=lambda items: {"added": 1})
+        result = execute_plan(
+            plan, add_writer=lambda items: {"added": 1, "confirmed_keys": ["a"]},
+        )
         states = result.item_states()
         applied = [key for key, state in states.items() if state.destination == STATE_PRESENT]
         self.assertEqual(len(applied), 1)
@@ -268,6 +273,16 @@ class ExecutionTests(unittest.TestCase):
         self.assertFalse(result.complete or result.outcomes[0].applied)
         self.assertEqual(result.outcomes[0].status, STATUS_BLOCKED)
 
+    def test_read_after_write_identifies_items_in_a_short_aggregate_response(self) -> None:
+        plan = self._plan(adds=("a", "b"))
+        result = execute_plan(
+            plan,
+            add_writer=lambda items: {"added": 1},
+            add_verifier=lambda actions: {"b"},
+        )
+        self.assertEqual([action.key for action in result.applied_actions()], ["b"])
+        self.assertEqual(result.unconfirmed, 1)
+
 
 class RetryTests(unittest.TestCase):
     """A partial run must retry only what is still outstanding."""
@@ -281,7 +296,9 @@ class RetryTests(unittest.TestCase):
             source_by_key=source, destination_by_key={}, baseline=baseline,
         )
         self.assertEqual(len(first.additions), 2)
-        result = execute_plan(first, add_writer=lambda items: {"added": 1})
+        result = execute_plan(
+            first, add_writer=lambda items: {"added": 1, "confirmed_keys": ["a"]},
+        )
         self.assertFalse(result.complete)
 
         # Only the confirmed one is on the destination now, and only it enters

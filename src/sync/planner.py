@@ -17,6 +17,8 @@ drive a real execution — the two cannot drift apart if there is only one of th
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field, replace
 
 from .models import STATE_ABSENT, STATE_PRESENT, RouteBaseline
@@ -115,8 +117,20 @@ class PlannedAction:
 
     year: object = None
 
+    @property
+    def action_id(self) -> str:
+        """Stable handle used when a person applies only reviewed actions."""
+        payload = [
+            self.category, self.direction, self.kind, self.key,
+            self.source_provider, self.destination_provider,
+        ]
+        return hashlib.sha256(
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:24]
+
     def to_dict(self) -> dict:
         return {
+            "action_id": self.action_id,
             "key": self.key,
             "kind": self.kind,
             "year": self.year,
@@ -191,8 +205,28 @@ class SyncPlan:
             warnings=self.warnings + (reason,),
         )
 
+    @property
+    def fingerprint(self) -> str:
+        """Fingerprint the reviewed snapshot without exposing provider payloads."""
+        actions = (
+            self.additions + self.updates + self.removals + self.conflicts
+            + self.unresolved + self.skipped
+        )
+        payload = {
+            "route_id": self.route_id,
+            "category": self.category,
+            "baseline_version": self.baseline_version,
+            "phase": self.phase,
+            "policy": self.policy,
+            "actions": [action.action_id for action in actions],
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
     def to_dict(self) -> dict:
         return {
+            "plan_fingerprint": self.fingerprint,
             "route_id": self.route_id,
             "category": self.category,
             "source_provider": self.source_provider,

@@ -28,6 +28,7 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import (
@@ -41,7 +42,9 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 #: Bumped when the on-disk shape changes in a way older readers cannot handle.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+TOMBSTONE_TTL_SECONDS = 30 * 24 * 60 * 60
+MAX_CAPTURES = 25
 
 
 def _utc_now_iso() -> str:
@@ -59,6 +62,9 @@ class SyncStateStore:
         self._path = Path(path)
         self._lock = threading.RLock()
         self._baselines: dict[tuple[str, str], RouteBaseline] = {}
+        self._tombstones: dict[str, dict] = {}
+        self._retries: dict[str, dict] = {}
+        self._captures: list[dict] = []
         self._dirty = False
         self._load()
 
@@ -92,6 +98,21 @@ class SyncStateStore:
             baseline = RouteBaseline.from_dict(entry)
             baseline.route_id, baseline.category = route_id, category
             self._baselines[(route_id, category)] = baseline
+        tombstones = raw.get("tombstones")
+        if isinstance(tombstones, dict):
+            self._tombstones = {
+                str(key): dict(value) for key, value in tombstones.items()
+                if isinstance(value, dict)
+            }
+        retries = raw.get("retries")
+        if isinstance(retries, dict):
+            self._retries = {
+                str(key): dict(value) for key, value in retries.items()
+                if isinstance(value, dict)
+            }
+        captures = raw.get("captures")
+        if isinstance(captures, list):
+            self._captures = [dict(value) for value in captures if isinstance(value, dict)][-MAX_CAPTURES:]
 
     def _save_locked(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,6 +122,9 @@ class SyncStateStore:
                 f"{route_id}\t{category}": baseline.to_dict()
                 for (route_id, category), baseline in self._baselines.items()
             },
+            "tombstones": self._tombstones,
+            "retries": self._retries,
+            "captures": self._captures[-MAX_CAPTURES:],
         }
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self._path.parent), prefix=".syncstate-", suffix=".tmp",
@@ -146,6 +170,150 @@ class SyncStateStore:
                 category for route, category in self._baselines
                 if route == str(route_id)
             }
+
+    # ── cross-route deletion ledger ───────────────────────────────────────
+
+    @staticmethod
+    def _item_epoch(item: dict | None) -> int | None:
+        for field in (
+            "added_at", "listed_at", "updated_at", "rated_at", "watched_at",
+            "progress_at", "paused_at", "last_played", "last_viewed_at",
+        ):
+            value = (item or {}).get(field)
+            if value in (None, ""):
+                continue
+            try:
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return int(value)
+                parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return int(parsed.timestamp())
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return None
+
+    @staticmethod
+    def _ledger_key(category: str, item_key: str) -> str:
+        return f"{str(category)}\t{str(item_key)}"
+
+    def tombstone_blocks(self, category: str, item_key: str, item: dict | None = None) -> bool:
+        with self._lock:
+            entry = self._tombstones.get(self._ledger_key(category, item_key))
+            if not entry:
+                return False
+            deleted_at = int(entry.get("deleted_at") or 0)
+            if deleted_at and int(time.time()) - deleted_at >= TOMBSTONE_TTL_SECONDS:
+                return False
+            item_epoch = self._item_epoch(item)
+            return item_epoch is None or item_epoch <= deleted_at
+
+    def record_tombstone(
+        self, route_id: str, category: str, item_key: str, *,
+        source: str = "", target: str = "", save: bool = True,
+    ) -> None:
+        with self._lock:
+            self._tombstones[self._ledger_key(category, item_key)] = {
+                "route_id": str(route_id), "category": str(category),
+                "item_key": str(item_key), "source": str(source),
+                "target": str(target), "deleted_at": int(time.time()),
+            }
+            self._dirty = True
+            if save:
+                self._save_locked()
+
+    def clear_tombstone(self, category: str, item_key: str, *, save: bool = True) -> bool:
+        with self._lock:
+            removed = self._tombstones.pop(self._ledger_key(category, item_key), None) is not None
+            if removed:
+                self._dirty = True
+                if save:
+                    self._save_locked()
+            return removed
+
+    # ── operational retry backlog ─────────────────────────────────────────
+
+    @staticmethod
+    def _retry_key(route_id: str, category: str, operation: str, item_key: str) -> str:
+        return "\t".join(map(str, (route_id, category, operation, item_key)))
+
+    def record_retry(self, route_id: str, category: str, operation: str, item_key: str,
+                     item: dict, reason: str, *, save: bool = True) -> None:
+        with self._lock:
+            key = self._retry_key(route_id, category, operation, item_key)
+            previous = self._retries.get(key) or {}
+            self._retries[key] = {
+                "route_id": str(route_id), "category": str(category),
+                "operation": str(operation), "item_key": str(item_key),
+                "item": dict(item or {}), "reason": str(reason)[:500],
+                "attempts": int(previous.get("attempts") or 0) + 1,
+                "last_attempt": _utc_now_iso(),
+            }
+            self._dirty = True
+            if save:
+                self._save_locked()
+
+    def clear_retry(self, route_id: str, category: str, operation: str, item_key: str,
+                    *, save: bool = True) -> bool:
+        with self._lock:
+            key = self._retry_key(route_id, category, operation, item_key)
+            removed = self._retries.pop(key, None) is not None
+            if removed:
+                self._dirty = True
+                if save:
+                    self._save_locked()
+            return removed
+
+    def pending_retries(self, route_id: str = "", category: str = "") -> list[dict]:
+        with self._lock:
+            return [
+                dict(value) for value in self._retries.values()
+                if (not route_id or value.get("route_id") == str(route_id))
+                and (not category or value.get("category") == str(category))
+            ]
+
+    # ── recoverable pre-write captures ────────────────────────────────────
+
+    def create_capture(self, route_id: str, category: str, provider: str,
+                       target_list: str, items: list[dict], *, save: bool = True) -> str:
+        with self._lock:
+            capture_id = f"cap-{int(time.time() * 1000)}-{len(self._captures) + 1}"
+            self._captures.append({
+                "capture_id": capture_id, "created_at": _utc_now_iso(),
+                "route_id": str(route_id), "category": str(category),
+                "provider": str(provider), "target_list": str(target_list),
+                "items": [dict(item) for item in items or []],
+                "restored_at": "",
+            })
+            self._captures = self._captures[-MAX_CAPTURES:]
+            self._dirty = True
+            if save:
+                self._save_locked()
+            return capture_id
+
+    def captures(self) -> list[dict]:
+        with self._lock:
+            return [
+                {**entry, "items": [], "item_count": len(entry.get("items") or [])}
+                for entry in reversed(self._captures)
+            ]
+
+    def capture(self, capture_id: str) -> dict | None:
+        with self._lock:
+            return next((dict(entry) for entry in self._captures
+                         if entry.get("capture_id") == str(capture_id)), None)
+
+    def mark_capture_restored(self, capture_id: str, *, save: bool = True) -> bool:
+        with self._lock:
+            for entry in self._captures:
+                if entry.get("capture_id") != str(capture_id):
+                    continue
+                entry["restored_at"] = _utc_now_iso()
+                self._dirty = True
+                if save:
+                    self._save_locked()
+                return True
+            return False
 
     def _mutable(self, route_id: str, category: str) -> RouteBaseline:
         key = (str(route_id), str(category))

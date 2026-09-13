@@ -71,7 +71,7 @@ from src.simkl_client import SimklClient
 from src.tmdb_client import TmdbClient, TmdbError, normalize_media_type as tmdb_media_kind
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
 from src.trakt_client import TraktAuthenticationError, TraktClient
-from src.cross_sync import CrossSyncService
+from src.cross_sync import CrossSyncService, StalePlanError
 from src.providers import (
     ALL_CATEGORIES,
     ALL_PAIR_MODES,
@@ -81,6 +81,7 @@ from src.providers import (
     CATEGORY_COLLECTION,
     CATEGORY_WATCHLIST,
     enrich_identity,
+    item_key,
     PAIR_MODE_LABELS,
     PROVIDER_LABELS,
     PROVIDER_ORDER,
@@ -4795,6 +4796,98 @@ def api_profile_pairs_save():
     return jsonify({"status": "saved", "profile": profile})
 
 
+@app.route("/api/profile/sync/retries", methods=["POST"])
+def api_profile_sync_retries():
+    """Return writes that were not positively confirmed by a provider."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    retries = _sync_state_store_for(profile_id).pending_retries(
+        str(body.get("route_id", "") or ""), str(body.get("category", "") or ""),
+    )
+    return jsonify({"retries": retries})
+
+
+@app.route("/api/profile/sync/captures", methods=["POST"])
+def api_profile_sync_captures():
+    """List the bounded, pre-removal snapshots available for recovery."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    return jsonify({"captures": _sync_state_store_for(profile_id).captures()})
+
+
+@app.route("/api/profile/sync/retries/dismiss", methods=["POST"])
+def api_profile_sync_retry_dismiss():
+    """Acknowledge one uncertain write so a later run may plan it again."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    required = {
+        key: str(body.get(key, "") or "").strip()
+        for key in ("route_id", "category", "operation", "item_key")
+    }
+    if not all(required.values()):
+        return _json_error("route_id, category, operation, and item_key are required", 400)
+    removed = _sync_state_store_for(profile_id).clear_retry(
+        required["route_id"], required["category"],
+        required["operation"], required["item_key"],
+    )
+    if not removed:
+        return _json_error("Retry entry not found", 404)
+    return jsonify({"status": "dismissed"})
+
+
+@app.route("/api/profile/sync/captures/restore", methods=["POST"])
+def api_profile_sync_capture_restore():
+    """Restore one captured removal set to the provider it came from."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    capture_id = str(body.get("capture_id", "") or "").strip()
+    if not capture_id:
+        return _json_error("capture_id is required", 400)
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    if private_profile.get("sync_running"):
+        return _json_error("Wait for the active sync to finish before restoring", 409)
+
+    state_store = _sync_state_store_for(profile_id)
+    capture = state_store.capture(capture_id)
+    if not capture:
+        return _json_error("Capture not found", 404)
+    if capture.get("restored_at"):
+        return _json_error("This capture was already restored", 409)
+    config = _config_from_profile(private_profile)
+    adapter = _build_provider_adapters(config, profile_id=profile_id).get(capture.get("provider"))
+    category = str(capture.get("category") or "")
+    items = list(capture.get("items") or [])
+    if adapter is None or not adapter.can_write() or category not in adapter.writable_categories():
+        return _json_error("The captured provider is not currently writable", 409)
+    try:
+        totals = adapter.add(category, items, str(capture.get("target_list") or "")) or {}
+    except Exception as exc:
+        logger.exception("Capture restore failed")
+        return _json_error(f"Restore failed: {exc}", 502)
+    confirmed_keys = totals.get("confirmed_keys") or totals.get("accepted_keys") or []
+    confirmed = int(totals.get("added") or 0)
+    if len(set(map(str, confirmed_keys))) < len(items) and confirmed != len(items):
+        return _json_error(
+            "The provider did not confirm the full restore; the capture remains available",
+            502, details=[f"Confirmed {confirmed} of {len(items)} items"],
+        )
+    for item in items:
+        state_store.clear_tombstone(category, item_key(enrich_identity(item)), save=False)
+    state_store.mark_capture_restored(capture_id, save=False)
+    state_store.save()
+    return jsonify({"status": "restored", "capture_id": capture_id, "restored": len(items)})
+
+
 @app.route("/api/profile/pairs/run", methods=["POST"])
 def api_profile_pairs_run():
     """Queue one pair, or every enabled pair, on the shared background runner."""
@@ -4805,6 +4898,12 @@ def api_profile_pairs_run():
     pair_id = str(body.get("pair_id", "") or "").strip()
     dry_run = bool(body.get("dry_run", False))
     bypass_guard = bool(body.get("bypass_large_removal_guard", False))
+    selected_action_ids = body.get("selected_action_ids")
+    expected_fingerprints = body.get("expected_plan_fingerprints") or {}
+    if selected_action_ids is not None and not isinstance(selected_action_ids, list):
+        return _json_error("selected_action_ids must be a list", 400)
+    if not isinstance(expected_fingerprints, dict):
+        return _json_error("expected_plan_fingerprints must be an object", 400)
 
     try:
         private_profile = _profile_store.get_private_profile_by_id(profile_id)
@@ -4836,10 +4935,14 @@ def api_profile_pairs_run():
             # This endpoint is a person acting on a preview. The scheduled path
             # never passes it, so an automatic run cannot waive the thresholds.
             allow_destructive_override=bypass_guard,
+            selected_action_ids=selected_action_ids,
+            expected_plan_fingerprints=expected_fingerprints,
         )
         log_token = _log_profile_id.set(profile_id)
         try:
             results = service.run_pairs(pairs)
+        except StalePlanError as exc:
+            return _json_error(str(exc), 409)
         except SyncCancelled:
             return _json_error("Sync stopped", 409)
         except Exception as exc:
@@ -4858,8 +4961,8 @@ def api_profile_pairs_run():
             "results": result_dicts,
             "provider_reads": service.last_run_provider_reads,
             "cached_reads": service.last_run_cache_hits,
-            # The baseline planner's reading of the same run. Reported, not yet
-            # obeyed — see CrossSyncService.plan_divergences.
+            # The immutable plans that drove this run, including stable action
+            # ids and fingerprints for selective reviewed execution.
             "plans": [plan.to_dict() for plan in service.plans.values()],
             "safety": [v.to_dict() for v in service.plan_verdicts.values()],
         })

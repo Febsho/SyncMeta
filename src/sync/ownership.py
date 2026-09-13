@@ -33,7 +33,7 @@ def destination_scope(route) -> tuple[str, str, str]:
     return (
         str(getattr(route, "target", "") or ""),
         str(getattr(route, "target_list", "") or ""),
-        "",
+        str(getattr(route, "target_instance", "default") or "default"),
     )
 
 

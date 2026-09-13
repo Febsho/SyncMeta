@@ -29,7 +29,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from ..providers import PlaySet, item_key, normalize_watched_at
+from ..providers import (
+    PLAY_MATCH_WINDOW_SECONDS,
+    PlaySet,
+    item_key,
+    normalize_watched_at,
+    watched_at_epoch,
+)
 from .models import STATE_PRESENT, ItemState, RouteBaseline
 from .planner import (
     ACTION_ADD,
@@ -130,6 +136,103 @@ class HistoryPlan:
     projected: dict = field(default_factory=dict)
 
 
+def _one_to_one_matches(
+    source_rows: list[dict],
+    destination_rows: list[dict],
+    baseline: RouteBaseline,
+) -> set[int]:
+    """Return source-row indexes already represented by exactly one play.
+
+    A destination play may satisfy only one source play. Matching each source
+    independently against a broad time window lets the same destination row
+    swallow several genuine rewatches. Exact event identities win first; the
+    remaining rows use mutually unique nearest timestamps per episode.
+    """
+    matched: set[int] = set()
+    sources: dict[str, list[tuple[int, int]]] = {}
+    targets: dict[str, list[tuple[int, int]]] = {}
+    destination_events: dict[str, set[str]] = {}
+
+    for target_index, row in enumerate(destination_rows or []):
+        key = item_key(row)
+        found = event_id(row)
+        if found:
+            destination_events.setdefault(key, set()).add(found)
+        epoch = watched_at_epoch(row.get("watched_at"))
+        if epoch is not None:
+            targets.setdefault(key, []).append((target_index, epoch))
+
+    # A destination may not round-trip timestamps or event ids. Use the route
+    # ledger only when the live destination exposes no timed plays for an
+    # episode, avoiding two slots for one event.
+    synthetic_slot = -1
+    for key, state in baseline.items.items():
+        if targets.get(key):
+            continue
+        for stamp in state.plays:
+            epoch = watched_at_epoch(stamp)
+            if epoch is not None:
+                targets.setdefault(key, []).append((synthetic_slot, epoch))
+                synthetic_slot -= 1
+
+    seen_source_events: set[tuple[str, str]] = set()
+    seen_source_times: set[tuple[str, int]] = set()
+    for source_index, row in enumerate(source_rows or []):
+        key = item_key(row)
+        found = event_id(row)
+        known_events = set(baseline.state(key).event_ids) | destination_events.get(key, set())
+        if found:
+            signature = (key, found)
+            if found in known_events or signature in seen_source_events:
+                matched.add(source_index)
+                continue
+            seen_source_events.add(signature)
+        epoch = watched_at_epoch(row.get("watched_at"))
+        if epoch is None:
+            continue
+        time_signature = (key, epoch)
+        prior_source_times = sources.get(key, [])
+        if time_signature in seen_source_times or (
+            not found and any(
+                abs(epoch - prior_epoch) <= PLAY_MATCH_WINDOW_SECONDS
+                for _prior_index, prior_epoch in prior_source_times
+            )
+        ):
+            matched.add(source_index)
+            continue
+        seen_source_times.add(time_signature)
+        sources.setdefault(key, []).append((source_index, epoch))
+
+    def unique_nearest(epoch: int, candidates: list[tuple[int, int]]) -> int | None:
+        within = [
+            (abs(epoch - other_epoch), other_index)
+            for other_index, other_epoch in candidates
+            if abs(epoch - other_epoch) <= PLAY_MATCH_WINDOW_SECONDS
+        ]
+        if not within:
+            return None
+        best_distance = min(distance for distance, _ in within)
+        best = [index for distance, index in within if distance == best_distance]
+        return best[0] if len(best) == 1 else None
+
+    for key, source_events in sources.items():
+        target_events = targets.get(key, [])
+        if not target_events:
+            continue
+        source_choices = {
+            source_index: unique_nearest(source_epoch, target_events)
+            for source_index, source_epoch in source_events
+        }
+        target_choices = {
+            target_index: unique_nearest(target_epoch, source_events)
+            for target_index, target_epoch in target_events
+        }
+        for source_index, target_index in source_choices.items():
+            if target_index is not None and target_choices.get(target_index) == source_index:
+                matched.add(source_index)
+    return matched
+
+
 def plan_history(
     *,
     route_id: str,
@@ -166,6 +269,7 @@ def plan_history(
     ledgers: dict[str, PlaySet] = {}
     synced_events: dict[str, set] = {}
     projected: dict[str, ItemState] = {}
+    matched_source_rows = _one_to_one_matches(source_rows, destination_rows, baseline)
 
     def ledger_for(key: str) -> PlaySet:
         found = ledgers.get(key)
@@ -194,7 +298,7 @@ def plan_history(
         )
 
     source_episodes: set[str] = set()
-    for row in source_rows or []:
+    for row_index, row in enumerate(source_rows or []):
         key = item_key(row)
         source_episodes.add(key)
 
@@ -208,10 +312,18 @@ def plan_history(
         state = projected[key]
         source_event = event_id(row)
 
-        # Layer 1: an event id this route already carried can never come again.
-        if source_event and source_event in synced_events[key]:
+        # Exact event ids and one-to-one timestamp matches are computed together
+        # so one destination record can never satisfy two source rewatches.
+        if row_index in matched_source_rows:
             counts.already_synced += 1
-            skipped.append(_action("skip", row, key, reason=REASON_ALREADY_SYNCED))
+            skipped.append(_action(
+                "skip", row, key,
+                reason=(
+                    REASON_ALREADY_SYNCED if source_event
+                    else REASON_SAME_EVENT if destination_plays.get(key)
+                    else REASON_ECHO
+                ),
+            ))
             continue
 
         # Layer 2: a row that only reports watched state carries no event. It may
@@ -238,15 +350,6 @@ def plan_history(
             # forever and be re-sent on every run.
             counts.duplicates += 1
             skipped.append(_action("skip", row, key, reason=REASON_STATE_TARGET))
-            continue
-
-        # Layer 3: timestamps, matched with tolerance.
-        if ledger.matches(row.get("watched_at")):
-            counts.already_synced += 1
-            skipped.append(_action(
-                "skip", row, key,
-                reason=REASON_ECHO if not destination_plays.get(key) else REASON_SAME_EVENT,
-            ))
             continue
 
         rewatch = bool(ledger.stamped)

@@ -528,6 +528,12 @@ class ProviderAdapter:
 
     key: str = ""
     label: str = ""
+    instance_id: str = "default"
+
+    @property
+    def identity(self) -> str:
+        instance = str(getattr(self, "instance_id", "default") or "default")
+        return self.key if instance == "default" else f"{self.key}@{instance}"
 
     #: Categories this adapter can read and write. A category present in
     #: ``writes`` still requires ``can_write()`` to be true at runtime.

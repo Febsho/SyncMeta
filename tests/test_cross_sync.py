@@ -2026,6 +2026,33 @@ class CrossRouteOwnershipTests(unittest.TestCase):
         self.assertTrue(all(r.added == 0 for r in results))
 
 
+class TombstoneAndCaptureTests(unittest.TestCase):
+    def test_confirmed_removal_is_captured_and_not_resurrected_by_another_route(self) -> None:
+        key = item_key(_movie("1"))
+        store = _established_store([key], managed=[key], source_keys=[key])
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
+        target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: [_movie("1")]})
+        first = _pair(removal_mode=REMOVAL_MANAGED)
+
+        removed = CrossSyncService(
+            {"trakt": source, "simkl": target}, state_store=store,
+        ).run_pair(first)
+        self.assertEqual(removed.removed, 1)
+        self.assertEqual(store.captures()[0]["item_count"], 1)
+
+        stale_source = FakeAdapter("pmdb", {CATEGORY_WATCHLIST: [_movie("1")]})
+        empty_target = FakeAdapter("library", {CATEGORY_WATCHLIST: []})
+        second = _pair(
+            pair_id="p2", source="pmdb", target="library",
+            removal_mode=REMOVAL_ADDITIVE,
+        )
+        blocked = CrossSyncService(
+            {"pmdb": stale_source, "library": empty_target}, state_store=store,
+        ).run_pair(second)
+        self.assertEqual(blocked.added, 0)
+        self.assertFalse(empty_target.added)
+
+
 class HistoryIdempotencyThroughTheServiceTests(unittest.TestCase):
     """A watch synced repeatedly stays one play.
 
@@ -2111,6 +2138,25 @@ class HistoryIdempotencyThroughTheServiceTests(unittest.TestCase):
         result = self._run(source, target)
         self.assertEqual(result.removed, 0)
         self.assertEqual(len(target._contents[CATEGORY_HISTORY]), 1)
+
+    def test_an_unconfirmed_history_write_is_not_blindly_replayed(self) -> None:
+        class UncertainTarget(FakeAdapter):
+            def add(self, category, items, target_list=""):
+                self.added.append((category, list(items)))
+                return {"added": 0}
+
+        source = FakeAdapter(
+            "trakt", {CATEGORY_HISTORY: [_episode("42", 1, 1, "2024-01-01T20:00:00Z")]},
+            reads=(CATEGORY_HISTORY,), writes=(),
+        )
+        target = UncertainTarget(
+            "pmdb", {CATEGORY_HISTORY: []},
+            reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,),
+        )
+        self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(self.store.pending_retries("p1", CATEGORY_HISTORY)), 1)
+        self.assertEqual(self._run(source, target).added, 0)
+        self.assertEqual(len(target.added), 1)
 
 
 class ResumePlannerThroughTheServiceTests(unittest.TestCase):

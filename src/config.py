@@ -155,6 +155,10 @@ class SyncPair:
     name: str = ""
     source: str = ""
     target: str = ""
+    # Stable provider-account handles. Existing profiles use the default
+    # instance; future adapters may expose several accounts of the same type.
+    source_instance: str = "default"
+    target_instance: str = "default"
     categories: list[str] = field(default_factory=list)
     # Specific named lists on the source to read. Empty means the provider's
     # default for each category (e.g. Trakt's own watchlist).
@@ -187,6 +191,8 @@ class SyncPair:
             "name": self.name,
             "source": self.source,
             "target": self.target,
+            "source_instance": self.source_instance,
+            "target_instance": self.target_instance,
             "categories": list(self.categories),
             "source_lists": list(self.source_lists),
             "target_list": self.target_list,
@@ -230,9 +236,11 @@ class SyncPair:
             raise ValueError("Sync pair must be an object")
         source = str(raw.get("source", "") or "").strip().lower()
         target = str(raw.get("target", "") or "").strip().lower()
+        source_instance = cls._clean_pair_id(raw.get("source_instance", "default")) or "default"
+        target_instance = cls._clean_pair_id(raw.get("target_instance", "default")) or "default"
         if not source or not target:
             raise ValueError("Sync pair needs both a source and a target")
-        if source == target:
+        if source == target and source_instance == target_instance:
             raise ValueError("A sync pair's source and target must differ")
 
         categories = [
@@ -290,6 +298,8 @@ class SyncPair:
             name=str(raw.get("name", "") or "").strip(),
             source=source,
             target=target,
+            source_instance=source_instance,
+            target_instance=target_instance,
             categories=categories,
             source_lists=source_lists,
             target_list=str(raw.get("target_list", "") or "").strip(),
