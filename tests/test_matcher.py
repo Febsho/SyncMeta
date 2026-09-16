@@ -22,6 +22,97 @@ class DetailedStubPMDBClient(StubPMDBClient):
 
 
 class ItemMatcherTests(unittest.TestCase):
+    @patch("src.fribb_client.lookup_by_anidb")
+    @patch("src.fribb_client.lookup_by_mal")
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_two_anime_native_sources_outvote_conflicting_pmdb(
+        self, anilist_lookup, mal_lookup, anidb_lookup,
+    ) -> None:
+        anilist_lookup.return_value = {"themoviedb_id": {"tv": 100}}
+        mal_lookup.return_value = {"themoviedb_id": {"tv": 100}}
+        anidb_lookup.return_value = None
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 900, "status": "hit", "votes": 5, "title": "Example Anime",
+        }
+        result = ItemMatcher(client).resolve_match({
+            "title": "Example Anime", "media_type": "tv", "simkl_type": "anime",
+            "anilist_id": 101, "mal_id": 202, "anime_resolve_mode": "list_identity",
+        })
+        self.assertEqual(result.tmdb_id, 100)
+        self.assertEqual(result.match_confidence, "verified")
+        self.assertEqual(result.candidate_tmdb_id, 900)
+        self.assertIn("mal:202", result.mapping_evidence)
+
+    @patch("src.fribb_client.lookup_by_anidb")
+    @patch("src.fribb_client.lookup_by_mal")
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_three_conflicting_anime_native_sources_are_ambiguous(
+        self, anilist_lookup, mal_lookup, anidb_lookup,
+    ) -> None:
+        anilist_lookup.return_value = {"themoviedb_id": {"tv": 100}}
+        mal_lookup.return_value = {"themoviedb_id": {"tv": 200}}
+        anidb_lookup.return_value = {"themoviedb_id": {"tv": 300}}
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 100, "status": "hit", "votes": 9, "title": "Example Anime",
+        }
+        result = ItemMatcher(client).resolve_match({
+            "title": "Example Anime", "media_type": "tv", "simkl_type": "anime",
+            "anilist_id": 101, "mal_id": 202, "anidb_id": 303,
+            "anime_resolve_mode": "list_identity",
+        })
+        self.assertIsNone(result.tmdb_id)
+        self.assertEqual(result.match_confidence, "ambiguous")
+
+    def test_negative_manual_override_blocks_cached_and_fresh_candidate(self) -> None:
+        item = {"title": "Example Anime", "media_type": "tv",
+                "simkl_type": "anime", "anilist_id": "123456"}
+        key = ItemMatcher._cache_key(item)
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 654321, "status": "hit", "votes": 9,
+            "title": "Example Anime",
+        }
+        matcher = ItemMatcher(client, initial_cache={key: 654321},
+                              negative_overrides={key: [654321]})
+        result = matcher.resolve_match(item)
+        self.assertIsNone(result.tmdb_id)
+        self.assertEqual(result.unresolved_reason, "negative_manual_override")
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_anime_zero_vote_fallback_is_unresolved_in_every_mode(self, _lookup) -> None:
+        for mode in ("history_identity", "resume_identity", "generic"):
+            with self.subTest(mode=mode):
+                client = StubPMDBClient()
+                client.lookup_by_external_id_detailed = lambda *_args: {
+                    "tmdb_id": 654321, "status": "hit", "votes": 0,
+                    "title": "Example Anime",
+                }
+                result = ItemMatcher(client).resolve_match({
+                    "title": "Example Anime", "media_type": "tv",
+                    "simkl_type": "anime", "anilist_id": "123456",
+                    "anime_resolve_mode": mode,
+                })
+                self.assertIsNone(result.tmdb_id)
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_anime_zero_vote_root_mapping_is_unresolved(self, _lookup) -> None:
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 654321, "status": "hit", "votes": 0,
+            "title": "Example Anime",
+        }
+        matcher = ItemMatcher(client, anime_root_resolver=lambda *_args: {
+            "root": {"id": 333333, "idMal": 444444, "title": "Example Anime"},
+        })
+        result = matcher.resolve_match({
+            "title": "Example Anime Sequel", "media_type": "tv",
+            "simkl_type": "anime", "anilist_id": "123456",
+            "anime_resolve_mode": "history_identity",
+        })
+        self.assertIsNone(result.tmdb_id)
+
     def test_initial_cache_normalizes_media_typed_tmdb_id(self) -> None:
         item = {
             "title": "Demo",
@@ -83,6 +174,15 @@ class ItemMatcherTests(unittest.TestCase):
     def test_anime_prefers_anilist_before_imdb(self) -> None:
         client = StubPMDBClient()
 
+        def verified_lookup(id_type, id_value, media_type):
+            client.calls.append((id_type, id_value, media_type))
+            return {
+                "tmdb_id": 777 if id_type == "anilist" else 888,
+                "status": "hit", "votes": 5, "title": "Example Anime",
+            }
+
+        client.lookup_by_external_id_detailed = verified_lookup  # type: ignore[method-assign]
+
         def fake_lookup(id_type: str, id_value: str, media_type: str) -> int | None:
             client.calls.append((id_type, id_value, media_type))
             if (id_type, id_value, media_type) == ("anilist", "12345", "tv"):
@@ -137,6 +237,11 @@ class ItemMatcherTests(unittest.TestCase):
 
     def test_simkl_anime_prefers_external_mapping_before_direct_tmdb(self) -> None:
         client = StubPMDBClient()
+
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 777, "status": "hit", "votes": 5,
+            "title": "Verified Anime",
+        }  # type: ignore[method-assign]
 
         def fake_lookup(id_type: str, id_value: str, media_type: str) -> int | None:
             client.calls.append((id_type, id_value, media_type))
@@ -823,11 +928,11 @@ class ItemMatcherTests(unittest.TestCase):
 
         def fake_lookup_detailed(id_type: str, ext_id: str, media_type: str):
             if id_type == "anilist" and ext_id == "9999701" and media_type == "tv":
-                return {"tmdb_id": 999999, "status": "hit"}
+                return {"tmdb_id": 999999, "status": "hit", "votes": 5}
             if id_type == "mal" and ext_id == "9999704" and media_type == "tv":
-                return {"tmdb_id": 68028, "status": "hit"}
+                return {"tmdb_id": 68028, "status": "hit", "votes": 5}
             if id_type == "anilist" and ext_id == "9999702" and media_type == "tv":
-                return {"tmdb_id": 68028, "status": "hit"}
+                return {"tmdb_id": 68028, "status": "hit", "votes": 5}
             return {"tmdb_id": None, "status": "miss"}
 
         client.lookup_by_external_id_detailed = fake_lookup_detailed  # type: ignore[method-assign]
@@ -884,7 +989,8 @@ class ItemMatcherTests(unittest.TestCase):
             "anime_resolve_mode": "list_identity",
         }
         cache_key = ItemMatcher._cache_key(oshi_item)
-        matcher = ItemMatcher(client, initial_cache={cache_key: 237438})
+        matcher = ItemMatcher(client, initial_cache={cache_key: 237438},
+                              manual_cache_keys={cache_key})
 
         result = matcher.resolve_match(oshi_item)
 
@@ -906,7 +1012,8 @@ class ItemMatcherTests(unittest.TestCase):
             "anime_resolve_mode": "list_identity",
         }
         cache_key = ItemMatcher._cache_key(item)
-        matcher = ItemMatcher(client, initial_cache={cache_key: 99999})
+        matcher = ItemMatcher(client, initial_cache={cache_key: 99999},
+                              manual_cache_keys={cache_key})
 
         with patch("src.fribb_client.lookup_by_anilist") as mock_fribb:
             mock_fribb.return_value = {"anilist_id": 12345, "themoviedb": "11111", "type": "TV"}
@@ -915,6 +1022,16 @@ class ItemMatcherTests(unittest.TestCase):
         self.assertEqual(result.tmdb_id, 99999)
         self.assertEqual(result.resolution_kind, "cache")
         mock_fribb.assert_not_called()
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_unverified_automatic_anime_cache_is_not_reused(self, _lookup) -> None:
+        item = {"title": "Example Anime", "media_type": "tv",
+                "simkl_type": "anime", "anilist_id": 123,
+                "anime_resolve_mode": "list_identity"}
+        key = ItemMatcher._cache_key(item)
+        result = ItemMatcher(StubPMDBClient(), initial_cache={key: 999}).resolve_match(item)
+        self.assertIsNone(result.tmdb_id)
+        self.assertNotEqual(result.resolution_kind, "cache")
 
     def test_failed_manual_override_cache_key_is_stable_across_sync_runs(self) -> None:
         # The cache key must be identical whether computed from the full item

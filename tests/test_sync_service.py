@@ -840,6 +840,26 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(result.anime_mapping_source, "fribb_exact")
         self.assertEqual(lookups, [False])
 
+    def test_anime_post_resolution_blocks_unverified_candidate(self) -> None:
+        service = SyncService(AppConfig(
+            simkl=SimklConfig(client_id="simkl-client", access_token="simkl-token"),
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+        ))
+
+        class UnverifiedMatcher:
+            def resolve_match(self, _item):
+                return MatchResult(tmdb_id=1234, resolution_kind="external_mapping",
+                                   match_confidence="probable", anime_mapping_source="pmdb")
+
+        service._matcher = UnverifiedMatcher()
+        service._resolve_tmdb_id_via_fribb = lambda _item: None
+        result = service._resolve_match({
+            "title": "Example Anime", "media_type": "tv", "simkl_type": "anime",
+            "anilist_id": 123,
+        })
+        self.assertIsNone(result.tmdb_id)
+        self.assertEqual(result.candidate_tmdb_id, 1234)
+
     def test_anilist_list_resolution_uses_direct_fribb_entry_not_root_fallback(self) -> None:
         service = SyncService(
             AppConfig(

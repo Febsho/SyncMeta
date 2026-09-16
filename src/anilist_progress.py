@@ -116,7 +116,10 @@ def build_reverse_index(entries: list[dict]) -> tuple[dict[tuple, tuple[int, int
         media_type = str(entry.get("media_type") or "").strip().lower()
 
         if media_type == "movie":
-            coordinate = _coordinate(enrich_identity(dict(entry)))
+            mapped = enrich_identity(dict(entry))
+            if mapped.get("match_confidence") in {"probable", "unresolved", "ambiguous"}:
+                continue
+            coordinate = _coordinate(mapped)
             if coordinate is None:
                 continue
             _claim(index, ambiguous, coordinate, media_id, 1)
@@ -141,6 +144,8 @@ def build_reverse_index(entries: list[dict]) -> tuple[dict[tuple, tuple[int, int
                 )
                 continue
             coordinate = _coordinate(mapped)
+            if mapped.get("match_confidence") in {"probable", "unresolved", "ambiguous"}:
+                continue
             if coordinate is None:
                 continue
             _claim(index, ambiguous, coordinate, media_id, local_episode)
@@ -153,6 +158,52 @@ def build_reverse_index(entries: list[dict]) -> tuple[dict[tuple, tuple[int, int
             len(ambiguous),
         )
     return index, ambiguous
+
+
+def _merge_verified_segments(
+    index: dict[tuple, tuple[int, int]], ambiguous: set[tuple],
+    entries: list[dict], items: list[dict],
+) -> None:
+    """Add persisted Library cour ranges only when canonical evidence is verified."""
+    entry_counts = {
+        media_id: _entry_episode_count(entry)
+        for entry in entries
+        for media_id in [_int_or_none(entry.get("anilist_id"))]
+        if media_id
+    }
+    seen: set[tuple] = set()
+    for item in items:
+        canonical = item.get("canonical_identity") or {}
+        if not isinstance(canonical, dict) or canonical.get("confidence") not in {"exact", "verified"}:
+            continue
+        tmdb_id = _int_or_none(item.get("tmdb_id") or (item.get("ids") or {}).get("tmdb"))
+        season = _int_or_none(item.get("season"))
+        if (not tmdb_id or season is None or str(canonical.get("tmdb_id")) != str(tmdb_id)
+                or canonical.get("namespace") != "tv"):
+            continue
+        segments = item.get("provider_segments") or []
+        for part in segments:
+            if not isinstance(part, dict) or part.get("provider") != "anilist":
+                continue
+            media_id = _int_or_none(part.get("id"))
+            start = _int_or_none(part.get("episode_start"))
+            end = _int_or_none(part.get("episode_end"))
+            offset = _int_or_none(part.get("episode_offset"))
+            total = entry_counts.get(media_id or 0, 0)
+            if (not media_id or not total or start is None or end is None or offset is None
+                    or start < 1 or end < start or end - start + 1 > _MAX_INDEX_EPISODES):
+                continue
+            segment_key = (tmdb_id, season, media_id, start, end, offset)
+            if segment_key in seen:
+                continue
+            seen.add(segment_key)
+            for canonical_episode in range(start, end + 1):
+                local_episode = canonical_episode - offset
+                if 1 <= local_episode <= total:
+                    _claim(index, ambiguous, (tmdb_id, season, canonical_episode),
+                           media_id, local_episode)
+    for coordinate in ambiguous:
+        index.pop(coordinate, None)
 
 
 def _claim(
@@ -188,6 +239,7 @@ def plan_progress_updates(entries: list[dict], items: list[dict]) -> ProgressPla
         return plan
 
     index, ambiguous = build_reverse_index(entries)
+    _merge_verified_segments(index, ambiguous, entries, items)
     if not index and not ambiguous:
         plan.unmatched = len(items)
         return plan

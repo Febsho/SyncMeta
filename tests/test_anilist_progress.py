@@ -91,6 +91,48 @@ class ReverseIndexTests(unittest.TestCase):
 
 
 class ProgressPlanTests(unittest.TestCase):
+    def test_verified_library_segments_project_split_cours_in_one_season(self) -> None:
+        segments = [
+            {"provider": "anilist", "id": "1", "episode_start": 1,
+             "episode_end": 12, "episode_offset": 0},
+            {"provider": "anilist", "id": "2", "episode_start": 13,
+             "episode_end": 24, "episode_offset": 12},
+        ]
+        rows = [{**_watched("900", 1, episode),
+                 "canonical_identity": {"tmdb_id": "900", "namespace": "tv",
+                                        "confidence": "verified"},
+                 "provider_segments": segments}
+                for episode in range(1, 17)]
+        with patch("src.providers.enrich_identity", lambda item: {
+            **item, "tmdb_id": None, "match_confidence": "probable",
+        }):
+            plan = plan_progress_updates(
+                [_entry(1, "Cour A", 12), _entry(2, "Cour B", 12)], rows,
+            )
+        self.assertEqual([(update.media_id, update.new_progress) for update in plan.updates],
+                         [(1, 12), (2, 4)])
+
+    def test_overlapping_verified_segments_produce_no_ambiguous_write(self) -> None:
+        segments = [
+            {"provider": "anilist", "id": "1", "episode_start": 1,
+             "episode_end": 2, "episode_offset": 0},
+            {"provider": "anilist", "id": "2", "episode_start": 1,
+             "episode_end": 2, "episode_offset": 0},
+        ]
+        rows = [{**_watched("900", 1, episode),
+                 "canonical_identity": {"tmdb_id": "900", "namespace": "tv",
+                                        "confidence": "verified"},
+                 "provider_segments": segments}
+                for episode in (1, 2)]
+        with patch("src.providers.enrich_identity", lambda item: {
+            **item, "tmdb_id": None, "match_confidence": "probable",
+        }):
+            plan = plan_progress_updates(
+                [_entry(1, "Cour A", 2), _entry(2, "Cour B", 2)], rows,
+            )
+        self.assertEqual(plan.updates, [])
+        self.assertEqual(plan.ambiguous, 2)
+
     def _plan(self, entries, items):
         with patch("src.providers.enrich_identity", _fake_enrich):
             return plan_progress_updates(entries, items)

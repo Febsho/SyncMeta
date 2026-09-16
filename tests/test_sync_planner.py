@@ -29,9 +29,28 @@ from src.sync.planner import (
     REASON_SOURCE_UNTRUSTWORTHY,
     REASON_UNMANAGED,
     normalize_policy,
+    PlannedAction,
+    SyncPlan,
     plan_membership,
     plan_two_way,
 )
+
+
+class ReviewedActionIdentityTests(unittest.TestCase):
+    def test_rewatches_have_distinct_action_ids(self) -> None:
+        first = PlannedAction(key="tmdb:tv:1:1:1", kind="add", category="history",
+                              item={"event_id": "play-1", "watched_at": "2024-01-01T00:00:00Z"})
+        second = PlannedAction(key=first.key, kind=first.kind, category=first.category,
+                               item={"event_id": "play-2", "watched_at": "2024-02-01T00:00:00Z"})
+        self.assertNotEqual(first.action_id, second.action_id)
+
+    def test_resume_snapshot_changes_only_with_playback_state(self) -> None:
+        def plan(progress):
+            action = PlannedAction(key="tmdb:movie:1", kind="update", category="resume",
+                                   item={"progress": progress, "progress_at": "2024-01-01T00:00:00Z"})
+            return SyncPlan(route_id="route", category="resume", updates=(action,))
+        self.assertEqual(plan(41).fingerprint, plan(41).fingerprint)
+        self.assertNotEqual(plan(41).fingerprint, plan(57).fingerprint)
 
 
 def _item(key: str) -> dict:

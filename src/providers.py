@@ -365,6 +365,8 @@ def has_portable_identity(item: dict) -> bool:
     with any confidence, so callers count them as unmapped rather than acting on
     them.
     """
+    if str(item.get("match_confidence") or "").lower() in {"probable", "unresolved", "ambiguous"}:
+        return False
     return ":title:" not in item_key(item)
 
 
@@ -396,15 +398,22 @@ def enrich_identity(item: dict) -> dict:
     if has_tmdb and not looks_anime:
         return item
 
+    canonical = item.get("canonical_identity") or {}
+    if (looks_anime and has_tmdb and isinstance(canonical, dict)
+            and canonical.get("confidence") in {"exact", "verified"}
+            and str(canonical.get("tmdb_id")) == str(item.get("tmdb_id") or ids.get("tmdb"))
+            and canonical.get("namespace") == str(item.get("media_type") or "").lower()):
+        return {**item, "match_confidence": canonical["confidence"]}
+
     from . import fribb_client
 
-    entry = None
+    candidates: list[tuple[str, dict, int, str | None]] = []
     try:
-        for value, lookup in (
-            (item.get("anilist_id") or ids.get("anilist"), fribb_client.lookup_by_anilist),
-            (item.get("mal_id") or ids.get("mal"), fribb_client.lookup_by_mal),
-            (item.get("anidb_id") or ids.get("anidb"), fribb_client.lookup_by_anidb),
-            (item.get("simkl_id") or ids.get("simkl"), fribb_client.lookup_by_simkl),
+        for source_name, value, lookup in (
+            ("anilist", item.get("anilist_id") or ids.get("anilist"), fribb_client.lookup_by_anilist),
+            ("mal", item.get("mal_id") or ids.get("mal"), fribb_client.lookup_by_mal),
+            ("anidb", item.get("anidb_id") or ids.get("anidb"), fribb_client.lookup_by_anidb),
+            ("simkl", item.get("simkl_id") or ids.get("simkl"), fribb_client.lookup_by_simkl),
         ):
             if not value:
                 continue
@@ -412,27 +421,42 @@ def enrich_identity(item: dict) -> dict:
                 entry = lookup(int(value))
             except (TypeError, ValueError):
                 entry = None
-            if entry is not None:
-                break
+            if isinstance(entry, dict):
+                candidate, namespace = fribb_client.extract_tmdb(
+                    entry.get("themoviedb_id") or entry.get("themoviedb")
+                )
+                if candidate:
+                    candidates.append((source_name, entry, candidate, namespace))
     except Exception:
         logger.debug("Identity enrichment failed for %r", item.get("title"), exc_info=True)
-        return item
+        return {**item, "match_confidence": "probable"} if looks_anime else item
 
-    if not isinstance(entry, dict):
-        return item
-
-    tmdb_id, mapped_media_type = fribb_client.extract_tmdb(entry.get("themoviedb_id"))
-    if not tmdb_id:
-        return item
+    if not candidates:
+        return {**item, "match_confidence": "probable"} if looks_anime else item
+    native = [candidate for candidate in candidates if candidate[0] in {"anilist", "mal", "anidb"}]
+    counted = native or candidates
+    grouped: dict[tuple[int, str | None], list[tuple[str, dict, int, str | None]]] = {}
+    for candidate in counted:
+        grouped.setdefault((candidate[2], candidate[3]), []).append(candidate)
+    ranked = sorted(grouped.values(), key=lambda group: -len(group))
+    if len(ranked) > 1 and len(ranked[0]) == len(ranked[1]):
+        return {**item, "match_confidence": "ambiguous",
+                "mapping_evidence": [f"{source}:tmdb:{namespace or ''}:{tmdb}"
+                                     for source, _, tmdb, namespace in candidates]}
+    chosen = ranked[0]
+    source_name, entry, tmdb_id, mapped_media_type = chosen[0]
 
     item_media_type = str(item.get("media_type") or "").strip().lower()
     if mapped_media_type and item_media_type and item_media_type != mapped_media_type:
         # The mapping is for the other TMDB namespace; adopting it would key the
         # item as the wrong thing entirely.
-        return item
+        return {**item, "match_confidence": "ambiguous"}
 
     enriched = dict(item)
     enriched["tmdb_id"] = str(tmdb_id)
+    enriched["match_confidence"] = "verified" if len(chosen) > 1 else "exact"
+    enriched["anime_mapping_source"] = "fribb_exact"
+    enriched["mapping_evidence"] = [source for source, _, _, _ in chosen]
     enriched_ids = dict(ids)
     enriched_ids["tmdb"] = str(tmdb_id)
     # The same Fribb entry usually carries the IMDB id too. Trakt and SIMKL
@@ -484,6 +508,20 @@ def enrich_identity(item: dict) -> dict:
 
     season_map = entry.get("season")
     offset_map = entry.get("episode_offset")
+    if enriched.get("anilist_id") or ids.get("anilist"):
+        try:
+            simple_season = int(season_map.get("tmdb")) if isinstance(season_map, dict) else 0
+            simple_offset = int(offset_map.get("tmdb", 0)) if isinstance(offset_map, dict) else 0
+            episode_count = int(item.get("anilist_episode_count") or 0)
+        except (TypeError, ValueError):
+            simple_season = simple_offset = episode_count = 0
+        if (simple_season > 0 and 0 <= simple_offset < 10000
+                and 0 < episode_count <= 500 and not anidb_raw):
+            enriched.setdefault("season", simple_season)
+            enriched["local_season"] = source_season
+            enriched["episode_start"] = simple_offset + 1
+            enriched["episode_end"] = simple_offset + episode_count
+            enriched["episode_offset"] = simple_offset
     if mapped_season is None and isinstance(season_map, dict):
         mapped_season = season_map.get("tmdb")
         if mapped_season is not None and episode is not None:

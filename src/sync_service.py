@@ -271,6 +271,8 @@ class SyncService:
         list_state: dict | None = None,
         trakt_token_refreshed_callback=None,
         mdblist_token_refreshed_callback=None,
+        negative_mapping_overrides: dict | None = None,
+        manual_resolution_keys: set[str] | None = None,
     ):
         self._config = config
         self._simkl = SimklClient(config.simkl, cancel_requested_callback=cancel_requested_callback)
@@ -294,6 +296,8 @@ class SyncService:
             anime_root_resolver=self._make_anime_root_resolver(),
             initial_cache=resolution_cache,
             initial_failed_cache=failed_resolution_cache,
+            negative_overrides=negative_mapping_overrides,
+            manual_cache_keys=manual_resolution_keys,
         )
         self._status_callback = status_callback
         self._progress_callback = progress_callback
@@ -467,9 +471,8 @@ class SyncService:
         # Fribb maintains correct per-show entries (Fate/Zero → 44382, not 30887).
         # Always prefer Fribb when it has an entry that disagrees with PMDB.
         #
-        # Exception: if PMDB used root_series AND Fribb has no entry, accept PMDB
-        # (root is better than nothing).  If Fribb has no entry and PMDB is
-        # unconfirmed (0-vote / ambiguous), log a warning — the result may be wrong.
+        # A mapping without sufficient evidence must never cross the write
+        # boundary merely because Fribb has no corresponding entry.
         if (
             str(item.get("simkl_type", "")).strip().lower() == "anime"
             and result.resolution_kind in ("external_mapping", "root_series")
@@ -478,18 +481,24 @@ class SyncService:
         ):
             fribb_tmdb = self._resolve_tmdb_id_via_fribb(item)
             if fribb_tmdb is None:
-                # Fribb has no entry at all.  Log severity depends on confidence.
-                if result.match_confidence != "verified":
+                if result.match_confidence not in {"exact", "verified"}:
                     logger.warning(
                         "[resolve-post] anime '%s' — PMDB %s returned unconfirmed"
                         " tmdb=%d (confidence=%s) and Fribb has no entry;"
-                        " result may be wrong (anilist=%s mal=%s)",
+                        " marking unresolved (anilist=%s mal=%s)",
                         item.get("title"),
                         result.resolution_kind,
                         result.tmdb_id,
                         result.match_confidence,
                         item.get("anilist_id") or (item.get("ids") or {}).get("anilist"),
                         item.get("mal_id") or (item.get("ids") or {}).get("mal"),
+                    )
+                    return MatchResult(
+                        tmdb_id=None, resolution_kind="unresolved",
+                        unresolved_reason="unverified_anime_mapping",
+                        match_confidence="unresolved",
+                        anime_mapping_source=result.anime_mapping_source,
+                        candidate_tmdb_id=result.tmdb_id,
                     )
                 else:
                     logger.debug(
@@ -511,6 +520,18 @@ class SyncService:
                     anime_mapping_source="fribb_exact",
                     candidate_tmdb_id=result.tmdb_id,
                 )
+        if (
+            str(item.get("simkl_type", "")).strip().lower() == "anime"
+            and result.tmdb_id is not None
+            and result.match_confidence not in {"exact", "verified"}
+        ):
+            return MatchResult(
+                tmdb_id=None, resolution_kind="unresolved",
+                unresolved_reason="unverified_anime_mapping",
+                match_confidence="unresolved",
+                anime_mapping_source=result.anime_mapping_source,
+                candidate_tmdb_id=result.tmdb_id,
+            )
         return result
 
     def _resolve_tmdb_id_via_fribb(self, item: dict) -> int | None:
@@ -2855,6 +2876,7 @@ class SyncService:
                             "resolved_tmdb_id": tmdb_id,
                             "match_confidence": match_result.match_confidence,
                             "anime_mapping_source": match_result.anime_mapping_source,
+                            "mapping_evidence": list(match_result.mapping_evidence),
                         })
                         stats.items_resolved += 1
                         stats.match_breakdown[match_result.resolution_kind] = (
@@ -2876,6 +2898,7 @@ class SyncService:
                         unresolved_summary = _unresolved_item_summary(item, list_name=stats.list_name, unresolved_reason=unresolved_reason)
                         unresolved_summary["match_confidence"] = match_result.match_confidence
                         unresolved_summary["anime_mapping_source"] = match_result.anime_mapping_source
+                        unresolved_summary["mapping_evidence"] = list(match_result.mapping_evidence)
                         if match_result.candidate_tmdb_id:
                             unresolved_summary["candidate_tmdb_id"] = match_result.candidate_tmdb_id
                         stats.unresolved_items.append(unresolved_summary)

@@ -194,12 +194,17 @@ class SyncStateStore:
         return None
 
     @staticmethod
-    def _ledger_key(category: str, item_key: str) -> str:
-        return f"{str(category)}\t{str(item_key)}"
+    def _ledger_key(category: str, item_key: str, target: str = "", target_list: str = "") -> str:
+        parts = [str(category), str(item_key)]
+        if target:
+            parts.extend((str(target), str(target_list)))
+        return "\t".join(parts)
 
-    def tombstone_blocks(self, category: str, item_key: str, item: dict | None = None) -> bool:
+    def tombstone_blocks(self, category: str, item_key: str, item: dict | None = None,
+                         *, target: str = "", target_list: str = "") -> bool:
         with self._lock:
-            entry = self._tombstones.get(self._ledger_key(category, item_key))
+            entry = (self._tombstones.get(self._ledger_key(category, item_key, target, target_list))
+                     or self._tombstones.get(self._ledger_key(category, item_key)))
             if not entry:
                 return False
             deleted_at = int(entry.get("deleted_at") or 0)
@@ -210,21 +215,29 @@ class SyncStateStore:
 
     def record_tombstone(
         self, route_id: str, category: str, item_key: str, *,
-        source: str = "", target: str = "", save: bool = True,
+        source: str = "", target: str = "", target_list: str = "", save: bool = True,
     ) -> None:
         with self._lock:
-            self._tombstones[self._ledger_key(category, item_key)] = {
+            self._tombstones[self._ledger_key(category, item_key, target, target_list)] = {
                 "route_id": str(route_id), "category": str(category),
                 "item_key": str(item_key), "source": str(source),
-                "target": str(target), "deleted_at": int(time.time()),
+                "target": str(target), "target_list": str(target_list),
+                "deleted_at": int(time.time()),
             }
             self._dirty = True
             if save:
                 self._save_locked()
 
-    def clear_tombstone(self, category: str, item_key: str, *, save: bool = True) -> bool:
+    def clear_tombstone(self, category: str, item_key: str, *, target: str = "",
+                        target_list: str = "", save: bool = True) -> bool:
         with self._lock:
-            removed = self._tombstones.pop(self._ledger_key(category, item_key), None) is not None
+            removed = self._tombstones.pop(
+                self._ledger_key(category, item_key, target, target_list), None
+            ) is not None
+            if target:
+                removed = (self._tombstones.pop(
+                    self._ledger_key(category, item_key), None
+                ) is not None) or removed
             if removed:
                 self._dirty = True
                 if save:

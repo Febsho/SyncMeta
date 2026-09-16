@@ -1474,6 +1474,14 @@
           </div>
           <div id="anime-mapping-body"><div class="empty">No manual mappings saved yet.</div></div>
         </div>
+        <div class="panel" id="library-identity-panel" style="display:none">
+          <div class="panel-header"><span>Library identity review</span><span class="history-time" id="library-identity-meta"></span></div>
+          <div id="library-identity-body"></div>
+        </div>
+        <div class="panel" id="sync-recovery-panel" style="display:none">
+          <div class="panel-header"><span>Sync recovery</span><span class="history-time" id="sync-recovery-meta"></span></div>
+          <div id="sync-recovery-body"></div>
+        </div>
         <div class="panel" id="issues-panel">
           <div class="panel-header">
             <span>Issues & Errors</span>
@@ -3883,7 +3891,10 @@
       }
       if (target === 'issues') {
         renderIssuesPage();
-        if (sessionProfileId) { fetchUnresolved(); loadAnimeMappings(); }
+        if (sessionProfileId) {
+          fetchUnresolved(); loadAnimeMappings();
+          loadLibraryIdentityIssues(); loadSyncRecovery();
+        }
       }
       if (requested === 'mapping' || requested === 'unresolved') {
         setTimeout(() => { const n = el('issues-panel'); if (n) n.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 0);
@@ -7374,12 +7385,12 @@
           ? `<div class="catalog-note" style="margin-top:4px;color:var(--orange)"><span aria-hidden="true">⚠</span> TMDB collision — another item already occupies TMDB ${esc(item.candidate_tmdb_id || '')}. Enter a <strong>different</strong> TMDB ID below.</div>`
           : `${reasonText ? `<div class="catalog-note" style="margin-top:4px;color:var(--z400)">${esc(reasonText)}</div>` : ''}${conflictNote}`;
         const confidenceBadge = item.match_confidence && item.match_confidence !== 'unresolved' ? `<div class="catalog-note" style="margin-top:2px">confidence: ${esc(item.match_confidence)}</div>` : '';
-        // For collision items the candidate is the *colliding* ID — don't pre-fill
-        // it (user must enter the correct distinct ID). For other reasons it's a
-        // genuine suggestion so pre-fill it to save the user a lookup.
-        const suggestedValue = (!isCollision && item.candidate_tmdb_id) ? escAttr(item.candidate_tmdb_id) : '';
+        const evidenceBadge = Array.isArray(item.mapping_evidence) && item.mapping_evidence.length
+          ? `<div class="catalog-note" style="margin-top:2px">evidence: ${esc(item.mapping_evidence.join(' · '))}</div>` : '';
+        // A rejected candidate is evidence for review, not a safe manual answer.
+        const suggestedValue = '';
         const suggestedBadge = (!isCollision && item.candidate_tmdb_id)
-          ? `<div class="catalog-note" style="margin-top:2px;color:var(--green)">suggested TMDB: ${esc(item.candidate_tmdb_id)}</div>`
+          ? `<div class="catalog-note" style="margin-top:2px;color:var(--orange)">unverified candidate TMDB: ${esc(item.candidate_tmdb_id)}</div>`
           : '';
 
         // Build external lookup links so the user can find the TMDB ID easily.
@@ -7404,6 +7415,7 @@
             ${listBadge}
             ${reasonLabel}
             ${confidenceBadge}
+            ${evidenceBadge}
             ${suggestedBadge}
             <div style="margin-top:3px;font-size:11px">${idLinks}</div>
           </td>
@@ -7413,6 +7425,7 @@
               <button class="btn btn-sm unresolved-auto-btn" type="button" data-cache-key="${cacheKey}">Auto Map</button>
               <input type="number" min="1" placeholder="TMDB ID" value="${suggestedValue}" class="unresolved-tmdb-input" style="width:100px;padding:4px 6px;border:1px solid ${isCollision ? 'var(--orange)' : 'var(--z700)'};border-radius:4px;background:var(--z900);color:var(--z100);font-size:12px" />
               <button class="btn btn-sm unresolved-resolve-btn" type="button" data-cache-key="${cacheKey}">Map</button>
+              ${item.simkl_type === 'anime' && item.candidate_tmdb_id ? `<button class="btn btn-sm unresolved-reject-btn" type="button" data-candidate-id="${escAttr(item.candidate_tmdb_id)}" ${item.candidate_rejected ? 'disabled' : ''}>${item.candidate_rejected ? 'Rejected' : 'Reject candidate'}</button>` : ''}
               <button class="btn btn-sm unresolved-dismiss-btn" type="button" data-cache-key="${cacheKey}" style="color:var(--z500)">Dismiss</button>
             </div>
           </td>
@@ -7448,6 +7461,9 @@
       });
       body.querySelectorAll('.unresolved-resolve-btn').forEach(btn => {
         btn.addEventListener('click', () => resolveUnresolvedItem(btn.closest('tr')));
+      });
+      body.querySelectorAll('.unresolved-reject-btn').forEach(btn => {
+        btn.addEventListener('click', () => rejectUnresolvedCandidate(btn.closest('tr')));
       });
       body.querySelectorAll('.unresolved-dismiss-btn').forEach(btn => {
         btn.addEventListener('click', () => dismissUnresolvedItem(btn.closest('tr')));
@@ -7568,6 +7584,28 @@
         if (autoBtn) autoBtn.disabled = false;
         if (mapBtn) { mapBtn.disabled = false; mapBtn.textContent = 'Map'; }
         showToast(result.data?.message || result.data?.error || 'Failed to save mapping', true);
+      }
+    }
+
+    async function rejectUnresolvedCandidate(row) {
+      if (!row) return;
+      const btn = row.querySelector('.unresolved-reject-btn');
+      const cacheKey = row.dataset.cacheKey;
+      const tmdbId = parseInt(btn && btn.dataset.candidateId || '', 10);
+      if (!btn || !cacheKey || !tmdbId) return;
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        const result = await apiPost('/api/profile/anime/mappings/reject', {
+          cache_key: cacheKey, tmdb_id: tmdbId,
+        });
+        if (!result.ok) throw new Error(result.data?.message || 'Could not reject candidate');
+        btn.textContent = 'Rejected';
+        showToast(`TMDB ${tmdbId} will stay blocked for this anime.`, false, true);
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Reject candidate';
+        showToast(error.message || 'Could not reject candidate', true);
       }
     }
 
@@ -9473,6 +9511,83 @@
 
     // ── Manual anime mappings ─────────────────────────────────────────────
 
+    async function loadLibraryIdentityIssues() {
+      if (!sessionProfileId) return;
+      let result;
+      try { result = await apiPost('/api/profile/library/identity-issues', {}); }
+      catch { return; }
+      if (!result.ok) return;
+      const items = (result.data.items || []).filter(item => item.classification !== 'healthy');
+      const panel = el('library-identity-panel');
+      const body = el('library-identity-body');
+      if (!panel || !body) return;
+      panel.style.display = items.length ? '' : 'none';
+      el('library-identity-meta').textContent = `${items.length} for review`;
+      body.innerHTML = `<div class="table-scroll"><table><thead><tr><th>Title</th><th>Classification</th><th>Evidence</th></tr></thead><tbody>${items.map(item => {
+        const canonical = item.canonical_identity || {};
+        const entries = (item.provider_entries || []).map(part => `${part.provider}:${part.id}`).join(' · ');
+        return `<tr><td><strong>${esc(item.title || 'Unknown')}</strong><div class="catalog-note"><code>${esc(item.key)}</code></div></td>
+          <td>${esc(item.classification.replace(/_/g, ' '))}<div class="catalog-note">${esc((item.reasons || []).join(' · ').replace(/_/g, ' '))}</div></td>
+          <td>${canonical.source ? esc(canonical.source) : 'Legacy / unknown'}${canonical.confidence ? ` · ${esc(canonical.confidence)}` : ''}
+            <div class="catalog-note">${esc(entries || 'No provider entries recorded')}</div>
+            ${item.related_keys && item.related_keys.length ? `<div class="catalog-note">Also attached to ${esc(item.related_keys.join(', '))}</div>` : ''}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+    }
+
+    async function loadSyncRecovery() {
+      if (!sessionProfileId) return;
+      let retryResult, captureResult;
+      try {
+        [retryResult, captureResult] = await Promise.all([
+          apiPost('/api/profile/sync/retries', {}),
+          apiPost('/api/profile/sync/captures', {}),
+        ]);
+      } catch { return; }
+      if (!retryResult.ok || !captureResult.ok) return;
+      const retries = retryResult.data.retries || [];
+      const captures = (captureResult.data.captures || []).filter(item => !item.restored_at);
+      const panel = el('sync-recovery-panel');
+      const body = el('sync-recovery-body');
+      if (!panel || !body) return;
+      panel.style.display = retries.length || captures.length ? '' : 'none';
+      el('sync-recovery-meta').textContent = `${retries.length} pending · ${captures.length} captures`;
+      body.innerHTML = `<div class="panel-body">${retries.length ? `<strong>Writes needing review</strong><div class="catalog-note">Uncertain history writes are never replayed automatically.</div>` : ''}
+        ${retries.map((item, index) => `<div class="catalog-note" style="margin-top:8px">${esc(item.category)} ${esc(item.operation)} · ${esc(item.route_id)} · ${esc((item.item || {}).title || item.item_key)}
+          <span class="c-dim">${esc(item.reason || '')}</span> <button class="btn btn-sm" type="button" data-retry-index="${index}">Dismiss</button></div>`).join('')}
+        ${captures.length ? `<strong style="display:block;margin-top:14px">Removal captures</strong>` : ''}
+        ${captures.map((item, index) => `<div class="catalog-note" style="margin-top:8px">${esc(item.provider)} · ${esc(item.category)} · ${esc(item.item_count)} item${item.item_count === 1 ? '' : 's'}
+          <span class="c-dim">${esc(item.target_list || '')}</span> <button class="btn btn-sm" type="button" data-capture-index="${index}">Restore</button></div>`).join('')}</div>`;
+      body.querySelectorAll('[data-retry-index]').forEach(btn => btn.addEventListener('click', async () => {
+        const item = retries[Number(btn.dataset.retryIndex)];
+        const ok = await confirmDialog({
+          title: 'Dismiss this uncertain write?',
+          body: item.category === 'history' ? 'A later run may propose this play again. Check the destination first so it is not duplicated.' : 'A later run may propose this action again.',
+          confirmLabel: 'Dismiss retry', destructive: true,
+        });
+        if (!ok) return;
+        const result = await apiPost('/api/profile/sync/retries/dismiss', {
+          route_id: item.route_id, category: item.category,
+          operation: item.operation, item_key: item.item_key,
+        });
+        if (!result.ok) { showToast(formatApiError(result.data, 'Could not dismiss retry.'), true); return; }
+        loadSyncRecovery();
+      }));
+      body.querySelectorAll('[data-capture-index]').forEach(btn => btn.addEventListener('click', async () => {
+        const item = captures[Number(btn.dataset.captureIndex)];
+        const ok = await confirmDialog({
+          title: 'Restore captured items?',
+          body: `Restore ${item.item_count} item${item.item_count === 1 ? '' : 's'} to ${item.provider}${item.target_list ? ` / ${item.target_list}` : ''}.`,
+          confirmLabel: 'Restore items',
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        const result = await apiPost('/api/profile/sync/captures/restore', { capture_id: item.capture_id });
+        if (!result.ok) { btn.disabled = false; showToast(formatApiError(result.data, 'Could not restore capture.'), true); return; }
+        showToast('Captured items restored.', false, true);
+        loadSyncRecovery();
+      }));
+    }
+
     let animeMappings = [];
     let animeMappingQuery = '';
 
@@ -10121,6 +10236,8 @@
       if (issuesRefresh) issuesRefresh.addEventListener('click', () => {
         fetchUnresolved();
         loadAnimeMappings();
+        loadLibraryIdentityIssues();
+        loadSyncRecovery();
         testConnections(undefined, true);
         _forceStatusRefresh();
       });

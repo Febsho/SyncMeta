@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import copy
+import re
 import tempfile
 import threading
 import time
@@ -44,6 +46,8 @@ from .media_kind import KIND_ANIME, KIND_ANIME_MOVIE, classify, normalize_namesp
 from .providers import PLANNED_FLAG, PlaySet, is_planned
 
 logger = logging.getLogger(__name__)
+
+IDENTITY_MAPPING_VERSION = 2
 
 #: Categories the Library holds, mirroring the pair categories.
 SECTION_WATCHLIST = "watchlist"
@@ -174,6 +178,7 @@ class LibraryStore:
             "anidb_id": item.get("anidb_id") or (item.get("ids") or {}).get("anidb"),
             "sections": {},
             "seasons": {},
+            "provider_entries": [],
             "watched": {},
             # Every viewing, not just the first: {slot: [timestamp, ...]}.
             # `watched` keeps one date per episode because that is what the
@@ -212,6 +217,23 @@ class LibraryStore:
         # source that does not model anime must not downgrade it back.
         if entry.get("kind") not in (KIND_ANIME, KIND_ANIME_MOVIE):
             entry["kind"] = classify({**item, "media_type": entry.get("media_type")})
+        confidence = str(item.get("match_confidence") or "").strip().lower()
+        mapping_source = str(item.get("anime_mapping_source") or "").strip()
+        if (entry.get("kind") in (KIND_ANIME, KIND_ANIME_MOVIE)
+                and confidence in {"exact", "verified"} and mapping_source
+                and not entry.get("canonical_identity")):
+            entry["canonical_identity"] = {
+                "tmdb_id": str(entry.get("tmdb_id") or ""),
+                "namespace": entry.get("media_type"),
+                "confidence": confidence, "source": mapping_source,
+                "resolved_at": time.time(),
+                "mapping_version": IDENTITY_MAPPING_VERSION,
+                "evidence": list(item.get("mapping_evidence") or []) or [f"{provider}:{value}" for provider, value in (
+                    ("anilist", entry.get("anilist_id")),
+                    ("mal", entry.get("mal_id")),
+                    ("anidb", entry.get("anidb_id")),
+                ) if value],
+            }
         season = item.get("season")
         if season is not None:
             try:
@@ -221,11 +243,54 @@ class LibraryStore:
             if number is not None:
                 seasons = entry.setdefault("seasons", {})
                 record = seasons.setdefault(str(number), {})
+                record.setdefault("provider_entries", [])
                 for field in ("title", "anilist_id", "mal_id", "anidb_id"):
                     source_field = "title" if field == "title" else field
                     value = item.get(f"season_{field}") or (item.get(source_field) if field != "title" else None)
                     if value and not record.get(field):
                         record[field] = value
+        ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+        for provider in ("anilist", "simkl", "mal", "anidb"):
+            provider_id = item.get(f"{provider}_id") or ids.get(provider)
+            if not provider_id:
+                continue
+            segment = {"provider": provider, "id": str(provider_id),
+                       "title": str(item.get("title") or "").strip()}
+            if item.get("year"):
+                segment["year"] = item["year"]
+            for source_field, target_field in (
+                ("local_season", "local_season"),
+                ("tmdb_season", "tmdb_season"),
+                ("tvdb_season", "tvdb_season"),
+                ("episode_start", "episode_start"),
+                ("episode_end", "episode_end"),
+                ("episode_offset", "episode_offset"),
+                ("tmdb_episode_start", "tmdb_episode_start"),
+                ("tmdb_episode_end", "tmdb_episode_end"),
+                ("tvdb_episode_start", "tvdb_episode_start"),
+                ("tvdb_episode_end", "tvdb_episode_end"),
+            ):
+                if item.get(source_field) is not None:
+                    segment[target_field] = item[source_field]
+            entries = entry.setdefault("provider_entries", [])
+            found = next((existing for existing in entries
+                          if existing.get("provider") == provider and
+                          str(existing.get("id")) == str(provider_id)), None)
+            if found is None:
+                entries.append(segment.copy())
+            else:
+                for field, value in segment.items():
+                    found.setdefault(field, value)
+            if season is not None and number is not None:
+                season_entries = record.setdefault("provider_entries", [])
+                found = next((existing for existing in season_entries
+                              if existing.get("provider") == provider and
+                              str(existing.get("id")) == str(provider_id)), None)
+                if found is None:
+                    season_entries.append(segment.copy())
+                else:
+                    for field, value in segment.items():
+                        found.setdefault(field, value)
         entry["updated_at"] = time.time()
 
     @staticmethod
@@ -272,6 +337,70 @@ class LibraryStore:
         states[provider] = state
         return True
 
+    @staticmethod
+    def _native_identities(value: dict) -> set[tuple[str, str]]:
+        ids = value.get("ids") if isinstance(value.get("ids"), dict) else {}
+        found = set()
+        for provider in ("anilist", "mal", "anidb"):
+            provider_id = value.get(f"{provider}_id") or ids.get(provider)
+            if provider_id:
+                found.add((provider, str(provider_id)))
+        for part in value.get("provider_entries", []) or []:
+            if (isinstance(part, dict) and part.get("provider") in {"anilist", "mal", "anidb"}
+                    and part.get("id")):
+                found.add((str(part["provider"]), str(part["id"])))
+        return found
+
+    def _entry_for_verified_write(self, key: str, item: dict) -> tuple[dict, bool]:
+        """Return the canonical entry, repairing one uniquely matched old key."""
+        entry = self._items.get(key)
+        confidence = str(item.get("match_confidence") or
+                         (item.get("canonical_identity") or {}).get("confidence") or "").lower()
+        source = str(item.get("anime_mapping_source") or
+                     (item.get("canonical_identity") or {}).get("source") or "").strip()
+        if not key.startswith("tmdb:") or confidence not in {"exact", "verified"} or not source:
+            if entry is None:
+                entry = self._blank(key, item)
+                self._items[key] = entry
+            return entry, False
+        native = self._native_identities(item)
+        namespace = key.split(":", 2)[1]
+        candidates = [candidate for candidate_key, candidate in self._items.items()
+                      if (candidate_key != key
+                          and normalize_namespace(candidate.get("media_type")) == namespace
+                          and candidate.get("kind") in {KIND_ANIME, KIND_ANIME_MOVIE}
+                          and native & self._native_identities(candidate))]
+        if len(candidates) != 1:
+            if entry is None:
+                entry = self._blank(key, item)
+                self._items[key] = entry
+            return entry, False
+        old = candidates[0]
+        old_key = str(old.get("key") or "")
+        if entry is None:
+            entry = copy.deepcopy(old)
+            self._items[key] = entry
+        else:
+            self._merge_rekey_state(entry, old)
+        self._items.pop(old_key, None)
+        entry["key"] = key
+        entry["tmdb_id"] = key.rsplit(":", 1)[-1]
+        previous_identity = copy.deepcopy(entry.get("canonical_identity") or {})
+        if previous_identity:
+            entry.setdefault("identity_repairs", []).append(previous_identity)
+        entry.setdefault("identity_repairs", []).append({
+            "previous_key": old_key, "source": source, "confidence": confidence,
+            "resolved_at": time.time(),
+        })
+        entry["canonical_identity"] = {
+            "tmdb_id": key.rsplit(":", 1)[-1], "namespace": namespace,
+            "confidence": confidence, "source": source,
+            "resolved_at": time.time(), "mapping_version": IDENTITY_MAPPING_VERSION,
+            "previous_key": old_key,
+            "evidence": list(item.get("mapping_evidence") or []),
+        }
+        return entry, True
+
     def add(self, section: str, items: list[dict], source: str = "") -> dict:
         """Put ``items`` into ``section``. Returns add/skip counts."""
         section = str(section or "").strip().lower()
@@ -286,10 +415,8 @@ class LibraryStore:
                 if not key:
                     skipped += 1
                     continue
-                entry = self._items.get(key)
-                if entry is None:
-                    entry = self._blank(key, item)
-                    self._items[key] = entry
+                entry, repaired = self._entry_for_verified_write(key, item)
+                changed = repaired or changed
                 self._merge_identity(entry, item)
                 changed = self._remember_provider_state(entry, item, source, section) or changed
                 sections = entry.setdefault("sections", {})
@@ -344,10 +471,8 @@ class LibraryStore:
                 if not key:
                     skipped += 1
                     continue
-                entry = self._items.get(key)
-                if entry is None:
-                    entry = self._blank(key, item)
-                    self._items[key] = entry
+                entry, repaired = self._entry_for_verified_write(key, item)
+                changed = repaired or changed
                 self._merge_identity(entry, item)
                 changed = self._remember_provider_state(entry, item, source, "history") or changed
                 if entry.get("media_type") == "movie":
@@ -449,10 +574,8 @@ class LibraryStore:
                 if not key:
                     skipped += 1
                     continue
-                entry = self._items.get(key)
-                if entry is None:
-                    entry = self._blank(key, item)
-                    self._items[key] = entry
+                entry, repaired = self._entry_for_verified_write(key, item)
+                changed = repaired or changed
                 self._merge_identity(entry, item)
                 changed = self._remember_provider_state(entry, item, source, "resume") or changed
                 if entry.get("media_type") == "movie":
@@ -518,6 +641,7 @@ class LibraryStore:
             "year": entry.get("year"),
             "media_type": entry.get("media_type") or "tv",
             "kind": entry.get("kind"),
+            "canonical_identity": entry.get("canonical_identity"),
             "tmdb_id": entry.get("tmdb_id"),
             "imdb_id": entry.get("imdb_id"),
             "anilist_id": entry.get("anilist_id"),
@@ -531,6 +655,10 @@ class LibraryStore:
         }
         if season is not None:
             item["season"] = season
+            canonical = entry.get("canonical_identity") or {}
+            if canonical.get("confidence") in {"exact", "verified"}:
+                record = (entry.get("seasons") or {}).get(str(season)) or {}
+                item["provider_segments"] = copy.deepcopy(record.get("provider_entries") or [])
         if episode is not None:
             item["episode"] = episode
         return item
@@ -608,6 +736,205 @@ class LibraryStore:
         with self._lock:
             found = self._items.get(str(key))
             return dict(found) if found else None
+
+    def rekey_verified(self, old_key: str, new_key: str, *, source: str,
+                       confidence: str = "verified") -> dict:
+        """Repair a verified anime key without dropping plays or existing state.
+
+        This explicit operation never guesses a replacement identity. Callers
+        must supply the verified destination and the identity source.
+        """
+        if confidence not in {"exact", "verified"} or not source:
+            raise ValueError("A verified identity source is required")
+        parts = str(new_key).split(":")
+        if len(parts) != 3 or parts[0] != "tmdb" or parts[1] not in {"tv", "movie"} or not parts[2].isdigit():
+            raise ValueError("Destination must be a TMDB movie or TV identity")
+        with self._lock:
+            original = self._items.get(str(old_key))
+            if original is None:
+                return {"rekeyed": False, "reason": "source_missing"}
+            if old_key == new_key:
+                return {"rekeyed": False, "reason": "already_canonical"}
+            if original.get("kind") not in {KIND_ANIME, KIND_ANIME_MOVIE}:
+                raise ValueError("Identity repair requires an anime source")
+            if normalize_namespace(original.get("media_type")) != parts[1]:
+                raise ValueError("TMDB namespace conflicts with source")
+            target = self._items.get(new_key)
+            if target is not None and normalize_namespace(target.get("media_type")) != parts[1]:
+                raise ValueError("TMDB namespace conflicts with destination")
+            if target is not None and not self._same_anime_identity(original, target):
+                raise ValueError("Destination has no shared anime-native identity")
+
+            replacement = copy.deepcopy(target or original)
+            if target is not None:
+                self._merge_rekey_state(replacement, original)
+            replacement["key"] = new_key
+            replacement["tmdb_id"] = parts[2]
+            replacement["kind"] = original["kind"]
+            if replacement.get("canonical_identity"):
+                replacement.setdefault("identity_repairs", []).append(
+                    copy.deepcopy(replacement["canonical_identity"])
+                )
+            if target is not None and original.get("canonical_identity"):
+                replacement.setdefault("identity_repairs", []).append(
+                    copy.deepcopy(original["canonical_identity"])
+                )
+            replacement["canonical_identity"] = {
+                "tmdb_id": parts[2], "namespace": parts[1],
+                "confidence": confidence, "source": source,
+                "resolved_at": time.time(), "previous_key": old_key,
+                "mapping_version": IDENTITY_MAPPING_VERSION,
+            }
+            previous_items = self._items.copy()
+            self._items[new_key] = replacement
+            self._items.pop(old_key, None)
+            try:
+                self._save_locked()
+            except Exception:
+                self._items = previous_items
+                raise
+            return {"rekeyed": True, "merged": target is not None, "key": new_key}
+
+    @staticmethod
+    def _same_anime_identity(left: dict, right: dict) -> bool:
+        for field in ("anilist_id", "mal_id", "anidb_id"):
+            if left.get(field) and right.get(field) and str(left[field]) == str(right[field]):
+                return True
+        left_entries = {(part.get("provider"), str(part.get("id")))
+                        for part in left.get("provider_entries", []) if isinstance(part, dict)}
+        right_entries = {(part.get("provider"), str(part.get("id")))
+                         for part in right.get("provider_entries", []) if isinstance(part, dict)}
+        return bool(left_entries & right_entries)
+
+    @staticmethod
+    def _merge_rekey_state(target: dict, source: dict) -> None:
+        for field in ("title", "year", "imdb_id", "anilist_id", "mal_id", "anidb_id", "planned"):
+            if target.get(field) is None or target.get(field) == "":
+                if source.get(field) is not None:
+                    target[field] = source[field]
+        target["added_at"] = min(target.get("added_at", time.time()), source.get("added_at", time.time()))
+        target["updated_at"] = max(target.get("updated_at", 0), source.get("updated_at", 0))
+        for field in ("sources",):
+            values = target.setdefault(field, [])
+            for value in source.get(field, []):
+                if value not in values:
+                    values.append(value)
+        for field in ("sections", "watched", "provider_states"):
+            values = target.setdefault(field, {})
+            for key, value in source.get(field, {}).items():
+                if key in values and values[key] != value:
+                    target.setdefault("repair_conflicts", {}).setdefault(field, {})[key] = copy.deepcopy(value)
+                values.setdefault(key, value)
+        for slot, stamps in source.get("plays", {}).items():
+            stored = target.setdefault("plays", {}).setdefault(slot, [])
+            for stamp in stamps:
+                if stamp not in stored:
+                    stored.append(stamp)
+        for slot, stamp in source.get("watched", {}).items():
+            stored = target.setdefault("plays", {}).setdefault(slot, [])
+            if stamp not in stored:
+                stored.append(stamp)
+        for slot, value in source.get("resume", {}).items():
+            existing = target.setdefault("resume", {}).get(slot)
+            if existing is not None and existing != value:
+                target.setdefault("repair_conflicts", {}).setdefault("resume", {})[slot] = copy.deepcopy(value)
+            if existing is None or str(value.get("updated_at", "")) > str(existing.get("updated_at", "")):
+                target["resume"][slot] = copy.deepcopy(value)
+        def merge_entries(destination, incoming):
+            for part in incoming or []:
+                if not isinstance(part, dict):
+                    continue
+                found = next((existing for existing in destination if
+                              existing.get("provider") == part.get("provider") and
+                              str(existing.get("id")) == str(part.get("id"))), None)
+                if found is None:
+                    destination.append(copy.deepcopy(part))
+                else:
+                    for field, value in part.items():
+                        found.setdefault(field, value)
+        merge_entries(target.setdefault("provider_entries", []), source.get("provider_entries", []))
+        for number, record in source.get("seasons", {}).items():
+            destination = target.setdefault("seasons", {}).setdefault(number, {})
+            for field, value in record.items():
+                if field != "provider_entries":
+                    destination.setdefault(field, copy.deepcopy(value))
+            merge_entries(destination.setdefault("provider_entries", []), record.get("provider_entries", []))
+
+    def scan_identity_integrity(self) -> list[dict]:
+        """Classify stored anime identities for review without changing data."""
+        with self._lock:
+            rows = copy.deepcopy(list(self._items.values()))
+        native_keys: dict[tuple[str, str], set[str]] = {}
+        for entry in rows:
+            for part in entry.get("provider_entries", []):
+                if isinstance(part, dict) and part.get("provider") and part.get("id"):
+                    native_keys.setdefault((str(part["provider"]), str(part["id"])), set()).add(entry["key"])
+        results = []
+        for entry in rows:
+            if entry.get("kind") not in {KIND_ANIME, KIND_ANIME_MOVIE}:
+                continue
+            reasons = []
+            classification = "healthy"
+            key = str(entry.get("key") or "")
+            canonical = entry.get("canonical_identity") or {}
+            if key.startswith("tmdb:") and not canonical:
+                classification = "review"
+                reasons.append("legacy_mapping_without_evidence")
+            elif canonical and canonical.get("mapping_version") != IDENTITY_MAPPING_VERSION:
+                classification = "review"
+                reasons.append("stale_mapping_version")
+            if not key.startswith("tmdb:"):
+                classification = "unresolved"
+                reasons.append("no_canonical_tmdb_identity")
+            if key.startswith("tmdb:"):
+                parts = key.split(":")
+                if len(parts) != 3 or parts[1] != normalize_namespace(entry.get("media_type")):
+                    classification = "likely_wrong"
+                    reasons.append("namespace_conflict")
+                elif canonical and (str(canonical.get("tmdb_id")) != parts[2] or
+                                    canonical.get("namespace") != parts[1]):
+                    classification = "needs_rekey"
+                    reasons.append("provenance_disagrees_with_key")
+            shared_keys = set()
+            for part in entry.get("provider_entries", []):
+                if isinstance(part, dict):
+                    shared_keys.update(native_keys.get(
+                        (str(part.get("provider")), str(part.get("id"))), set()
+                    ))
+            shared_keys.discard(key)
+            if shared_keys:
+                if classification == "healthy":
+                    classification = "review"
+                reasons.append("provider_entry_on_multiple_canonical_keys")
+            segments = [part for part in entry.get("provider_entries", [])
+                        if isinstance(part, dict) and part.get("provider") in {"anilist", "mal", "anidb"}]
+            for index, first in enumerate(segments):
+                for second in segments[index + 1:]:
+                    if first.get("provider") != second.get("provider"):
+                        continue
+                    try:
+                        years_apart = abs(int(first.get("year")) - int(second.get("year")))
+                    except (TypeError, ValueError):
+                        continue
+                    first_words = set(re.findall(r"\w{4,}", str(first.get("title") or "").lower()))
+                    second_words = set(re.findall(r"\w{4,}", str(second.get("title") or "").lower()))
+                    first_words -= {"season", "cour", "part"}
+                    second_words -= {"season", "cour", "part"}
+                    if years_apart > 8 and first_words and second_words and not first_words & second_words:
+                        if classification == "healthy":
+                            classification = "review"
+                        reasons.append("suspicious_provider_entry_collision")
+                        break
+                if "suspicious_provider_entry_collision" in reasons:
+                    break
+            results.append({
+                "key": key, "title": entry.get("title") or "",
+                "classification": classification, "reasons": reasons,
+                "related_keys": sorted(shared_keys),
+                "canonical_identity": canonical,
+                "provider_entries": entry.get("provider_entries", []),
+            })
+        return results
 
     def counts(self) -> dict:
         with self._lock:

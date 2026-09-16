@@ -103,6 +103,32 @@ class BaselineLifecycleTests(unittest.TestCase):
             "watchlist", "movie:tmdb:1", {"added_at": "2999-01-01T00:00:00Z"},
         ))
 
+    def test_scoped_tombstone_blocks_same_destination_only(self) -> None:
+        self.store.record_tombstone("r1", "watchlist", "movie:tmdb:1",
+                                    target="trakt", target_list="watchlist")
+        reopened = SyncStateStore(self.path)
+        self.assertTrue(reopened.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", {"title": "Old"},
+            target="trakt", target_list="watchlist",
+        ))
+        self.assertFalse(reopened.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", {"title": "Old"},
+            target="pmdb", target_list="watchlist",
+        ))
+        self.assertFalse(reopened.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", {"title": "Old"},
+            target="trakt", target_list="other-list",
+        ))
+
+    def test_scoped_success_can_clear_legacy_unscoped_tombstone(self) -> None:
+        self.store.record_tombstone("r1", "watchlist", "movie:tmdb:1")
+        self.assertTrue(self.store.clear_tombstone(
+            "watchlist", "movie:tmdb:1", target="trakt", target_list="watchlist",
+        ))
+        self.assertFalse(self.store.tombstone_blocks(
+            "watchlist", "movie:tmdb:1", target="trakt", target_list="watchlist",
+        ))
+
     def test_retries_and_captures_survive_reopen(self) -> None:
         self.store.record_retry(
             "r1", "watchlist", "add", "movie:tmdb:1",

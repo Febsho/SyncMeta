@@ -71,6 +71,171 @@ class SeriesKeyTests(unittest.TestCase):
 
 
 class LibraryStoreTests(unittest.TestCase):
+    def test_integrity_scanner_flags_stale_mapping_version(self) -> None:
+        item = {"media_type": "tv", "tmdb_id": 900, "title": "Example Anime",
+                "anilist_id": 101, "match_confidence": "verified",
+                "anime_mapping_source": "manual"}
+        self.store.add(CATEGORY_WATCHLIST, [item])
+        self.store._items["tmdb:tv:900"]["canonical_identity"]["mapping_version"] = 1
+        issue = self.store.scan_identity_integrity()[0]
+        self.assertEqual(issue["classification"], "review")
+        self.assertIn("stale_mapping_version", issue["reasons"])
+
+    def test_verified_write_automatically_repairs_unique_old_identity(self) -> None:
+        old = {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime",
+               "anilist_id": 101, "season": 1, "episode": 1,
+               "watched_at": "2024-01-01T00:00:00Z"}
+        self.store.mark_watched([old], source="anilist")
+        corrected = {**old, "tmdb_id": 222, "episode": 2,
+                     "watched_at": "2024-01-02T00:00:00Z",
+                     "match_confidence": "verified",
+                     "anime_mapping_source": "fribb_exact:anilist"}
+        self.store.mark_watched([corrected], source="anilist")
+        self.assertIsNone(self.store.entry("tmdb:tv:111"))
+        entry = self.store.entry("tmdb:tv:222")
+        self.assertEqual(set(entry["watched"]), {"1x1", "1x2"})
+        self.assertEqual(entry["identity_repairs"][0]["previous_key"], "tmdb:tv:111")
+
+    def test_verified_write_does_not_guess_between_two_old_keys(self) -> None:
+        for tmdb_id in (111, 112):
+            self.store.add(CATEGORY_WATCHLIST, [{
+                "media_type": "tv", "tmdb_id": tmdb_id,
+                "title": "Example Anime", "anilist_id": 101,
+            }])
+        self.store.add(CATEGORY_WATCHLIST, [{
+            "media_type": "tv", "tmdb_id": 222, "title": "Example Anime",
+            "anilist_id": 101, "match_confidence": "verified",
+            "anime_mapping_source": "fribb_exact:anilist",
+        }])
+        self.assertIsNotNone(self.store.entry("tmdb:tv:111"))
+        self.assertIsNotNone(self.store.entry("tmdb:tv:112"))
+        self.assertIsNotNone(self.store.entry("tmdb:tv:222"))
+
+    def test_verified_write_does_not_rekey_across_tmdb_namespaces(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [{
+            "media_type": "movie", "tmdb_id": 111, "title": "Anime Film",
+            "anilist_id": 101,
+        }])
+        self.store.add(CATEGORY_WATCHLIST, [{
+            "media_type": "tv", "tmdb_id": 222, "title": "Anime Series",
+            "anilist_id": 101, "match_confidence": "verified",
+            "anime_mapping_source": "fribb_exact:anilist",
+        }])
+        self.assertEqual(self.store.entry("tmdb:movie:111")["media_type"], "movie")
+        self.assertEqual(self.store.entry("tmdb:tv:222")["media_type"], "tv")
+
+    def test_automatic_repair_replaces_stale_provenance_but_keeps_audit_record(self) -> None:
+        old = {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime",
+               "anilist_id": 101, "match_confidence": "verified",
+               "anime_mapping_source": "pmdb"}
+        self.store.add(CATEGORY_WATCHLIST, [old])
+        corrected = {**old, "tmdb_id": 222, "anime_mapping_source": "fribb_exact:anilist",
+                     "mapping_evidence": ["anilist:101"]}
+        self.store.add(CATEGORY_WATCHLIST, [corrected])
+        entry = self.store.entry("tmdb:tv:222")
+        self.assertEqual(entry["canonical_identity"]["tmdb_id"], "222")
+        self.assertEqual(entry["canonical_identity"]["source"], "fribb_exact:anilist")
+        self.assertTrue(any(record.get("tmdb_id") == "111"
+                            for record in entry["identity_repairs"]))
+
+    def test_verified_history_exports_cour_segments_for_reverse_projection(self) -> None:
+        item = {"media_type": "tv", "tmdb_id": 900, "title": "Example Anime",
+                "anilist_id": 102, "season": 1, "episode": 13,
+                "episode_start": 13, "episode_end": 24, "episode_offset": 12,
+                "match_confidence": "verified", "anime_mapping_source": "manual",
+                "watched_at": "2024-01-01T00:00:00Z"}
+        self.store.mark_watched([item], source="anilist")
+        row = LibraryStore(self.store.path).fetch("history")[0]
+        self.assertEqual(row["provider_segments"][0]["id"], "102")
+        self.assertEqual(row["provider_segments"][0]["episode_offset"], 12)
+        self.assertEqual(row["canonical_identity"]["confidence"], "verified")
+
+    def test_integrity_scanner_distinguishes_split_cours_from_old_unrelated_entry(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [
+            {"media_type": "tv", "tmdb_id": 333, "title": "Naruto Cour A",
+             "year": 2002, "anilist_id": 101, "season": 1},
+            {"media_type": "tv", "tmdb_id": 333, "title": "Naruto Cour B",
+             "year": 2002, "anilist_id": 102, "season": 1},
+        ])
+        issue = self.store.scan_identity_integrity()[0]
+        self.assertNotIn("suspicious_provider_entry_collision", issue["reasons"])
+        self.store.add(CATEGORY_WATCHLIST, [{
+            "media_type": "tv", "tmdb_id": 333, "title": "Unrelated Adventure",
+            "year": 2020, "anilist_id": 303,
+        }])
+        issue = self.store.scan_identity_integrity()[0]
+        self.assertIn("suspicious_provider_entry_collision", issue["reasons"])
+
+    def test_integrity_scanner_flags_legacy_and_duplicate_native_identity(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [
+            {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime", "anilist_id": 101},
+            {"media_type": "tv", "tmdb_id": 222, "title": "Example Anime", "anilist_id": 101},
+        ])
+        issues = {row["key"]: row for row in self.store.scan_identity_integrity()}
+        self.assertEqual(issues["tmdb:tv:111"]["classification"], "review")
+        self.assertIn("provider_entry_on_multiple_canonical_keys",
+                      issues["tmdb:tv:111"]["reasons"])
+        self.assertEqual(issues["tmdb:tv:111"]["related_keys"], ["tmdb:tv:222"])
+
+    def test_verified_rekey_preserves_history_resume_and_sources(self) -> None:
+        wrong = {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime",
+                 "simkl_type": "anime", "anilist_id": 101, "season": 1,
+                 "episode": 3, "watched_at": "2024-01-01T00:00:00Z"}
+        self.store.add(CATEGORY_WATCHLIST, [wrong], source="anilist")
+        self.store.mark_watched([wrong], source="anilist")
+        self.store.mark_watched([{**wrong, "watched_at": "2024-02-01T00:00:00Z"}], source="anilist")
+        self.store.save_resume([{**wrong, "position_ms": 1000, "runtime_ms": 5000,
+                                 "progress": 20}], source="anilist")
+        result = self.store.rekey_verified("tmdb:tv:111", "tmdb:tv:222",
+                                           source="manual", confidence="verified")
+        self.assertTrue(result["rekeyed"])
+        restored = LibraryStore(self.store.path)
+        self.assertIsNone(restored.entry("tmdb:tv:111"))
+        entry = restored.entry("tmdb:tv:222")
+        self.assertEqual(entry["plays"]["1x3"], ["2024-01-01T00:00:00Z",
+                                               "2024-02-01T00:00:00Z"])
+        self.assertEqual(entry["resume"]["1x3"]["position_ms"], 1000)
+        self.assertIn("anilist", entry["sources"])
+        self.assertEqual(entry["canonical_identity"]["source"], "manual")
+
+    def test_verified_rekey_merges_existing_matching_destination(self) -> None:
+        old = {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime",
+               "simkl_type": "anime", "anilist_id": 101, "season": 1,
+               "episode": 1, "watched_at": "2024-01-01T00:00:00Z"}
+        new = {**old, "tmdb_id": 222, "episode": 2,
+               "watched_at": "2024-01-02T00:00:00Z"}
+        self.store.mark_watched([old], source="anilist")
+        self.store.mark_watched([new], source="trakt")
+        result = self.store.rekey_verified("tmdb:tv:111", "tmdb:tv:222", source="fribb")
+        self.assertTrue(result["merged"])
+        entry = LibraryStore(self.store.path).entry("tmdb:tv:222")
+        self.assertEqual(set(entry["watched"]), {"1x1", "1x2"})
+        self.assertEqual(set(entry["sources"]), {"anilist", "trakt"})
+        self.assertEqual(len(entry["provider_entries"]), 1)
+
+    def test_verified_rekey_refuses_unrelated_existing_destination(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [
+            {"media_type": "tv", "tmdb_id": 111, "title": "Anime A", "anilist_id": 101},
+            {"media_type": "tv", "tmdb_id": 222, "title": "Anime B", "anilist_id": 202},
+        ])
+        with self.assertRaises(ValueError):
+            self.store.rekey_verified("tmdb:tv:111", "tmdb:tv:222", source="fribb")
+        self.assertIsNotNone(self.store.entry("tmdb:tv:111"))
+
+    def test_split_cours_keep_distinct_provider_entries_after_restart(self) -> None:
+        self.store.add(CATEGORY_WATCHLIST, [
+            self._aot(season=1, anilist_id=101, episode_start=1,
+                      episode_end=12, episode_offset=0),
+            self._aot(season=1, anilist_id=102, episode_start=13,
+                      episode_end=24, episode_offset=12),
+        ], source="anilist")
+        restored = LibraryStore(self.store.path)
+        entry = restored._items["tmdb:tv:1429"]
+        self.assertEqual({part["id"] for part in entry["provider_entries"]}, {"101", "102"})
+        self.assertEqual({part["id"] for part in entry["seasons"]["1"]["provider_entries"]},
+                         {"101", "102"})
+        self.assertEqual(entry["seasons"]["1"]["provider_entries"][1]["episode_offset"], 12)
+
     def setUp(self) -> None:
         self._dir = tempfile.TemporaryDirectory()
         self.store = LibraryStore(Path(self._dir.name) / "library.json")

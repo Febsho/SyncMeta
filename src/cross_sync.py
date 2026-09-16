@@ -815,7 +815,7 @@ class CrossSyncService:
                 pair, category,
                 source_by_key=source_by_key, target_by_key=target_by_key,
                 source=source, target=target,
-                source_trustworthy=source_outcome.trustworthy_for_removals,
+                source_trustworthy=source_outcome.trustworthy_for_removals and result.unmapped == 0,
             )
         if plan is not None:
             # Updates ride with additions: every adapter's `add` is an upsert for
@@ -836,6 +836,8 @@ class CrossSyncService:
                 )
         else:
             to_remove = self._items_to_remove(pair, category, source_by_key, target_by_key)
+            if result.unmapped:
+                to_remove = []
             blocked, percent = self._guard_blocks(len(to_remove), len(target_by_key))
             if blocked:
                 self._note_blocked(
@@ -854,7 +856,9 @@ class CrossSyncService:
 
         if plan is not None:
             plan = self._reviewed_plan(plan)
-            plan = self._filter_tombstoned_adds(pair, category, plan)
+            plan = self._filter_tombstoned_adds(
+                pair, category, plan, target=target.key, target_list=target_list,
+            )
             self._plans[(str(pair.pair_id), str(category))] = plan
             self._capture_plan(pair, category, target, target_list, plan)
             executable = replace(
@@ -902,6 +906,7 @@ class CrossSyncService:
             result.changes.extend(self._change_rows(wrote_removed, "removed", category))
             self._record_execution_state(
                 pair, category, execution, source=source.key, target=target.key,
+                target_list=target_list,
             )
             self._verify_removals(
                 pair, category, target, target_list, wrote_removed, result,
@@ -1443,8 +1448,8 @@ class CrossSyncService:
                 first_by_key=first_by_key, second_by_key=second_by_key,
                 baseline=baseline, policy=normalize_policy(pair.removal_mode),
                 first_provider=first.key, second_provider=second.key,
-                first_trustworthy=first.last_read_complete(),
-                second_trustworthy=second.last_read_complete(),
+                first_trustworthy=first.last_read_complete() and result.unmapped == 0,
+                second_trustworthy=second.last_read_complete() and result.unmapped == 0,
             )
         except Exception:
             logger.warning("Could not build two-way sync plan", exc_info=True)
@@ -1474,7 +1479,7 @@ class CrossSyncService:
                 ),
                 destination_size=len(second_by_key if writer_target is second else first_by_key),
                 source_size=len(first_by_key if writer_target is second else second_by_key),
-                source_trustworthy=other.last_read_complete(),
+                source_trustworthy=other.last_read_complete() and result.unmapped == 0,
                 baseline_established=baseline.allows_removals,
             )
             if verdict.blocked and plan.removals:
@@ -1691,7 +1696,9 @@ class CrossSyncService:
         forward = target is self._adapter_for(pair, "target")
         # The executor deliberately accounts for short batch responses item by
         # item.  Updates are provider upserts, so execute them as additions.
-        plan = self._filter_tombstoned_adds(pair, category, plan)
+        plan = self._filter_tombstoned_adds(
+            pair, category, plan, target=target.key, target_list=target_list,
+        )
         self._capture_plan(pair, category, target, target_list, plan)
         executable = replace(
             plan, additions=tuple(plan.additions) + tuple(plan.updates), updates=(),
@@ -1723,10 +1730,12 @@ class CrossSyncService:
         self._record_execution_state(
             pair, category, execution,
             source=pair.source if forward else pair.target, target=target.key,
+            target_list=target_list,
         )
         return execution
 
-    def _filter_tombstoned_adds(self, pair, category: str, plan: SyncPlan) -> SyncPlan:
+    def _filter_tombstoned_adds(self, pair, category: str, plan: SyncPlan,
+                                *, target: str = "", target_list: str = "") -> SyncPlan:
         if self._state_store is None:
             return plan
         uncertain_history = set()
@@ -1769,6 +1778,7 @@ class CrossSyncService:
                 try:
                     is_blocked = self._state_store.tombstone_blocks(
                         category, action.key, action.item,
+                        target=target, target_list=target_list,
                     )
                 except Exception:
                     is_blocked = False
@@ -1857,7 +1867,8 @@ class CrossSyncService:
         except Exception:
             logger.warning("Could not create pre-removal capture", exc_info=True)
 
-    def _record_execution_state(self, pair, category: str, execution, *, source: str, target: str) -> None:
+    def _record_execution_state(self, pair, category: str, execution, *, source: str,
+                                target: str, target_list: str = "") -> None:
         if self._state_store is None or self._dry_run:
             return
         for outcome in execution.outcomes:
@@ -1872,10 +1883,14 @@ class CrossSyncService:
                     if operation == "remove":
                         self._state_store.record_tombstone(
                             pair.pair_id, category, action.key,
-                            source=source, target=target, save=False,
+                            source=source, target=target,
+                            target_list=target_list, save=False,
                         )
                     else:
-                        self._state_store.clear_tombstone(category, action.key, save=False)
+                        self._state_store.clear_tombstone(
+                            category, action.key, target=target,
+                            target_list=target_list, save=False,
+                        )
                 elif outcome.status in (STATUS_FAILED, STATUS_UNCONFIRMED, STATUS_BLOCKED):
                     self._state_store.record_retry(
                         pair.pair_id, category, operation, retry_handle,

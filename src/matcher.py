@@ -94,6 +94,7 @@ class MatchResult:
     match_confidence: str = "verified"
     anime_mapping_source: str | None = None
     candidate_tmdb_id: int | None = None
+    mapping_evidence: tuple[str, ...] = ()
 
 
 class ItemMatcher:
@@ -105,15 +106,24 @@ class ItemMatcher:
         anime_root_resolver=None,
         initial_cache: dict | None = None,
         initial_failed_cache: dict[str, str] | None = None,
+        negative_overrides: dict[str, list[int]] | None = None,
+        manual_cache_keys: set[str] | None = None,
     ):
         self._pmdb = pmdb
+        self._negative_overrides = {
+            str(key): {candidate for value in values
+                       for candidate in [_coerce_tmdb_id(value)] if candidate is not None}
+            for key, values in (negative_overrides or {}).items()
+            if isinstance(values, list)
+        }
+        self._manual_cache_keys = {str(key) for key in (manual_cache_keys or set())}
         # Pre-populate with persisted resolutions from a previous sync run so
         # unchanged items resolve instantly without any external API calls.
         self._cache: dict[str, int | None] = {
             str(key): coerced
             for key, value in (initial_cache or {}).items()
             for coerced in [_coerce_tmdb_id(value)]
-            if coerced is not None
+            if coerced is not None and coerced not in self._negative_overrides.get(str(key), set())
         }
         # Lock protecting _cache and _failed_cache so concurrent provider syncs
         # (e.g. SIMKL shows + AniList anime) don't race on cache writes.
@@ -227,7 +237,8 @@ class ItemMatcher:
             tmdb_id, mapped_media_type = fribb_client.extract_tmdb(
                 entry.get("themoviedb_id") or entry.get("themoviedb")
             )
-            if not tmdb_id or tmdb_id in _BLOCKED_ANIME_PMDB_TMDB_IDS:
+            if (not tmdb_id or tmdb_id in _BLOCKED_ANIME_PMDB_TMDB_IDS
+                    or tmdb_id in self._negative_overrides.get(cache_key, set())):
                 continue
             # Never seed a movie id onto a tv item (or vice versa) — the mapping
             # namespace must agree with the item before it can bypass lookup.
@@ -248,6 +259,13 @@ class ItemMatcher:
     def resolve_match(self, item: dict) -> MatchResult:
         """Return a detailed match result for a normalized item."""
         cache_key = self._cache_key(item)
+
+        cached = self._cache.get(cache_key)
+        if (cached is not None and cache_key not in self._manual_cache_keys
+                and str(item.get("simkl_type") or "").lower() == "anime"
+                and not self._cached_anime_identity_verified(item, cached)):
+            with self._lock:
+                self._cache.pop(cache_key, None)
 
         # Fast path: check caches without the lock (reads are safe in CPython).
         with self._lock:
@@ -313,6 +331,14 @@ class ItemMatcher:
 
         try:
             result = self._try_resolve(item)
+            if result.tmdb_id in self._negative_overrides.get(cache_key, set()):
+                result = MatchResult(
+                    tmdb_id=None, resolution_kind="unresolved",
+                    unresolved_reason="negative_manual_override",
+                    match_confidence="unresolved",
+                    anime_mapping_source=result.anime_mapping_source,
+                    candidate_tmdb_id=result.tmdb_id,
+                )
         except Exception:
             with self._lock:
                 self._inflight.pop(cache_key, None)
@@ -544,9 +570,12 @@ class ItemMatcher:
             # stores the franchise root TMDB for sequels, causing false duplicates.
             # However we apply two safety filters:
             #   1. Block known-bad TMDB IDs that have polluted PMDB community data.
-            #   2. Reject zero-vote (unconfirmed, self-submitted) mappings: try Fribb
-            #      first; only fall back to the 0-vote PMDB result if Fribb also fails.
+            #   2. Reject zero-vote (unconfirmed, self-submitted) mappings unless
+            #      an independent Fribb identity confirms the candidate.
             if anime_resolve_mode == "list_identity":
+                fribb_result = self._try_exact_anime_fribb_lookup(item)
+                if fribb_result.match_confidence == "ambiguous":
+                    return fribb_result
                 pmdb_candidate: int | None = None
                 pmdb_candidate_source: str = ""
                 pmdb_candidate_ext_id: str = ""
@@ -591,12 +620,33 @@ class ItemMatcher:
                         )
                         continue
                     if votes > 0:
-                        # Community-verified mapping → accept immediately.
+                        if fribb_result.tmdb_id and fribb_result.tmdb_id != tmdb_id:
+                            if len(fribb_result.mapping_evidence) > 1:
+                                return MatchResult(
+                                    tmdb_id=fribb_result.tmdb_id,
+                                    resolution_kind="fribb_exact",
+                                    match_confidence="verified",
+                                    anime_mapping_source=fribb_result.anime_mapping_source,
+                                    candidate_tmdb_id=tmdb_id,
+                                    mapping_evidence=fribb_result.mapping_evidence +
+                                                     (f"pmdb:{id_type}:{ext_id}=tmdb:{media_type}:{tmdb_id}",),
+                                )
+                            return MatchResult(
+                                tmdb_id=None, resolution_kind="unresolved",
+                                unresolved_reason="conflicting_anime_mappings",
+                                match_confidence="ambiguous",
+                                anime_mapping_source="pmdb_fribb_conflict",
+                                candidate_tmdb_id=tmdb_id,
+                                mapping_evidence=fribb_result.mapping_evidence +
+                                                 (f"pmdb:{id_type}:{ext_id}=tmdb:{media_type}:{tmdb_id}",),
+                            )
                         result = MatchResult(
                             tmdb_id=tmdb_id,
                             resolution_kind="external_mapping",
                             match_confidence="verified",
                             anime_mapping_source=id_type,
+                            mapping_evidence=fribb_result.mapping_evidence +
+                                             (f"pmdb:{id_type}:{ext_id}",),
                         )
                         with self._lock:
                             self._record_match_stat(result)
@@ -609,7 +659,6 @@ class ItemMatcher:
                         pmdb_candidate_votes = votes
 
                 # Fribb exact lookup — primary for non-list_identity, cross-check here.
-                fribb_result = self._try_exact_anime_fribb_lookup(item)
                 if fribb_result.tmdb_id:
                     logger.info(
                         "[resolve] anime '%s' Fribb → tmdb=%d (source=%s)",
@@ -676,6 +725,8 @@ class ItemMatcher:
 
             # Fribb exact lookup — primary for non-list_identity modes.
             fribb_result = self._try_exact_anime_fribb_lookup(item)
+            if fribb_result.match_confidence == "ambiguous":
+                return fribb_result
             if fribb_result.tmdb_id:
                 logger.info(
                     "[resolve] anime '%s' Fribb → tmdb=%d (mode=%s source=%s)",
@@ -755,6 +806,12 @@ class ItemMatcher:
                             with self._lock:
                                 self._record_match_stat(fribb_check)
                             return fribb_check
+                        logger.warning(
+                            "[resolve] anime '%s' (mode=%s) — 0-vote PMDB %s=%s"
+                            " candidate %d is unverified; skipping",
+                            title, anime_resolve_mode, id_type, ext_id, tmdb_id,
+                        )
+                        continue
                     logger.info(
                         "[resolve] anime '%s' (mode=%s) — fallback: PMDB %s=%s → tmdb=%d"
                         " (votes=%d title=%r) accepted",
@@ -834,6 +891,12 @@ class ItemMatcher:
             self._record_match_stat(result)
         return result
 
+    def _cached_anime_identity_verified(self, item: dict, cached_tmdb_id: int) -> bool:
+        """Automatic anime caches require current exact evidence; manual keys do not."""
+        result = self._try_exact_anime_fribb_lookup(item)
+        return (result.tmdb_id == cached_tmdb_id
+                and result.match_confidence in {"exact", "verified"})
+
     def _resolve_root_series(self, item: dict, ids: dict, media_type: str) -> MatchResult:
         title = item.get("title", "Unknown")
         root_title = item.get("root_title") or title
@@ -888,7 +951,7 @@ class ItemMatcher:
         from . import fribb_client
 
         ids = item.get("ids", {})
-        entry = None
+        matches: list[tuple[str, str, int, str | None]] = []
 
         lookup_order = (
             ("anilist", item.get("anilist_id") or ids.get("anilist"), fribb_client.lookup_by_anilist),
@@ -897,8 +960,6 @@ class ItemMatcher:
             ("simkl", ids.get("simkl"), fribb_client.lookup_by_simkl),
             ("imdb", item.get("imdb_id") or ids.get("imdb"), fribb_client.lookup_by_imdb),
         )
-        exact_source = None
-        exact_value = None
         for source_name, raw_value, lookup_fn in lookup_order:
             if not raw_value:
                 continue
@@ -907,12 +968,15 @@ class ItemMatcher:
                 entry = lookup_fn(lookup_value)
             except (TypeError, ValueError):
                 entry = None
-            if entry is not None:
-                exact_source = source_name
-                exact_value = raw_value
-                break
+            if not isinstance(entry, dict):
+                continue
+            candidate, namespace = fribb_client.extract_tmdb(
+                entry.get("themoviedb_id") or entry.get("themoviedb")
+            )
+            if candidate:
+                matches.append((source_name, str(raw_value), candidate, namespace))
 
-        if not isinstance(entry, dict):
+        if not matches:
             return MatchResult(
                 tmdb_id=None,
                 resolution_kind="unresolved",
@@ -922,16 +986,22 @@ class ItemMatcher:
             )
 
         item_media_type = str(item.get("media_type") or "").strip().lower()
-        tmdb_id, mapped_media_type = fribb_client.extract_tmdb(
-            entry.get("themoviedb_id") or entry.get("themoviedb")
-        )
-        if not tmdb_id:
+        native_matches = [match for match in matches if match[0] in {"anilist", "mal", "anidb"}]
+        consensus_matches = native_matches or matches
+        votes: dict[tuple[int, str | None], list[tuple[str, str, int, str | None]]] = {}
+        for match in consensus_matches:
+            votes.setdefault((match[2], match[3]), []).append(match)
+        ranked = sorted(votes.values(), key=lambda group: (-len(group), group[0][2]))
+        chosen = ranked[0]
+        tmdb_id, mapped_media_type = chosen[0][2], chosen[0][3]
+        if len(ranked) > 1 and len(ranked[0]) == len(ranked[1]):
             return MatchResult(
-                tmdb_id=None,
-                resolution_kind="unresolved",
-                unresolved_reason="not_found",
-                match_confidence="unresolved",
-                anime_mapping_source="fribb_exact",
+                tmdb_id=None, resolution_kind="unresolved",
+                unresolved_reason="conflicting_anime_native_mappings",
+                match_confidence="ambiguous", anime_mapping_source="fribb_exact",
+                candidate_tmdb_id=tmdb_id,
+                mapping_evidence=tuple(f"{source}:{value}=tmdb:{namespace or item_media_type}:{candidate}"
+                                       for source, value, candidate, namespace in matches),
             )
 
         # The media type is taken from the key the mapping is stored under, not
@@ -948,19 +1018,21 @@ class ItemMatcher:
                 match_confidence="ambiguous",
                 anime_mapping_source="fribb_exact",
                 candidate_tmdb_id=tmdb_id,
+                mapping_evidence=tuple(f"{source}:{value}" for source, value, _, _ in chosen),
             )
 
         logger.debug(
             "Resolved anime '%s' via exact Fribb mapping (%s -> %d)",
             item.get("title", "Unknown"),
-            exact_value or item.get("anilist_id") or item.get("mal_id") or ids.get("mal"),
+            chosen[0][1],
             tmdb_id,
         )
         return MatchResult(
             tmdb_id=tmdb_id,
             resolution_kind="fribb_exact",
-            match_confidence="exact",
-            anime_mapping_source=f"fribb_exact:{exact_source}" if exact_source else "fribb_exact",
+            match_confidence="verified" if len(chosen) > 1 else "exact",
+            anime_mapping_source=f"fribb_exact:{chosen[0][0]}",
+            mapping_evidence=tuple(f"{source}:{value}" for source, value, _, _ in chosen),
         )
 
     def _can_accept_anime_direct_tmdb(self, item: dict) -> bool:
@@ -1082,6 +1154,13 @@ class ItemMatcher:
                         logger.warning(
                             "[resolve] root-chain '%s' — PMDB %s=%s returned blocked TMDB %d"
                             " (known bad mapping); skipping",
+                            title, id_type, root_ext_id, tmdb_id,
+                        )
+                        continue
+                    if _votes == 0:
+                        logger.warning(
+                            "[resolve] root-chain '%s' — PMDB %s=%s candidate %d"
+                            " has no votes; skipping unverified anime mapping",
                             title, id_type, root_ext_id, tmdb_id,
                         )
                         continue

@@ -124,6 +124,17 @@ class PlannedAction:
             self.category, self.direction, self.kind, self.key,
             self.source_provider, self.destination_provider,
         ]
+        if self.category == "history":
+            from .history import event_id
+            from ..providers import normalize_watched_at
+            payload.append(event_id(self.item) or normalize_watched_at(self.item.get("watched_at")))
+        elif self.category == "resume":
+            payload.extend(
+                self.item.get(field) for field in (
+                    "position", "position_ms", "runtime_ms", "progress", "percent",
+                    "progress_at", "paused_at",
+                )
+            )
         return hashlib.sha256(
             json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         ).hexdigest()[:24]

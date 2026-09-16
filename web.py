@@ -971,6 +971,8 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
                 **profile.get("manual_resolution_cache", {}),
             },
             failed_resolution_cache=profile.get("failed_resolution_cache", {}),
+            negative_mapping_overrides=profile.get("anime_negative_overrides", {}),
+            manual_resolution_keys=set((profile.get("manual_resolution_cache") or {}).keys()),
             manual_list_additions=profile.get("manual_list_additions", {}),
             list_state=profile.get("list_state", {}),
             trakt_token_refreshed_callback=lambda at, rt, exp="": _profile_store.update_trakt_tokens(profile_id, at, rt, exp),
@@ -1504,6 +1506,8 @@ def _resolve_unresolved_item_automatically(private_profile: dict, item: dict) ->
         # Force a fresh retry against PMDB/community mappings instead of honoring
         # the persisted failed cache TTL from the last sync run.
         initial_failed_cache={},
+        negative_overrides=private_profile.get("anime_negative_overrides") or {},
+        manual_cache_keys=set((private_profile.get("manual_resolution_cache") or {}).keys()),
     )
     return matcher.resolve_tmdb_id({
         "title": item.get("title"),
@@ -1603,6 +1607,27 @@ def _apply_unresolved_resolution(
 
     remaining = _profile_store.resolve_item_manually(profile_id, cache_key, tmdb_id)
 
+    library_repair = None
+    if target_item and str(target_item.get("simkl_type") or "").strip().lower() == "anime":
+        namespace = str(target_item.get("media_type") or "").strip().lower()
+        old_tmdb = str(target_item.get("candidate_tmdb_id") or "").strip()
+        if namespace in {"tv", "movie"} and old_tmdb.isdigit() and old_tmdb != str(tmdb_id):
+            old_key = f"tmdb:{namespace}:{old_tmdb}"
+            store = _library_store_for(profile_id)
+            old_entry = store.entry(old_key)
+            if old_entry and any(
+                target_item.get(field) and old_entry.get(field) and
+                str(target_item[field]) == str(old_entry[field])
+                for field in ("anilist_id", "mal_id", "anidb_id")
+            ):
+                try:
+                    library_repair = store.rekey_verified(
+                        old_key, f"tmdb:{namespace}:{tmdb_id}",
+                        source="manual", confidence="verified",
+                    )
+                except ValueError as exc:
+                    logger.warning("[manual-map] Library key %s needs review: %s", old_key, exc)
+
     pmdb_result = None
     pmdb_skip_reason: str | None = None
     if target_item:
@@ -1674,6 +1699,7 @@ def _apply_unresolved_resolution(
         "tmdb_id": tmdb_id,
         "pmdb_added": pmdb_result is not None,
         "pmdb_skip_reason": pmdb_skip_reason,
+        "library_repair": library_repair,
         "items": remaining,
         "profile": updated_profile,
     }
@@ -3400,6 +3426,17 @@ def api_profile_library_entries():
     })
 
 
+@app.route("/api/profile/library/identity-issues", methods=["POST"])
+def api_profile_library_identity_issues():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    issues = _library_store_for(profile_id).scan_identity_integrity()
+    return jsonify({"items": issues, "review_count": sum(
+        item["classification"] != "healthy" for item in issues
+    )})
+
+
 @app.route("/api/profile/activity/changes", methods=["POST"])
 def api_profile_activity_changes():
     profile_id = _current_profile_id()
@@ -4882,7 +4919,11 @@ def api_profile_sync_capture_restore():
             502, details=[f"Confirmed {confirmed} of {len(items)} items"],
         )
     for item in items:
-        state_store.clear_tombstone(category, item_key(enrich_identity(item)), save=False)
+        state_store.clear_tombstone(
+            category, item_key(enrich_identity(item)),
+            target=str(capture.get("provider") or ""),
+            target_list=str(capture.get("target_list") or ""), save=False,
+        )
     state_store.mark_capture_restored(capture_id, save=False)
     state_store.save()
     return jsonify({"status": "restored", "capture_id": capture_id, "restored": len(items)})
@@ -4998,6 +5039,13 @@ def api_profile_unresolved():
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
     try:
         items = _profile_store.get_unresolved_items(profile_id)
+        negatives = (_profile_store.get_private_profile_by_id(profile_id)
+                     .get("anime_negative_overrides") or {})
+        for item in items:
+            candidate = str(item.get("candidate_tmdb_id") or "")
+            item["candidate_rejected"] = bool(candidate and any(
+                str(value) == candidate for value in negatives.get(item.get("cache_key"), [])
+            ))
     except KeyError:
         return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
     return jsonify({"items": items})
@@ -5090,6 +5138,24 @@ def api_profile_anime_mappings_delete():
     except ValueError as exc:
         return _json_error(str(exc), 400)
     return jsonify({"items": items})
+
+
+@app.route("/api/profile/anime/mappings/reject", methods=["POST"])
+def api_profile_anime_mappings_reject():
+    """Remember that one candidate is wrong for a specific anime entry."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        blocked = _profile_store.reject_anime_mapping(
+            profile_id, str(body.get("cache_key") or ""), int(body.get("tmdb_id") or 0),
+        )
+    except (TypeError, ValueError) as exc:
+        return _json_error(str(exc), 400)
+    except KeyError:
+        return _json_error("Profile not found", 404)
+    return jsonify({"blocked_tmdb_ids": blocked})
 
 
 @app.route("/api/profile/unresolved/dismiss", methods=["POST"])

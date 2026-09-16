@@ -1061,6 +1061,7 @@ class ProfileStore:
             "last_pair_results": _redact_secret_urls(copy.deepcopy(raw_profile.get("last_pair_results", {}))) if isinstance(raw_profile.get("last_pair_results"), dict) else {},
             "pair_sync_schedule": pair_sync_schedule,
             "anime_manual_overrides": copy.deepcopy(raw_profile.get("anime_manual_overrides", {})) if isinstance(raw_profile.get("anime_manual_overrides"), dict) else {},
+            "anime_negative_overrides": copy.deepcopy(raw_profile.get("anime_negative_overrides", {})) if isinstance(raw_profile.get("anime_negative_overrides"), dict) else {},
             "anime_review_decisions": copy.deepcopy(raw_profile.get("anime_review_decisions", {})) if isinstance(raw_profile.get("anime_review_decisions"), dict) else {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(raw_profile.get("last_sync_job_snapshot")),
             "sync_job_id": str(raw_profile.get("sync_job_id", "") or "").strip(),
@@ -1120,6 +1121,7 @@ class ProfileStore:
             "last_pair_results": _redact_secret_urls(copy.deepcopy(profile.get("last_pair_results", {}))),
             "pair_sync_schedule": copy.deepcopy(profile.get("pair_sync_schedule", {})),
             "anime_manual_overrides": copy.deepcopy(profile.get("anime_manual_overrides", {})),
+            "anime_negative_overrides": copy.deepcopy(profile.get("anime_negative_overrides", {})),
             "anime_review_decisions": copy.deepcopy(profile.get("anime_review_decisions", {})),
             "last_sync_job_snapshot": copy.deepcopy(profile.get("last_sync_job_snapshot", {})),
             "sync_job_id": profile.get("sync_job_id"),
@@ -1628,6 +1630,7 @@ class ProfileStore:
                 if pair.get("enabled", True) and pair.get("auto_sync", False)
             },
             "anime_manual_overrides": {},
+            "anime_negative_overrides": {},
             "anime_review_decisions": {},
             "last_sync_job_snapshot": _normalize_sync_job_snapshot(None),
             "sync_job_id": "",
@@ -2102,6 +2105,11 @@ class ProfileStore:
             mrc = dict(profile.get("manual_resolution_cache") or {})
             mrc[cache_key] = tmdb_id
             profile["manual_resolution_cache"] = mrc
+            negatives = dict(profile.get("anime_negative_overrides") or {})
+            if cache_key in negatives:
+                negatives[cache_key] = [value for value in negatives[cache_key]
+                                        if str(value) != str(tmdb_id)]
+                profile["anime_negative_overrides"] = negatives
             # Also write through to the live resolution_cache so the *next*
             # sync picks it up immediately without needing a full cache rebuild.
             rc = dict(profile.get("resolution_cache") or {})
@@ -2206,6 +2214,34 @@ class ProfileStore:
             profile["anime_review_decisions"] = decisions
             self._save_locked()
             return self.list_anime_mappings(normalized_id)
+
+    def reject_anime_mapping(self, profile_id: str, cache_key: str, tmdb_id: int) -> list[int]:
+        """Persist a known-wrong candidate and evict its automatic cache hit."""
+        key = str(cache_key or "").strip()
+        candidate = int(tmdb_id)
+        if not key or candidate <= 0:
+            raise ValueError("cache_key and a positive tmdb_id are required")
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            negatives = dict(profile.get("anime_negative_overrides") or {})
+            blocked = {int(value) for value in negatives.get(key, []) if str(value).isdigit()}
+            blocked.add(candidate)
+            negatives[key] = sorted(blocked)
+            profile["anime_negative_overrides"] = negatives
+            for field in ("resolution_cache", "manual_resolution_cache"):
+                values = dict(profile.get(field) or {})
+                if str(values.get(key)) == str(candidate):
+                    values.pop(key, None)
+                    profile[field] = values
+            manual = dict(profile.get("anime_manual_overrides") or {})
+            if str((manual.get(key) or {}).get("tmdb_id")) == str(candidate):
+                manual.pop(key, None)
+                profile["anime_manual_overrides"] = manual
+            failed = dict(profile.get("failed_resolution_cache") or {})
+            failed.pop(key, None)
+            profile["failed_resolution_cache"] = failed
+            self._save_locked()
+            return negatives[key]
 
     def dismiss_unresolved_item(self, profile_id: str, cache_key: str) -> list[dict]:
         """Remove an unresolved item without resolving it (user dismisses it)."""
@@ -2642,6 +2678,7 @@ class ProfileStore:
             if include_manual:
                 profile["manual_resolution_cache"] = {}
                 profile["anime_manual_overrides"] = {}
+                profile["anime_negative_overrides"] = {}
                 profile["anime_review_decisions"] = {}
                 profile["resolution_cache"] = {}
             profile["updated_at"] = utc_now_iso()

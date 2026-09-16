@@ -13,6 +13,17 @@ from src.profile_store import (
 
 
 class ProfileStoreTests(unittest.TestCase):
+    def test_negative_anime_mapping_survives_restart_and_evicts_cache(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        key = "tv::anime-entry"
+        self.store._profiles[profile_id]["resolution_cache"][key] = 1234
+        self.assertEqual(self.store.reject_anime_mapping(profile_id, key, 1234), [1234])
+        restored = ProfileStore(Path(self.tmpdir.name) / "profiles.json")
+        profile = restored.get_private_profile_by_id(profile_id)
+        self.assertEqual(profile["anime_negative_overrides"][key], [1234])
+        self.assertNotIn(key, profile["resolution_cache"])
+
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.store = ProfileStore(Path(self.tmpdir.name) / "profiles.json")

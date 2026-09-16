@@ -502,6 +502,61 @@ class FetchFailureTests(unittest.TestCase):
 
 
 class IdentityTests(unittest.TestCase):
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_simple_fribb_cour_range_is_carried_to_library_model(self, lookup) -> None:
+        lookup.return_value = {
+            "themoviedb_id": {"tv": 900}, "season": {"tmdb": 1},
+            "episode_offset": {"tmdb": 12},
+        }
+        item = enrich_identity({"media_type": "tv", "anilist_id": 2,
+                                "anilist_episode_count": 12})
+        self.assertEqual((item["season"], item["episode_start"], item["episode_end"],
+                          item["episode_offset"]), (1, 13, 24, 12))
+
+    @patch("src.fribb_client.lookup_by_anidb")
+    @patch("src.fribb_client.lookup_by_mal")
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_cross_service_anime_enrichment_requires_native_consensus(
+        self, anilist_lookup, mal_lookup, anidb_lookup,
+    ) -> None:
+        anilist_lookup.return_value = {"themoviedb_id": {"tv": 100}}
+        mal_lookup.return_value = {"themoviedb_id": {"tv": 200}}
+        anidb_lookup.return_value = {"themoviedb_id": {"tv": 300}}
+        item = enrich_identity({"media_type": "tv", "anilist_id": 1,
+                                "mal_id": 2, "anidb_id": 3})
+        self.assertEqual(item["match_confidence"], "ambiguous")
+        self.assertFalse(has_portable_identity(item))
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_unverified_anime_is_not_written_to_external_pair(self, _lookup) -> None:
+        source = FakeAdapter("anilist", {CATEGORY_WATCHLIST: [{
+            "media_type": "tv", "tmdb_id": "1234", "anilist_id": "5678",
+            "simkl_type": "anime", "title": "Example Anime",
+        }]}, writes=())
+        target = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
+        result = CrossSyncService({"anilist": source, "trakt": target}).run_pair(
+            _pair(source="anilist", target="trakt")
+        )
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.categories[0].unmapped, 1)
+        self.assertEqual(target.added, [])
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_anime_native_id_with_unverified_tmdb_cannot_fan_out(self, _lookup) -> None:
+        item = enrich_identity({"media_type": "tv", "tmdb_id": "1234",
+                                "anilist_id": "5678", "simkl_type": "anime"})
+        self.assertEqual(item["match_confidence"], "probable")
+        self.assertFalse(has_portable_identity(item))
+
+    def test_verified_local_anime_identity_uses_persisted_provenance(self) -> None:
+        item = enrich_identity({
+            "media_type": "tv", "tmdb_id": "1234", "anilist_id": "5678",
+            "canonical_identity": {"tmdb_id": "1234", "namespace": "tv",
+                                   "confidence": "verified", "source": "manual"},
+        })
+        self.assertTrue(has_portable_identity(item))
+        self.assertEqual(item["match_confidence"], "verified")
+
     def test_episode_keys_include_season_and_episode(self) -> None:
         key = item_key({"media_type": "tv", "tmdb_id": "1429", "season": 1, "episode": 3})
         self.assertEqual(key, "tv:tmdb:1429:s1e3")
@@ -2027,7 +2082,7 @@ class CrossRouteOwnershipTests(unittest.TestCase):
 
 
 class TombstoneAndCaptureTests(unittest.TestCase):
-    def test_confirmed_removal_is_captured_and_not_resurrected_by_another_route(self) -> None:
+    def test_confirmed_removal_blocks_same_destination_but_not_independent_library(self) -> None:
         key = item_key(_movie("1"))
         store = _established_store([key], managed=[key], source_keys=[key])
         source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: []})
@@ -2049,8 +2104,18 @@ class TombstoneAndCaptureTests(unittest.TestCase):
         blocked = CrossSyncService(
             {"pmdb": stale_source, "library": empty_target}, state_store=store,
         ).run_pair(second)
-        self.assertEqual(blocked.added, 0)
-        self.assertFalse(empty_target.added)
+        self.assertEqual(blocked.added, 1)
+        self.assertEqual(len(empty_target.added), 1)
+
+        stale_library = FakeAdapter("library", {CATEGORY_WATCHLIST: [_movie("1")]})
+        same_target = FakeAdapter("simkl", {CATEGORY_WATCHLIST: []})
+        third = _pair(pair_id="p3", source="library", target="simkl",
+                      removal_mode=REMOVAL_ADDITIVE)
+        protected = CrossSyncService(
+            {"library": stale_library, "simkl": same_target}, state_store=store,
+        ).run_pair(third)
+        self.assertEqual(protected.added, 0)
+        self.assertFalse(same_target.added)
 
 
 class HistoryIdempotencyThroughTheServiceTests(unittest.TestCase):
