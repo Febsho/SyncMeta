@@ -860,7 +860,53 @@ class LibraryStore:
                     destination.setdefault(field, copy.deepcopy(value))
             merge_entries(destination.setdefault("provider_entries", []), record.get("provider_entries", []))
 
-    def scan_identity_integrity(self) -> list[dict]:
+    def identity_tmdb_refs(self) -> list[tuple[int, str]]:
+        """Return canonical anime TMDB references for one batched metadata check."""
+        with self._lock:
+            rows = list(self._items.values())
+        refs: set[tuple[int, str]] = set()
+        for entry in rows:
+            if entry.get("kind") not in {KIND_ANIME, KIND_ANIME_MOVIE}:
+                continue
+            try:
+                tmdb_id = int(entry.get("tmdb_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tmdb_id > 0:
+                refs.add((tmdb_id, normalize_namespace(entry.get("media_type"))))
+        return sorted(refs, key=lambda ref: (ref[1], ref[0]))
+
+    @staticmethod
+    def _canonical_metadata_conflicts(entry: dict, details: dict) -> bool:
+        """Detect a strong title/year contradiction, not harmless title variants."""
+        remote_title = str(details.get("title") or "").strip().lower()
+        local_titles = [str(entry.get("title") or "").strip().lower()]
+        local_titles.extend(
+            str(part.get("title") or "").strip().lower()
+            for part in entry.get("provider_entries", []) if isinstance(part, dict)
+        )
+        remote_words = {word for word in re.findall(r"\w{3,}", remote_title)
+                        if word not in {"season", "cour", "part", "the"}}
+        if not remote_words:
+            return False
+        local_words = set()
+        for title in local_titles:
+            local_words.update(word for word in re.findall(r"\w{3,}", title)
+                               if word not in {"season", "cour", "part", "the"})
+        # Differently titled seasons/cours legitimately share one canonical
+        # TMDB title.  A completely disjoint title plus a substantially
+        # different year is strong enough to deserve review, but never mutates.
+        if not local_words or local_words & remote_words:
+            return False
+        try:
+            year_gap = abs(int(entry.get("year")) - int(details.get("year")))
+        except (TypeError, ValueError):
+            year_gap = 0
+        return year_gap >= 3 or len(remote_words) >= 2
+
+    def scan_identity_integrity(
+        self, canonical_metadata: dict[tuple[str, int], dict] | None = None,
+    ) -> list[dict]:
         """Classify stored anime identities for review without changing data."""
         with self._lock:
             rows = copy.deepcopy(list(self._items.values()))
@@ -895,6 +941,17 @@ class LibraryStore:
                                     canonical.get("namespace") != parts[1]):
                     classification = "needs_rekey"
                     reasons.append("provenance_disagrees_with_key")
+            metadata = None
+            try:
+                metadata = (canonical_metadata or {}).get((
+                    normalize_namespace(entry.get("media_type")), int(entry.get("tmdb_id") or 0),
+                ))
+            except (TypeError, ValueError):
+                metadata = None
+            if isinstance(metadata, dict) and self._canonical_metadata_conflicts(entry, metadata):
+                if classification == "healthy":
+                    classification = "review"
+                reasons.append("canonical_tmdb_metadata_mismatch")
             shared_keys = set()
             for part in entry.get("provider_entries", []):
                 if isinstance(part, dict):
@@ -932,6 +989,7 @@ class LibraryStore:
                 "classification": classification, "reasons": reasons,
                 "related_keys": sorted(shared_keys),
                 "canonical_identity": canonical,
+                "canonical_metadata": metadata,
                 "provider_entries": entry.get("provider_entries", []),
             })
         return results

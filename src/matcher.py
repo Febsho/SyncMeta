@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import requests
 
 from .publicmetadb_client import PublicMetaDBClient
+from .media_kind import is_anime as is_anime_item
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ class ItemMatcher:
 
         cached = self._cache.get(cache_key)
         if (cached is not None and cache_key not in self._manual_cache_keys
-                and str(item.get("simkl_type") or "").lower() == "anime"
+                and is_anime_item(item)
                 and not self._cached_anime_identity_verified(item, cached)):
             with self._lock:
                 self._cache.pop(cache_key, None)
@@ -540,7 +541,7 @@ class ItemMatcher:
     def _try_resolve(self, item: dict) -> MatchResult:
         title = item.get("title", "Unknown")
         media_type = item["media_type"]
-        is_anime = item.get("simkl_type") == "anime"
+        is_anime = is_anime_item(item)
         ids = item.get("ids", {})
         title_variants = self._title_variants(item, primary=title)
         anime_resolve_mode = self._anime_resolve_mode(item)
@@ -907,7 +908,7 @@ class ItemMatcher:
             if not ext_id:
                 continue
             ext_id = str(ext_id)
-            tmdb_id, status, _votes, mapped_title = self._lookup_external_mapping(
+            tmdb_id, status, votes, mapped_title = self._lookup_external_mapping(
                 id_type, ext_id, media_type, title_variants=root_title_variants,
             )
             if tmdb_id:
@@ -923,6 +924,18 @@ class ItemMatcher:
                         "[resolve] root-series '%s' — PMDB %s=%s returned incompatible title %r"
                         " for tmdb=%d (checked %d title variant(s)); skipping",
                         title, id_type, ext_id, mapped_title, tmdb_id, len(root_title_variants),
+                    )
+                    continue
+                if is_anime_item(item) and votes == 0:
+                    # Root IDs are routinely present on history/resume rows, so
+                    # they must not turn an unconfirmed PMDB community mapping
+                    # into a verified franchise-root resolution.  The separate
+                    # root-chain resolver has the same guard; keep this early
+                    # path aligned because it runs first for explicit root IDs.
+                    logger.warning(
+                        "[resolve] root-series '%s' — PMDB %s=%s candidate %d"
+                        " has no votes; skipping unverified anime mapping",
+                        title, id_type, ext_id, tmdb_id,
                     )
                     continue
                 logger.info(
@@ -1037,7 +1050,7 @@ class ItemMatcher:
 
     def _can_accept_anime_direct_tmdb(self, item: dict) -> bool:
         """Allow raw TMDB only after the anime identity is verified."""
-        if item.get("simkl_type") != "anime":
+        if not is_anime_item(item):
             return True
         identity_present = bool(
             item.get("anilist_id")
@@ -1109,7 +1122,7 @@ class ItemMatcher:
 
     @staticmethod
     def _lookup_chain_for_item(item: dict) -> list[tuple[str, str]]:
-        if item.get("simkl_type") == "anime":
+        if is_anime_item(item):
             return _ANIME_LOOKUP_CHAIN
         return _DEFAULT_LOOKUP_CHAIN
 

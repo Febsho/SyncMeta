@@ -15,6 +15,7 @@ from . import fribb_client
 from .anilist_client import AniListClient
 from .config import AniListConfig, AppConfig
 from .matcher import ItemMatcher, MatchResult
+from .media_kind import is_anime
 from .mdblist_client import MdbListClient
 from .publicmetadb_client import PublicMetaDBClient
 from .simkl_client import SimklClient
@@ -205,7 +206,7 @@ def _unresolved_item_summary(item: dict, list_name: str = "", unresolved_reason:
     }
     if unresolved_reason:
         summary["unresolved_reason"] = unresolved_reason
-    if item.get("simkl_type") == "anime":
+    if is_anime(item):
         summary.update({
             "root_episode_offset": item.get("root_episode_offset") or 0,
             "has_root_ids": bool(item.get("root_anilist_id") or item.get("root_mal_id") or ids.get("root_anilist") or ids.get("root_mal")),
@@ -216,7 +217,7 @@ def _unresolved_item_summary(item: dict, list_name: str = "", unresolved_reason:
 
 
 def _anime_conflict_reason(item: dict, unresolved_reason: str = "") -> str:
-    if str(item.get("simkl_type", "")).strip().lower() != "anime":
+    if not is_anime(item):
         return ""
     media_type = str(item.get("media_type", "")).strip().lower()
     if unresolved_reason == "lookup_unavailable":
@@ -474,7 +475,7 @@ class SyncService:
         # A mapping without sufficient evidence must never cross the write
         # boundary merely because Fribb has no corresponding entry.
         if (
-            str(item.get("simkl_type", "")).strip().lower() == "anime"
+            is_anime(item)
             and result.resolution_kind in ("external_mapping", "root_series")
             and result.tmdb_id is not None
             and result.anime_mapping_source not in ("fribb_exact", "fribb_fallback")
@@ -521,7 +522,7 @@ class SyncService:
                     candidate_tmdb_id=result.tmdb_id,
                 )
         if (
-            str(item.get("simkl_type", "")).strip().lower() == "anime"
+            is_anime(item)
             and result.tmdb_id is not None
             and result.match_confidence not in {"exact", "verified"}
         ):
@@ -1093,7 +1094,7 @@ class SyncService:
 
         logger.info("  SIMKL completed anime: %d entries", len(completed_anime))
         if self._config.sync.simkl_history_anime_only:
-            items = [item for item in items if str(item.get("simkl_type", "")).strip().lower() == "anime"]
+            items = [item for item in items if is_anime(item)]
         items = self._expand_simkl_aggregate_history(items)
         stats.history_cursor = self._latest_history_cursor(items, cursor)
         stats.items_fetched = len(items)
@@ -1132,7 +1133,7 @@ class SyncService:
 
             # Record that this show has per-episode data so the season-level
             # fallback pass won't also mark it (which would double-count).
-            if str(item.get("simkl_type", "")).strip().lower() == "anime":
+            if is_anime(item):
                 for id_key in ("anilist_id", "root_anilist_id", "mal_id", "root_mal_id"):
                     val = item.get(id_key)
                     if val:
@@ -1343,7 +1344,7 @@ class SyncService:
         episode rows first, then let the normal anime remapper place them into
         the correct root TMDB season/episode.
         """
-        if str(item.get("simkl_type", "")).strip().lower() != "anime":
+        if not is_anime(item):
             return []
         if str(item.get("media_type", "")).strip().lower() != "tv":
             return []
@@ -1383,7 +1384,7 @@ class SyncService:
           3. PMDB anime-seasons with absolute offset    (legacy path, offset-based)
           4. Single-season TMDB heuristic              (only for shows with 1 TMDB season)
         """
-        if str(item.get("simkl_type", "")).strip().lower() != "anime":
+        if not is_anime(item):
             return item
         if str(item.get("media_type", "")).strip().lower() != "tv":
             return item
@@ -3675,7 +3676,7 @@ class SyncService:
             return False
         if item.get("aggregate_watched_count"):
             return False
-        if str(item.get("simkl_type", "")).strip().lower() == "anime":
+        if is_anime(item):
             return False
         if self._should_force_anime_re_resolve(item):
             return False
@@ -3733,7 +3734,7 @@ class SyncService:
     @staticmethod
     def _should_force_anime_re_resolve(item: dict) -> bool:
         return (
-            str(item.get("simkl_type", "")).strip().lower() == "anime"
+            is_anime(item)
             and str(item.get("media_type", "")).strip().lower() == "tv"
             and not (item.get("aggregate_watched_count") and item.get("tmdb_id"))
             and any(item.get(key) for key in ("anilist_id", "root_anilist_id", "mal_id", "root_mal_id"))

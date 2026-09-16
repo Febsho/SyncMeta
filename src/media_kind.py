@@ -56,7 +56,7 @@ def normalize_namespace(value: object) -> str:
 
 
 def is_anime(item: dict) -> bool:
-    """Whether ``item`` is anime, from ids and source labelling only."""
+    """Whether ``item`` is anime, from native IDs or normalized source evidence."""
     if not isinstance(item, dict):
         return False
     for field in _ANIME_ID_FIELDS:
@@ -67,7 +67,9 @@ def is_anime(item: dict) -> bool:
         for field in ("anilist", "mal", "anidb"):
             if ids.get(field):
                 return True
-    if bool(item.get("is_anime")):
+    if bool(item.get("is_anime") or item.get("anime_identity")):
+        return True
+    if str(item.get("kind") or "").strip().lower() in {KIND_ANIME, KIND_ANIME_MOVIE}:
         return True
     # SIMKL is the one provider that reports anime as its own media type, and
     # it is right about *that* even though it is wrong about the namespace.

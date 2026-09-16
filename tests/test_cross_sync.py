@@ -513,6 +513,24 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual((item["season"], item["episode_start"], item["episode_end"],
                           item["episode_offset"]), (1, 13, 24, 12))
 
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode")
+    @patch("src.fribb_client.lookup_by_anidb", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_anidb_cour_range_is_persisted_when_endpoint_mapping_is_contiguous(
+        self, anilist_lookup, _anidb_lookup, resolve_episode,
+    ) -> None:
+        anilist_lookup.return_value = {"themoviedb_id": {"tv": 900}}
+        resolve_episode.side_effect = [
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 13},
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 24},
+        ]
+        item = enrich_identity({
+            "media_type": "tv", "anilist_id": 2, "anidb_id": 20,
+            "anilist_episode_count": 12, "season": 1,
+        })
+        self.assertEqual((item["season"], item["episode_start"], item["episode_end"],
+                          item["episode_offset"]), (1, 13, 24, 12))
+
     @patch("src.fribb_client.lookup_by_anidb")
     @patch("src.fribb_client.lookup_by_mal")
     @patch("src.fribb_client.lookup_by_anilist")

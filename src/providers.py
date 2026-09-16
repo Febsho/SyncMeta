@@ -23,6 +23,8 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import quote, unquote
 
+from .media_kind import is_anime
+
 logger = logging.getLogger(__name__)
 
 # ── Categories ─────────────────────────────────────────────────────────────
@@ -388,13 +390,7 @@ def enrich_identity(item: dict) -> dict:
     """
     ids = item.get("ids") or {}
     has_tmdb = bool(str(item.get("tmdb_id") or ids.get("tmdb") or "").strip())
-    looks_anime = bool(
-        str(item.get("simkl_type") or "").lower() == "anime"
-        or item.get("anime_identity")
-        or item.get("anilist_id") or ids.get("anilist")
-        or item.get("mal_id") or ids.get("mal")
-        or item.get("anidb_id") or ids.get("anidb")
-    )
+    looks_anime = is_anime(item)
     if has_tmdb and not looks_anime:
         return item
 
@@ -508,6 +504,47 @@ def enrich_identity(item: dict) -> dict:
 
     season_map = entry.get("season")
     offset_map = entry.get("episode_offset")
+    # AniDB-backed Anime-Lists entries are normally remapped one episode at a
+    # time.  Persist a cour range as well when its two endpoints prove that the
+    # mapping is contiguous.  That gives a restarted Library enough evidence
+    # for reverse projection even if Anime-Lists/Fribb is unavailable later.
+    if anidb_raw and (enriched.get("anilist_id") or ids.get("anilist")):
+        try:
+            episode_count = int(item.get("anilist_episode_count") or 0)
+            anidb_id = int(anidb_raw)
+        except (TypeError, ValueError):
+            episode_count = anidb_id = 0
+        if 0 < episode_count <= 500 and anidb_id:
+            try:
+                from . import anime_mapping_store
+                first_coordinate = anime_mapping_store.resolve_tvdb_episode_from_anidb_episode(
+                    anidb_id, 1, anidb_season=max(1, source_season),
+                ) or {}
+                last_coordinate = anime_mapping_store.resolve_tvdb_episode_from_anidb_episode(
+                    anidb_id, episode_count, anidb_season=max(1, source_season),
+                ) or {}
+                first_season = int(first_coordinate.get("tmdb_season"))
+                last_season = int(last_coordinate.get("tmdb_season"))
+                first_episode = int(first_coordinate.get("tmdb_episode"))
+                last_episode = int(last_coordinate.get("tmdb_episode"))
+                first_tmdb_id = first_coordinate.get("tmdb_id")
+                last_tmdb_id = last_coordinate.get("tmdb_id")
+                canonical_tmdb_id = int(tmdb_id)
+                same_title = (
+                    first_tmdb_id in (None, "", canonical_tmdb_id, str(canonical_tmdb_id))
+                    and last_tmdb_id in (None, "", canonical_tmdb_id, str(canonical_tmdb_id))
+                )
+                if (same_title and first_season == last_season
+                        and last_episode - first_episode == episode_count - 1):
+                    enriched.setdefault("season", first_season)
+                    enriched["local_season"] = source_season
+                    enriched["episode_start"] = first_episode
+                    enriched["episode_end"] = last_episode
+                    enriched["episode_offset"] = first_episode - 1
+            except (TypeError, ValueError):
+                pass
+            except Exception:
+                logger.debug("Anime AniDB cour-range lookup failed for %r", item.get("title"), exc_info=True)
     if enriched.get("anilist_id") or ids.get("anilist"):
         try:
             simple_season = int(season_map.get("tmdb")) if isinstance(season_map, dict) else 0

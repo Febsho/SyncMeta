@@ -109,7 +109,22 @@ class ItemMatcherTests(unittest.TestCase):
         result = matcher.resolve_match({
             "title": "Example Anime Sequel", "media_type": "tv",
             "simkl_type": "anime", "anilist_id": "123456",
+            "root_anilist_id": "333333", "root_mal_id": "444444",
+            "root_title": "Example Anime",
             "anime_resolve_mode": "history_identity",
+        })
+        self.assertIsNone(result.tmdb_id)
+
+    @patch("src.fribb_client.lookup_by_anilist", return_value=None)
+    def test_native_anime_identity_uses_anime_lookup_and_zero_vote_guard(self, _lookup) -> None:
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 654321, "status": "hit", "votes": 0,
+            "title": "Provider Anime",
+        }
+        result = ItemMatcher(client).resolve_match({
+            "title": "Provider Anime", "media_type": "tv", "kind": "anime",
+            "tmdb_id": "654321", "anime_resolve_mode": "history_identity",
         })
         self.assertIsNone(result.tmdb_id)
 
@@ -898,7 +913,12 @@ class ItemMatcherTests(unittest.TestCase):
         self.assertEqual(result.resolution_kind, "external_mapping")
 
     def test_prefer_root_series_uses_root_before_direct_tmdb(self) -> None:
-        matcher = ItemMatcher(StubPMDBClient())
+        client = StubPMDBClient()
+        client.lookup_by_external_id_detailed = lambda *_args: {
+            "tmdb_id": 68028, "status": "hit", "votes": 5,
+            "title": "SPY x FAMILY",
+        }
+        matcher = ItemMatcher(client)
 
         tmdb_id = matcher.resolve_tmdb_id({
             "title": "SPY x FAMILY Season 3",

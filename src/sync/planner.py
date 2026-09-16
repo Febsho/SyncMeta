@@ -132,7 +132,8 @@ class PlannedAction:
             payload.extend(
                 self.item.get(field) for field in (
                     "position", "position_ms", "runtime_ms", "progress", "percent",
-                    "progress_at", "paused_at",
+                    "progress_at", "paused_at", "updated_at", "last_played",
+                    "last_viewed_at", "lastViewedAt",
                 )
             )
         return hashlib.sha256(

@@ -1913,7 +1913,7 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(watched_stats.items_added, 2)
         self.assertEqual(
             {(item["tmdb_id"], item["season"], item["episode"]) for item in pmdb.watched},
-            {(811, 1, 2), (812, 1, 3)},
+            {(811, 1, 2), (37537, 1, 3)},
         )
 
     def test_simkl_anime_history_re_resolves_wrong_direct_tmdb_id(self) -> None:

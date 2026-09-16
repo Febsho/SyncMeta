@@ -52,6 +52,16 @@ class ReviewedActionIdentityTests(unittest.TestCase):
         self.assertEqual(plan(41).fingerprint, plan(41).fingerprint)
         self.assertNotEqual(plan(41).fingerprint, plan(57).fingerprint)
 
+    def test_resume_snapshot_changes_with_each_playback_event_timestamp(self) -> None:
+        base = {"position_ms": 41_000, "runtime_ms": 100_000, "progress": 41}
+        for field in ("updated_at", "last_played", "last_viewed_at", "lastViewedAt"):
+            with self.subTest(field=field):
+                first = PlannedAction(key="tmdb:movie:1", kind="update", category="resume",
+                                      item={**base, field: "2026-09-15T12:00:00Z"})
+                second = PlannedAction(key=first.key, kind=first.kind, category=first.category,
+                                       item={**base, field: "2026-09-16T12:00:00Z"})
+                self.assertNotEqual(first.action_id, second.action_id)
+
 
 def _item(key: str) -> dict:
     return {"title": f"Title {key}", "media_type": "movie", "tmdb_id": key}

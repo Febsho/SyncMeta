@@ -3431,7 +3431,17 @@ def api_profile_library_identity_issues():
     profile_id = _current_profile_id()
     if not profile_id:
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
-    issues = _library_store_for(profile_id).scan_identity_integrity()
+    store = _library_store_for(profile_id)
+    metadata: dict[tuple[str, int], dict] = {}
+    private_profile = _current_private_profile() or {}
+    tmdb_key = normalize_credentials(private_profile.get("credentials"))["tmdb"]["api_key"]
+    if tmdb_key:
+        try:
+            metadata = TmdbClient(tmdb_key).get_details_batch(store.identity_tmdb_refs())
+        except TmdbError:
+            # Structural integrity remains useful when TMDB is temporarily down.
+            logger.debug("TMDB metadata unavailable for Library integrity scan", exc_info=True)
+    issues = store.scan_identity_integrity(metadata)
     return jsonify({"items": issues, "review_count": sum(
         item["classification"] != "healthy" for item in issues
     )})

@@ -81,6 +81,17 @@ class LibraryStoreTests(unittest.TestCase):
         self.assertEqual(issue["classification"], "review")
         self.assertIn("stale_mapping_version", issue["reasons"])
 
+    def test_integrity_scanner_flags_canonical_tmdb_metadata_contradiction(self) -> None:
+        item = {"media_type": "tv", "tmdb_id": 900, "title": "Example Anime",
+                "year": 2024, "anilist_id": 101, "match_confidence": "verified",
+                "anime_mapping_source": "fribb_exact"}
+        self.store.add(CATEGORY_WATCHLIST, [item])
+        issue = self.store.scan_identity_integrity({
+            ("tv", 900): {"title": "An Affirmative Act", "year": "1997"},
+        })[0]
+        self.assertEqual(issue["classification"], "review")
+        self.assertIn("canonical_tmdb_metadata_mismatch", issue["reasons"])
+
     def test_verified_write_automatically_repairs_unique_old_identity(self) -> None:
         old = {"media_type": "tv", "tmdb_id": 111, "title": "Example Anime",
                "anilist_id": 101, "season": 1, "episode": 1,

@@ -7,12 +7,16 @@ that make the write non-destructive.
 """
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from src.anilist_progress import (
     build_reverse_index,
     plan_progress_updates,
 )
+from src.library_store import LibraryStore, SECTION_WATCHLIST
+from src.providers import enrich_identity
 
 
 def _entry(anilist_id: int, title: str, episodes: int, progress: int = 0,
@@ -91,6 +95,46 @@ class ReverseIndexTests(unittest.TestCase):
 
 
 class ProgressPlanTests(unittest.TestCase):
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode")
+    @patch("src.fribb_client.lookup_by_anidb", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_anidb_cours_survive_library_restart_for_reverse_projection(
+        self, anilist_lookup, _anidb_lookup, resolve_episode,
+    ) -> None:
+        """AniList-shaped cours retain verified ranges without a later Fribb read."""
+        anilist_lookup.side_effect = lambda value: {"themoviedb_id": {"tv": 900}}
+        resolve_episode.side_effect = [
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 1},
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 12},
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 13},
+            {"tmdb_id": 900, "tmdb_season": 1, "tmdb_episode": 24},
+        ]
+        payloads = [
+            {"title": "Cour A", "media_type": "tv", "simkl_type": "anime",
+             "anilist_id": "1", "anidb_id": "11", "anilist_episode_count": 12},
+            {"title": "Cour B", "media_type": "tv", "simkl_type": "anime",
+             "anilist_id": "2", "anidb_id": "22", "anilist_episode_count": 12},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            store = LibraryStore(path)
+            store.add(SECTION_WATCHLIST, [enrich_identity(item) for item in payloads], source="anilist")
+            store.mark_watched([
+                {"media_type": "tv", "tmdb_id": 900, "title": "Canonical", "season": 1,
+                 "episode": episode, "watched_at": f"2026-01-{episode:02d}T00:00:00Z"}
+                for episode in range(1, 17)
+            ], source="pmdb")
+            restarted_rows = LibraryStore(path).fetch("history")
+
+        with patch("src.providers.enrich_identity", lambda item: {
+            **item, "tmdb_id": None, "match_confidence": "probable",
+        }):
+            plan = plan_progress_updates(
+                [_entry(1, "Cour A", 12), _entry(2, "Cour B", 12)], restarted_rows,
+            )
+        self.assertEqual([(update.media_id, update.new_progress) for update in plan.updates],
+                         [(1, 12), (2, 4)])
+
     def test_verified_library_segments_project_split_cours_in_one_season(self) -> None:
         segments = [
             {"provider": "anilist", "id": "1", "episode_start": 1,
