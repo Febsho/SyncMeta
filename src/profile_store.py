@@ -733,6 +733,55 @@ def _normalize_sync_pairs(raw: object) -> list[dict]:
     return out
 
 
+def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
+    """Return the safe List Sync view of legacy static-list pairs.
+
+    A pair remains the execution object.  Keeping its id is intentional: the
+    planner's baselines, captures, retries, tombstones, managed ownership and
+    schedule are all keyed by that id.  This migration is therefore purely a
+    presentation/model classification, never a destructive config rewrite.
+    Only a one-list PMDB <-> MDBList curation is unambiguously membership sync;
+    status/history/resume routes and mixed selections are left as normal pairs.
+    """
+    previous_routes: dict[str, dict] = {}
+    if isinstance(existing, list):
+        for entry in existing:
+            if isinstance(entry, dict) and str(entry.get("id") or "").strip():
+                previous_routes[str(entry["id"])] = dict(entry)
+
+    routes: list[dict] = []
+    for pair in pairs:
+        route_id = str(pair.get("pair_id") or "").strip()
+        source = str(pair.get("source") or "").strip().lower()
+        target = str(pair.get("target") or "").strip().lower()
+        source_lists = [str(value).strip() for value in pair.get("source_lists") or [] if str(value).strip()]
+        target_list = str(pair.get("target_list") or "").strip()
+        categories = set(pair.get("categories") or [])
+        if (
+            not route_id
+            or {source, target} != {"pmdb", "mdblist"}
+            or len(source_lists) != 1
+            or not source_lists[0].startswith("list:")
+            or not target_list.startswith("list:")
+            or not categories
+            or not categories.issubset({"watchlist", "collection"})
+        ):
+            continue
+        previous = previous_routes.get(route_id, {})
+        # Preserve a user-facing name and any future List Sync fields already
+        # stored by a newer app version; derive only missing identity fields.
+        routes.append({
+            **previous,
+            "id": route_id,
+            "name": str(previous.get("name") or pair.get("name") or f"{source.upper()} → {target.upper()}").strip(),
+            "source": {"provider": source, "collection_type": "static_list", "collection_id": source_lists[0]},
+            "destination": {"provider": target, "list_id": target_list},
+            "mode": "two_way" if pair.get("mode") == "two_way" else "managed_sync",
+            "pair_id": route_id,
+        })
+    return routes
+
+
 def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
     """Fold the former built-in PublicMetaDB pipeline into ordinary pairs.
 
@@ -932,6 +981,11 @@ def normalize_profile_options(options: dict | None) -> dict:
         "trakt_sync_to_pmdb_watchlist": bool(raw.get("trakt_sync_to_pmdb_watchlist", False)),
         "anilist_sync_to_pmdb_watchlist": bool(raw.get("anilist_sync_to_pmdb_watchlist", False)),
         "sync_pairs": _normalize_sync_pairs(raw.get("sync_pairs")),
+        # Kept alongside (not instead of) sync_pairs while List Sync reuses the
+        # established execution engine and its persisted safety state.
+        "list_sync_routes": _static_list_sync_routes(
+            _normalize_sync_pairs(raw.get("sync_pairs")), raw.get("list_sync_routes"),
+        ),
     }
 
 
@@ -1679,6 +1733,10 @@ class ProfileStore:
                 normalized_options["sync_pairs"] = list(
                     (profile.get("options") or {}).get("sync_pairs") or []
                 )
+                normalized_options["list_sync_routes"] = _static_list_sync_routes(
+                    normalized_options["sync_pairs"],
+                    (profile.get("options") or {}).get("list_sync_routes"),
+                )
             previous_auto_sync = bool(profile.get("options", {}).get("auto_sync", True))
             previous_next_sync_at = profile.get("next_sync_at")
             previous_auto_resume_sync = bool(profile.get("options", {}).get("auto_resume_sync", False))
@@ -1735,6 +1793,10 @@ class ProfileStore:
             if keeps_existing_pairs:
                 normalized_options["sync_pairs"] = list(
                     (profile.get("options") or {}).get("sync_pairs") or []
+                )
+                normalized_options["list_sync_routes"] = _static_list_sync_routes(
+                    normalized_options["sync_pairs"],
+                    (profile.get("options") or {}).get("list_sync_routes"),
                 )
             previous_auto_sync = bool(profile.get("options", {}).get("auto_sync", True))
             previous_next_sync_at = profile.get("next_sync_at")
@@ -2332,6 +2394,9 @@ class ProfileStore:
                 if isinstance(pair, dict) and pair.get("pair_id")
             }
             options["sync_pairs"] = normalized
+            options["list_sync_routes"] = _static_list_sync_routes(
+                normalized, options.get("list_sync_routes"),
+            )
             profile["options"] = options
             previous_schedule = dict(profile.get("pair_sync_schedule") or {})
             schedule: dict[str, dict] = {}

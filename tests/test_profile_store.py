@@ -9,6 +9,7 @@ from src.profile_store import (
     MIN_SYNC_INTERVAL_SECONDS,
     MIN_WATCHED_HISTORY_INTERVAL_SECONDS,
     ProfileStore,
+    normalize_profile_options,
 )
 
 
@@ -1162,3 +1163,34 @@ class PairResultPruningTests(unittest.TestCase):
         self._save_pairs("a")
         managed = (self._private().get("activity_state") or {}).get("pair_managed_keys") or {}
         self.assertIn("b", managed)
+
+
+class ListSyncMigrationTests(unittest.TestCase):
+    def _options(self, pairs):
+        return normalize_profile_options({
+            "media_types": ["movies"],
+            "sync_pairs": pairs,
+        })
+
+    def test_static_pmdb_mdblist_pair_is_classified_without_rewriting_pair(self) -> None:
+        pair = {
+            "pair_id": "favorites", "name": "Favorite Movies",
+            "source": "pmdb", "target": "mdblist",
+            "categories": ["watchlist"], "source_lists": ["list:pmdb-favs"],
+            "target_list": "list:mdblist-favs", "removal_mode": "managed",
+            "mode": "one_way", "auto_sync": True, "interval_seconds": 43200,
+        }
+        options = self._options([pair])
+        self.assertEqual(options["sync_pairs"][0]["pair_id"], "favorites")
+        route = options["list_sync_routes"][0]
+        self.assertEqual(route["id"], "favorites")
+        self.assertEqual(route["source"]["collection_id"], "list:pmdb-favs")
+        self.assertEqual(route["destination"]["list_id"], "list:mdblist-favs")
+
+    def test_semantic_and_mixed_routes_remain_general_sync_pairs(self) -> None:
+        options = self._options([
+            {"pair_id": "history", "source": "pmdb", "target": "mdblist", "categories": ["history"], "source_lists": ["list:1"], "target_list": "list:2"},
+            {"pair_id": "mixed", "source": "pmdb", "target": "mdblist", "categories": ["watchlist"], "source_lists": ["list:1", "list:3"], "target_list": "list:2"},
+            {"pair_id": "status", "source": "simkl", "target": "mdblist", "categories": ["watchlist"], "source_lists": ["status:plantowatch:anime"], "target_list": "list:2"},
+        ])
+        self.assertEqual(options["list_sync_routes"], [])

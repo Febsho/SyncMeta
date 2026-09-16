@@ -1177,6 +1177,7 @@
       </a>
       <div class="nav-links">
         <button class="nav-link" data-nav="overview" style="display:none">Overview</button>
+        <button class="nav-link" data-nav="list-sync" style="display:none">List Sync</button>
         <button class="nav-link" data-nav="activity" style="display:none">Activity</button>
         <button class="nav-link" data-nav="library" style="display:none">Library</button>
         <button class="nav-link" data-nav="issues" style="display:none">Issues<span class="nav-badge hidden" id="nav-issues-badge" aria-hidden="true">0</span></button>
@@ -1326,6 +1327,12 @@
             <div class="cards activity-cards" id="activity-cards"></div>
           </div>
         </div>
+      </div>
+
+      <div id="view-list-sync" style="display:none">
+        <h1 class="page-title">List Sync</h1>
+        <p class="page-sub">Static-list membership routes. Watch status, history, and resume stay in Sync.</p>
+        <div class="panel"><div class="panel-header"><span>Your list routes</span></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading List Sync routes...</div></div></div>
       </div>
 
       <div id="view-activity" style="display:none">
@@ -3832,10 +3839,10 @@
       stopNextSyncTicker();
     }
 
-    // The five top-level destinations. Everything the old six-view nav offered
+    // The top-level destinations. Everything the old six-view nav offered
     // still exists — it moved into one of these, and the aliases below keep old
     // deep links and in-app calls working.
-    const VIEW_IDS = ['overview', 'activity', 'library', 'issues', 'settings'];
+    const VIEW_IDS = ['overview', 'list-sync', 'activity', 'library', 'issues', 'settings'];
     const VIEW_ALIASES = {
       dashboard: 'overview',
       'sync-now': 'overview',
@@ -3885,6 +3892,7 @@
       }
 
       if (target === 'library') openLibrary();
+      if (target === 'list-sync') fetchListSyncRoutes();
       if (target === 'activity') {
         renderActivityPage();
         loadActivityRuns(activityPage);
@@ -3913,6 +3921,32 @@
         stopProfileLogPolling();
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    async function fetchListSyncRoutes() {
+      const node = el('list-sync-routes');
+      if (!node) return;
+      try {
+        const result = await apiPost('/api/profile/list-sync', {});
+        if (!result.ok) { node.innerHTML = '<div class="empty">Sign in to view List Sync routes.</div>'; return; }
+        const routes = Array.isArray(result.data.routes) ? result.data.routes : [];
+        if (!routes.length) {
+          node.innerHTML = '<div class="empty">No migrated static-list routes yet. Existing watch, history, resume, and status routes remain under Sync.</div>';
+          return;
+        }
+        node.innerHTML = routes.map(route => {
+          const source = route.source || {};
+          const destination = route.destination || {};
+          const result = route.last_result || {};
+          const last = result.timestamp ? `Last sync ${esc(timeAgo(result.timestamp))}` : 'Never run';
+          const changes = result.timestamp ? ` · +${Number(result.added || 0)} / −${Number(result.removed || 0)}` : '';
+          const state = route.enabled === false ? 'Paused' : (result.error_count ? 'Needs review' : 'Healthy');
+          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button></div></div>`;
+        }).join('');
+        node.querySelectorAll('[data-list-sync-run]').forEach(button => button.addEventListener('click', () => runPairs(button.dataset.listSyncRun, false)));
+      } catch {
+        node.innerHTML = '<div class="empty">Could not load List Sync routes.</div>';
+      }
     }
 
     document.querySelectorAll('.nav-link').forEach(link => {
@@ -4396,7 +4430,10 @@
       const body = el('pairs-dash-body');
       if (!panel || !body) return;
       bindPairsDashEvents(body);
-      const rawPairs = ((profile && profile.options) || {}).sync_pairs || [];
+      const options = ((profile && profile.options) || {});
+      const listRouteIds = new Set((options.list_sync_routes || [])
+        .map(route => route && (route.pair_id || route.id)).filter(Boolean));
+      const rawPairs = (options.sync_pairs || []).filter(pair => !listRouteIds.has(pair.pair_id));
       const schedule = (profile && profile.pair_sync_schedule) || {};
       const pairs = rawPairs.map(pair => {
         const scheduled = schedule[pair.pair_id];
@@ -10430,7 +10467,7 @@
     function renderRouteScheduleSettings() {
       const node = el('route-schedule-list');
       if (!node) return;
-      const pairs = pairsState.pairs || [];
+      const pairs = (pairsState.pairs || []).filter(pair => !pair.list_sync_managed);
       const enabled = pairs.filter(pair => pair.enabled !== false);
       const automatic = enabled.filter(pair => pair.auto_sync);
       const summary = el('pipe-summary-schedule');
@@ -10449,7 +10486,8 @@
         node.innerHTML = `<div class="empty"><div>No sync routes yet.</div><div class="catalog-note" style="margin-top:8px">Create a route first, then choose whether it runs manually or on its own.</div></div>`;
         return;
       }
-      node.innerHTML = pairs.map((pair, index) => {
+      node.innerHTML = pairs.map(pair => {
+        const index = pairsState.pairs.indexOf(pair);
         const twoWay = pair.mode === 'two_way';
         const flow = `${providerLabel(pair.source)} ${twoWay ? '↔' : '→'} ${providerLabel(pair.target)}`;
         const categories = (pair.categories || []).map(key => PAIR_CATEGORY_LABELS[key] || key).join(', ') || 'Nothing selected';
@@ -11305,7 +11343,8 @@
       const node = el('pairs-list');
       if (!node) return;
       bindPairEvents(node);
-      if (!pairsState.pairs.length) {
+      const visiblePairs = pairsState.pairs.filter(pair => !pair.list_sync_managed);
+      if (!visiblePairs.length) {
         // The library is the hub these pairs exist to fill, so the empty state
         // offers that pair outright rather than describing the idea and leaving
         // the user to assemble it from two dropdowns.
@@ -11323,7 +11362,7 @@
         </div>`;
         return;
       }
-      node.innerHTML = pairsState.pairs.map((pair, index) => pairCardHtml(pair, index)).join('');
+      node.innerHTML = visiblePairs.map(pair => pairCardHtml(pair, pairsState.pairs.indexOf(pair))).join('');
     }
 
     // Bound once on the container: per-element listeners had to be re-attached
@@ -11594,11 +11633,13 @@
         return;
       }
       pairsState = {
-        pairs: Array.isArray(result.data.pairs) ? result.data.pairs.map(pair => ({
+        pairs: (Array.isArray(result.data.pairs) ? result.data.pairs : []).concat(
+          Array.isArray(result.data.migrated_pairs) ? result.data.migrated_pairs : []
+        ).map(pair => ({
           ...pair,
           auto_sync: !!pair.auto_sync,
           interval_seconds: Math.max(43200, Number(pair.interval_seconds || 43200)),
-        })) : [],
+        })),
         providers: Array.isArray(result.data.providers) ? result.data.providers : [],
         categories: Array.isArray(result.data.categories) ? result.data.categories : [],
         removal_modes: Array.isArray(result.data.removal_modes) ? result.data.removal_modes : [],

@@ -1018,6 +1018,7 @@ class WebTests(unittest.TestCase):
 
     def test_pairs_require_a_session(self) -> None:
         self.assertEqual(self.client.post("/api/profile/pairs", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/profile/list-sync", json={}).status_code, 401)
         self.assertEqual(self.client.post("/api/profile/pairs/save", json={}).status_code, 401)
         self.assertEqual(self.client.post("/api/profile/pairs/run", json={}).status_code, 401)
 
@@ -1064,6 +1065,33 @@ class WebTests(unittest.TestCase):
         self.assertTrue(listed[0]["pair_id"])
         # Trakt is not configured on this profile, so the pair explains itself.
         self.assertIn("not configured", listed[0]["problem"])
+
+    def test_static_list_pair_moves_to_list_sync_without_losing_its_pair_id(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        saved = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "pair_id": "weekend-movies", "name": "Weekend Movies",
+            "source": "mdblist", "target": "pmdb",
+            "categories": ["watchlist"],
+            "source_lists": ["list:source-list"],
+            "target_list": "list:destination-list",
+            "removal_mode": "managed", "auto_sync": True,
+        }]})
+        self.assertEqual(saved.status_code, 200)
+
+        pairs = self.client.post("/api/profile/pairs", json={}).get_json()
+        self.assertEqual(pairs["pairs"], [])
+        self.assertEqual(pairs["migrated_pairs"][0]["pair_id"], "weekend-movies")
+
+        routes_response = self.client.post("/api/profile/list-sync", json={})
+        self.assertEqual(routes_response.status_code, 200)
+        route = routes_response.get_json()["routes"][0]
+        self.assertEqual(route["id"], "weekend-movies")
+        self.assertEqual(route["name"], "Weekend Movies")
+        self.assertEqual(route["source"]["collection_id"], "list:source-list")
+        self.assertEqual(route["destination"]["list_id"], "list:destination-list")
+        self.assertTrue(route["auto_sync"])
 
     def test_saving_a_pair_that_uses_the_library_round_trips(self) -> None:
         """The Library is a provider like any other, at either end.

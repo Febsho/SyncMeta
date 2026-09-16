@@ -4685,13 +4685,21 @@ def api_profile_pairs():
 
     config = _config_from_profile(private_profile)
     pairs = []
+    migrated_pairs = []
     adapters = _build_provider_adapters(config, profile_id=profile_id)
     service = CrossSyncService(adapters)
     # Last outcome per pair, so the editor can show what a pair actually did
     # instead of only what it is configured to do.
     last_results = private_profile.get("last_pair_results") or {}
     pair_schedule = private_profile.get("pair_sync_schedule") or {}
+    list_route_ids = {
+        str(route.get("pair_id") or route.get("id") or "")
+        for route in (private_profile.get("options") or {}).get("list_sync_routes") or []
+        if isinstance(route, dict)
+    }
     for pair in _sync_pairs_from_config(config):
+        # Static-list routes have their own first-class page.  They keep using
+        # this proven execution engine, but must not be editable twice.
         entry = pair.to_dict()
         # Surface why a pair cannot run so the editor can explain it in place
         # rather than only failing at run time.
@@ -4700,7 +4708,11 @@ def api_profile_pairs():
         schedule = pair_schedule.get(pair.pair_id) if isinstance(pair_schedule.get(pair.pair_id), dict) else {}
         entry["last_sync_at"] = schedule.get("last_sync_at")
         entry["next_sync_at"] = schedule.get("next_sync_at")
-        pairs.append(entry)
+        if pair.pair_id in list_route_ids:
+            entry["list_sync_managed"] = True
+            migrated_pairs.append(entry)
+        else:
+            pairs.append(entry)
 
     # How the routes fit together. Advisory only — a shape is named, never
     # refused, because the user may well have a reason for it.
@@ -4711,9 +4723,52 @@ def api_profile_pairs():
         topology = []
 
     return jsonify({
-        "pairs": pairs, "topology": topology,
+        "pairs": pairs, "migrated_pairs": migrated_pairs, "topology": topology,
         **_pair_capabilities(config, profile_id=profile_id),
     })
+
+
+@app.route("/api/profile/list-sync", methods=["POST"])
+def api_profile_list_sync():
+    """List Sync's safe projection of migrated static-list routes.
+
+    The returned execution id is the original pair id, so all existing route
+    state remains in place.  No provider list is created, deleted or modified
+    during migration or this read-only endpoint.
+    """
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        private_profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+
+    config = _config_from_profile(private_profile)
+    pairs = {pair.pair_id: pair for pair in _sync_pairs_from_config(config)}
+    results = private_profile.get("last_pair_results") or {}
+    schedules = private_profile.get("pair_sync_schedule") or {}
+    routes = []
+    for raw in (private_profile.get("options") or {}).get("list_sync_routes") or []:
+        if not isinstance(raw, dict):
+            continue
+        route_id = str(raw.get("pair_id") or raw.get("id") or "")
+        pair = pairs.get(route_id)
+        if pair is None:
+            continue
+        schedule = schedules.get(route_id) if isinstance(schedules.get(route_id), dict) else {}
+        routes.append({
+            **raw,
+            "id": route_id,
+            "pair_id": route_id,
+            "enabled": pair.enabled,
+            "auto_sync": pair.auto_sync,
+            "interval_seconds": pair.interval_seconds,
+            "last_result": results.get(route_id) or None,
+            "last_sync_at": schedule.get("last_sync_at"),
+            "next_sync_at": schedule.get("next_sync_at"),
+        })
+    return jsonify({"routes": routes})
 
 
 @app.route("/api/profile/pairs/lists", methods=["POST"])
