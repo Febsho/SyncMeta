@@ -33,9 +33,11 @@ CATEGORY_WATCHLIST = "watchlist"
 CATEGORY_HISTORY = "history"
 CATEGORY_COLLECTION = "collection"
 CATEGORY_RESUME = "resume"
+CATEGORY_DROPPED = "dropped"
 
 ALL_CATEGORIES = (
     CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME,
+    CATEGORY_DROPPED,
 )
 
 CATEGORY_LABELS = {
@@ -43,6 +45,7 @@ CATEGORY_LABELS = {
     CATEGORY_HISTORY: "Watch History",
     CATEGORY_COLLECTION: "Completed / Collection",
     CATEGORY_RESUME: "Resume Progress",
+    CATEGORY_DROPPED: "Dropped Shows",
 }
 
 # ── Removal modes ──────────────────────────────────────────────────────────
@@ -792,8 +795,8 @@ class TraktAdapter(ProviderAdapter):
     # /sync/history is a play log: every viewing is its own record, and the
     # paginated read hands all of them back.
     records_plays = True
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_DROPPED)
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
@@ -816,6 +819,7 @@ class TraktAdapter(ProviderAdapter):
             {"key": "watchlist", "label": "Watchlist", "category": CATEGORY_WATCHLIST, "kind": "status"},
             {"key": "collection", "label": "Collection", "category": CATEGORY_COLLECTION, "kind": "status"},
             {"key": "history", "label": "Watch History", "category": CATEGORY_HISTORY, "kind": "status"},
+            {"key": "dropped", "label": "Dropped Shows", "category": CATEGORY_DROPPED, "kind": "status"},
         ]
         try:
             personal_lists = self._client.get_personal_lists_metadata() or []
@@ -893,6 +897,8 @@ class TraktAdapter(ProviderAdapter):
             return list(self._client.get_collection() or [])
         if category == CATEGORY_RESUME:
             return list(self._client.get_playback_progress() or [])
+        if category == CATEGORY_DROPPED:
+            return list(self._client.get_dropped_shows() or [])
         return self._unsupported(category, "read")
 
     def _automatic_simkl_destinations(self, target_list: str) -> list[tuple[str, str]]:
@@ -1006,6 +1012,8 @@ class TraktAdapter(ProviderAdapter):
             return self._client.add_to_history(items)
         if category == CATEGORY_COLLECTION:
             return self._client.add_to_collection(items)
+        if category == CATEGORY_DROPPED:
+            return self._client.add_dropped_shows(items)
         return self._unsupported(category, "write")
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
@@ -1033,6 +1041,8 @@ class TraktAdapter(ProviderAdapter):
             return self._client.remove_from_history(items)
         if category == CATEGORY_COLLECTION:
             return self._client.remove_from_collection(items)
+        if category == CATEGORY_DROPPED:
+            return self._client.remove_dropped_shows(items)
         return self._unsupported(category, "remove from")
 
 
@@ -1043,7 +1053,7 @@ class SimklAdapter(ProviderAdapter):
     # *state* — one last-watched date per episode. A second play written here
     # is invisible on the next read, so rewatches are not carried to it.
     records_plays = False
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
     writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
     supports_list_selection = True
     supports_target_lists = False
@@ -1059,7 +1069,7 @@ class SimklAdapter(ProviderAdapter):
         ("plantowatch", "Plan to Watch", CATEGORY_WATCHLIST),
         ("completed", "Completed", CATEGORY_COLLECTION),
         ("hold", "On Hold", CATEGORY_COLLECTION),
-        ("dropped", "Dropped", CATEGORY_COLLECTION),
+        ("dropped", "Dropped", CATEGORY_DROPPED),
     )
     _MEDIA_LABELS = {"shows": "Series", "movies": "Movies", "anime": "Anime"}
 
@@ -1185,7 +1195,7 @@ class AniListAdapter(ProviderAdapter):
     # ambiguous coordinate, nothing past a contiguous run from episode 1, and
     # never a count lower than AniList already holds. Read that module before
     # loosening any of it.
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_DROPPED)
     writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
     supports_list_selection = True
     supports_target_lists = False
@@ -1202,7 +1212,7 @@ class AniListAdapter(ProviderAdapter):
         ("CURRENT", "Watching", CATEGORY_COLLECTION),
         ("COMPLETED", "Completed", CATEGORY_COLLECTION),
         ("PAUSED", "Paused", CATEGORY_COLLECTION),
-        ("DROPPED", "Dropped", CATEGORY_COLLECTION),
+        ("DROPPED", "Dropped", CATEGORY_DROPPED),
     )
 
     def list_sources(self) -> list[dict]:
@@ -1346,8 +1356,8 @@ class PmdbAdapter(ProviderAdapter):
     # /api/external/watched keeps one row per play unless `dedupe` is asked
     # for, and the history write deliberately does not ask for it.
     records_plays = True
-    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
@@ -1457,6 +1467,11 @@ class PmdbAdapter(ProviderAdapter):
             "label": "SyncMeta Collection",
             "category": CATEGORY_COLLECTION,
             "kind": "status",
+        }, {
+            "key": "dropped",
+            "label": "Dropped Shows",
+            "category": CATEGORY_DROPPED,
+            "kind": "status",
         }]
         for entry in self._client.get_lists() or []:
             list_id = entry.get("id")
@@ -1561,6 +1576,16 @@ class PmdbAdapter(ProviderAdapter):
                         normalized[field] = entry[field]
                 normalized["resume_id"] = entry.get("id") or entry.get("resume_id")
                 out.append(normalized)
+            return out
+        if category == CATEGORY_DROPPED:
+            out = []
+            for entry in self._client.get_dropped_shows() or []:
+                normalized = self._normalize_pmdb_entry(entry)
+                if normalized:
+                    # This endpoint represents TV shows even if older server
+                    # rows omit their media type.
+                    normalized["media_type"] = "tv"
+                    out.append(normalized)
             return out
         return self._unsupported(category, "read")
 
@@ -1714,6 +1739,16 @@ class PmdbAdapter(ProviderAdapter):
                 self._client.save_resume_points_batch(payload)
                 totals["added"] += len(payload)
             return totals
+        if category == CATEGORY_DROPPED:
+            for item in items:
+                tmdb_id = str(item.get("tmdb_id") or "").strip()
+                media_type = str(item.get("media_type") or "tv").strip().lower()
+                if not tmdb_id.isdigit() or media_type != "tv":
+                    totals["not_found"] += 1
+                    continue
+                self._client.drop_show(int(tmdb_id))
+                totals["added"] += 1
+            return totals
         return self._unsupported(category, "write")
 
     def remove(self, category: str, items: list[dict], target_list: str = "") -> dict:
@@ -1802,6 +1837,18 @@ class PmdbAdapter(ProviderAdapter):
                     continue
                 if self._client.delete_resume_point(str(resume_id)):
                     totals["deleted"] += 1
+            return totals
+        if category == CATEGORY_DROPPED:
+            for item in items:
+                tmdb_id = str(item.get("tmdb_id") or "").strip()
+                media_type = str(item.get("media_type") or "tv").strip().lower()
+                if not tmdb_id.isdigit() or media_type != "tv":
+                    totals["not_found"] += 1
+                    continue
+                if self._client.undrop_show(int(tmdb_id)):
+                    totals["deleted"] += 1
+                else:
+                    totals["not_found"] += 1
             return totals
         return self._unsupported(category, "remove from")
 

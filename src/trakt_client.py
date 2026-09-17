@@ -317,6 +317,26 @@ class TraktClient:
                     items.append(normalized)
         return items
 
+    def get_dropped_shows(self) -> list[dict]:
+        """Return Trakt's native dropped-show state from hidden items."""
+        items: list[dict] = []
+        page = 1
+        while True:
+            self._check_cancelled()
+            raw = self._get("/users/hidden/dropped", params={
+                "page": page, "limit": 100, "extended": "full",
+            }) or []
+            if not isinstance(raw, list) or not raw:
+                break
+            for entry in raw:
+                normalized = self._normalize_watchlist_entry(entry)
+                if normalized and normalized.get("media_type") == "tv":
+                    items.append(normalized)
+            if len(raw) < 100:
+                break
+            page += 1
+        return items
+
     def get_liked_lists(self) -> list[dict]:
         liked_lists = []
         for meta in self.get_liked_lists_metadata():
@@ -964,6 +984,37 @@ class TraktClient:
                     len(v) for v in not_found.values() if isinstance(v, list)
                 )
         return totals
+
+    def _dropped_shows_write(self, path: str, items: list[dict]) -> dict:
+        """Write Trakt's native dropped state; it only accepts TV shows."""
+        totals: dict = {"added": 0, "deleted": 0, "not_found": 0, "batches": 0}
+        valid: list[dict] = []
+        for item in items:
+            if str(item.get("media_type") or "").strip().lower() != "tv":
+                totals["not_found"] += 1
+                continue
+            tmdb_id = str(item.get("tmdb_id") or "").strip()
+            if not tmdb_id.isdigit():
+                totals["not_found"] += 1
+                continue
+            valid.append({"ids": {"tmdb": int(tmdb_id)}})
+        for start in range(0, len(valid), TRAKT_SYNC_BATCH_SIZE):
+            response = self._post(path, {"shows": valid[start:start + TRAKT_SYNC_BATCH_SIZE]}) or {}
+            totals["batches"] += 1
+            added = response.get("added") or {}
+            deleted = response.get("deleted") or {}
+            totals["added"] += int(added.get("shows") or 0) if isinstance(added, dict) else 0
+            totals["deleted"] += int(deleted.get("shows") or 0) if isinstance(deleted, dict) else 0
+            not_found = response.get("not_found") or {}
+            if isinstance(not_found, dict):
+                totals["not_found"] += len(not_found.get("shows") or [])
+        return totals
+
+    def add_dropped_shows(self, items: list[dict]) -> dict:
+        return self._dropped_shows_write("/users/hidden/dropped", items)
+
+    def remove_dropped_shows(self, items: list[dict]) -> dict:
+        return self._dropped_shows_write("/users/hidden/dropped/remove", items)
 
     def add_to_watchlist(self, items: list[dict]) -> dict:
         return self._sync_write("/sync/watchlist", items)

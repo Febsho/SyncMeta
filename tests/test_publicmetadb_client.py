@@ -7,6 +7,30 @@ from src.publicmetadb_client import PublicMetaDBClient
 
 
 class PublicMetaDBClientTests(unittest.TestCase):
+    def test_dropped_shows_use_native_dropped_endpoints(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        calls: list[tuple[str, object]] = []
+
+        client._get_paginated_items = lambda path: calls.append(("get", path)) or [{"tmdb_id": 42}]  # type: ignore[method-assign]
+        client._post = lambda path, data: calls.append(("post", (path, data))) or {"success": True}  # type: ignore[method-assign]
+        client._delete = lambda path: calls.append(("delete", path)) or {"success": True}  # type: ignore[method-assign]
+
+        self.assertEqual(client.get_dropped_shows(), [{"tmdb_id": 42}])
+        self.assertEqual(client.drop_show(42), {"success": True})
+        self.assertTrue(client.undrop_show(42))
+        self.assertEqual(calls, [
+            ("get", "/api/external/dropped"),
+            ("post", ("/api/external/dropped", {"tmdb_id": 42, "media_type": "tv"})),
+            ("delete", "/api/external/dropped/42/tv"),
+        ])
+
+    def test_dropped_endpoints_refuse_movies(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        with self.assertRaises(ValueError):
+            client.drop_show(42, "movie")
+        with self.assertRaises(ValueError):
+            client.undrop_show(42, "movie")
+
     def test_get_watched_history_paginates_all_pages(self) -> None:
         client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
         calls: list[tuple[str, dict | None]] = []

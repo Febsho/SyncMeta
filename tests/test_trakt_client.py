@@ -292,6 +292,43 @@ class TraktClientTests(unittest.TestCase):
         self.assertEqual(item["runtime_ms"], 48 * 60_000)
         self.assertEqual(item["position_ms"], 24 * 60_000)
 
+    def test_native_dropped_show_endpoints_are_paginated_and_tv_only(self) -> None:
+        client = TraktClient(TraktConfig())
+        get_calls: list[dict] = []
+        post_calls: list[tuple[str, dict]] = []
+
+        def fake_get(path, params=None):
+            self.assertEqual(path, "/users/hidden/dropped")
+            get_calls.append(params or {})
+            page = (params or {}).get("page")
+            if page == 1:
+                return [{"type": "show", "show": {"title": "Dropped", "ids": {"tmdb": 42}}}]
+            return []
+
+        def fake_post(path, data):
+            post_calls.append((path, data))
+            return ({"added": {"shows": 1}, "not_found": {"shows": []}}
+                    if path.endswith("/dropped") else {"deleted": {"shows": 1}, "not_found": {"shows": []}})
+
+        client._get = fake_get  # type: ignore[method-assign]
+        client._post = fake_post  # type: ignore[method-assign]
+
+        self.assertEqual(client.get_dropped_shows()[0]["tmdb_id"], "42")
+        added = client.add_dropped_shows([
+            {"tmdb_id": "42", "media_type": "tv"},
+            {"tmdb_id": "7", "media_type": "movie"},
+        ])
+        removed = client.remove_dropped_shows([{"tmdb_id": "42", "media_type": "tv"}])
+
+        self.assertEqual(get_calls, [{"page": 1, "limit": 100, "extended": "full"}])
+        self.assertEqual(added["added"], 1)
+        self.assertEqual(added["not_found"], 1)
+        self.assertEqual(removed["deleted"], 1)
+        self.assertEqual(post_calls, [
+            ("/users/hidden/dropped", {"shows": [{"ids": {"tmdb": 42}}]}),
+            ("/users/hidden/dropped/remove", {"shows": [{"ids": {"tmdb": 42}}]}),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

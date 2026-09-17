@@ -59,6 +59,7 @@ from .sync.models import (
 )
 from .providers import (
     CATEGORY_COLLECTION,
+    CATEGORY_DROPPED,
     CATEGORY_HISTORY,
     CATEGORY_RESUME,
     CATEGORY_WATCHLIST,
@@ -255,7 +256,7 @@ def _history_adds(source_rows: list[tuple[str, dict]], target_by_key: dict, targ
 #: surprising. Below these the guard stays silent — removing 2 of 3 items is a
 #: perfectly ordinary edit and pausing it would be noise.
 #: Categories the baseline planner owns. Membership only — see _plan_category.
-_PLANNED_CATEGORIES = frozenset({CATEGORY_WATCHLIST, CATEGORY_COLLECTION})
+_PLANNED_CATEGORIES = frozenset({CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED})
 
 _GUARD_MIN_TARGET_SIZE = 10
 _GUARD_MIN_REMOVALS = 5

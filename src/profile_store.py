@@ -729,7 +729,20 @@ def _normalize_sync_pairs(raw: object) -> list[dict]:
             pair_id = f"{pair_id}-{index + 1}"
         seen_ids.add(pair_id)
         pair.pair_id = pair_id
-        out.append(pair.to_dict())
+        normalized = pair.to_dict()
+        # Dropped TV shows used to be grouped with collection statuses.  PMDB
+        # now has a native dropped state, so retain the old collection route
+        # while also enabling that state for existing PMDB-bound routes.
+        source_lists = {str(key) for key in normalized.get("source_lists") or []}
+        has_dropped_source = (
+            (normalized["source"] == "simkl" and any(key.startswith("status:dropped:") for key in source_lists))
+            or (normalized["source"] == "anilist" and "status:DROPPED" in source_lists)
+        )
+        if normalized["target"] in {"pmdb", "trakt"} and has_dropped_source:
+            normalized["categories"] = list(dict.fromkeys([
+                *(normalized.get("categories") or []), "dropped",
+            ]))
+        out.append(normalized)
     return out
 
 
@@ -839,7 +852,9 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
     for media_type, statuses in credentials["simkl"]["selected_statuses"].items():
         for status in statuses:
             simkl_lists.append(f"status:{status}:{media_type}")
-            category = "watchlist" if status == "plantowatch" else "collection"
+            category = "watchlist" if status == "plantowatch" else (
+                "dropped" if status == "dropped" else "collection"
+            )
             if category not in simkl_categories:
                 simkl_categories.append(category)
     if migrated.get("activity_history_source") == "simkl":
@@ -850,7 +865,9 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
     anilist_lists = [f"status:{status}" for status in credentials["anilist"]["selected_statuses"]]
     anilist_categories: list[str] = []
     for status in credentials["anilist"]["selected_statuses"]:
-        category = "watchlist" if status == "PLANNING" else "collection"
+        category = "watchlist" if status == "PLANNING" else (
+            "dropped" if status == "DROPPED" else "collection"
+        )
         if category not in anilist_categories:
             anilist_categories.append(category)
     if credentials["anilist"]["username"]:

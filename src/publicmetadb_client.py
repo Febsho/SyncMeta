@@ -159,6 +159,33 @@ class PublicMetaDBClient:
     def get_watched_history(self) -> list[dict]:
         return self._get_paginated_items("/api/external/watched")
 
+    # Dropped shows
+
+    def get_dropped_shows(self) -> list[dict]:
+        """Return PMDB's native dropped-show state, across all pages."""
+        return self._get_paginated_items("/api/external/dropped")
+
+    def drop_show(self, tmdb_id: int, media_type: str = "tv") -> dict | None:
+        """Hide a TV show from PMDB's Up Next, Progress and Calendar views."""
+        if str(media_type or "tv").strip().lower() != "tv":
+            raise ValueError("PublicMetaDB only supports dropping TV shows")
+        return self._post("/api/external/dropped", {
+            "tmdb_id": int(tmdb_id),
+            "media_type": "tv",
+        })
+
+    def undrop_show(self, tmdb_id: int, media_type: str = "tv") -> bool:
+        """Restore a previously dropped TV show to PMDB's progress views."""
+        if str(media_type or "tv").strip().lower() != "tv":
+            raise ValueError("PublicMetaDB only supports undropping TV shows")
+        try:
+            self._delete(f"/api/external/dropped/{int(tmdb_id)}/tv")
+            return True
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return False
+            raise
+
     def mark_watched(
         self,
         tmdb_id: int,

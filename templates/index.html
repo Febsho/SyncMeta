@@ -4397,7 +4397,7 @@
     // Driven entirely off /status: the public profile already carries both the
     // pair definitions (options.sync_pairs) and their last outcomes, so showing
     // them here costs no extra request.
-    const PAIR_CATEGORY_LABELS = { watchlist: 'Watchlist', collection: 'Collection', history: 'History', resume: 'Resume Progress' };
+    const PAIR_CATEGORY_LABELS = { watchlist: 'Watchlist', collection: 'Collection', history: 'History', resume: 'Resume Progress', dropped: 'Dropped Shows' };
     // The dashboard renders before the pair editor has ever been opened, so it
     // cannot rely on pairsState.providers for names.
     const PROVIDER_DASH_LABELS = {
@@ -9968,7 +9968,7 @@
     const PREVIEW_ROWS_PER_GROUP = 25;
     const CATEGORY_LABELS = {
       watchlist: 'Watchlist', collection: 'Collection',
-      history: 'Watch history', resume: 'Resume',
+      history: 'Watch history', resume: 'Resume', dropped: 'Dropped Shows',
     };
 
     function openPlanPreviewDialog(plans, verdicts) {

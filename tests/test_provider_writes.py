@@ -11,7 +11,7 @@ from unittest.mock import patch
 from src.anilist_client import AniListClient
 from src.config import AniListConfig, SimklConfig, TraktConfig
 from src.mdblist_client import MdbListClient
-from src.providers import CATEGORY_HISTORY, PmdbAdapter
+from src.providers import CATEGORY_DROPPED, CATEGORY_HISTORY, PmdbAdapter
 from src.simkl_client import SimklClient
 from src.trakt_client import TraktClient
 
@@ -462,6 +462,7 @@ class PmdbHistoryRemovalTests(unittest.TestCase):
         self.assertEqual(totals["not_found"], 1)
         self.assertEqual(client.calls, [])
 
+
     def test_an_unusable_id_is_counted_not_sent(self) -> None:
         adapter, client = self._adapter()
         totals = adapter.remove(CATEGORY_HISTORY, [
@@ -486,3 +487,34 @@ class PmdbHistoryRemovalTests(unittest.TestCase):
             ])
         except Exception as exc:  # pragma: no cover - the regression itself
             self.fail(f"PublicMetaDB history removal still refused: {exc}")
+
+
+class PmdbDroppedShowsTests(unittest.TestCase):
+    class FakeClient:
+        def __init__(self):
+            self.dropped: list[int] = []
+            self.undropped: list[int] = []
+
+        def drop_show(self, tmdb_id):
+            self.dropped.append(tmdb_id)
+            return {"success": True}
+
+        def undrop_show(self, tmdb_id):
+            self.undropped.append(tmdb_id)
+            return True
+
+    def test_only_tv_rows_use_pmdb_native_dropped_state(self) -> None:
+        client = self.FakeClient()
+        adapter = PmdbAdapter.__new__(PmdbAdapter)
+        adapter._client = client
+
+        added = adapter.add(CATEGORY_DROPPED, [
+            {"tmdb_id": "42", "media_type": "tv"},
+            {"tmdb_id": "7", "media_type": "movie"},
+        ])
+        removed = adapter.remove(CATEGORY_DROPPED, [{"tmdb_id": "42", "media_type": "tv"}])
+
+        self.assertEqual(client.dropped, [42])
+        self.assertEqual(client.undropped, [42])
+        self.assertEqual((added["added"], added["not_found"]), (1, 1))
+        self.assertEqual(removed["deleted"], 1)
