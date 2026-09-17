@@ -44,6 +44,13 @@ class AniListClientTests(unittest.TestCase):
         self.assertIsNone(normalized["root_anilist_id"])
         self.assertIsNone(normalized["root_mal_id"])
 
+    def test_public_status_uses_a_separate_credential_free_client(self) -> None:
+        client = AniListClient(AniListConfig(username="owner", access_token="secret"))
+        with mock.patch.object(AniListClient, "get_status", return_value=[{"title": "Public list item"}]) as read:
+            self.assertEqual(client.get_public_status("OtherUser", "PLANNING"), [{"title": "Public list item"}])
+        public_client = read.call_args[0] if read.call_args else ()
+        self.assertEqual(public_client, ("PLANNING",))
+
     def test_normalize_single_episode_ona_as_movie(self) -> None:
         client = AniListClient(AniListConfig(username="tester"))
 

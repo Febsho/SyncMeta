@@ -1332,7 +1332,7 @@
       <div id="view-list-sync" style="display:none">
         <h1 class="page-title">List Sync</h1>
         <p class="page-sub">Static-list membership routes. Watch status, history, and resume stay in Sync.</p>
-        <div class="panel"><div class="panel-header"><span>Your list routes</span></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading List Sync routes...</div></div></div>
+        <div class="panel"><div class="panel-header"><span>Your list routes</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Create Route</button></div><div class="panel-body" id="list-sync-editor" style="display:none"></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading List Sync routes...</div></div></div>
       </div>
 
       <div id="view-activity" style="display:none">
@@ -3941,11 +3941,96 @@
           const last = result.timestamp ? `Last sync ${esc(timeAgo(result.timestamp))}` : 'Never run';
           const changes = result.timestamp ? ` · +${Number(result.added || 0)} / −${Number(result.removed || 0)}` : '';
           const state = route.enabled === false ? 'Paused' : (result.error_count ? 'Needs review' : 'Healthy');
-          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button></div></div>`;
+          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_name || source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_name || destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button><button class="btn btn-sm" type="button" data-list-sync-toggle="${escAttr(route.pair_id)}" data-list-sync-enabled="${route.enabled ? '0' : '1'}">${route.enabled ? 'Disable' : 'Enable'}</button></div></div>`;
         }).join('');
         node.querySelectorAll('[data-list-sync-run]').forEach(button => button.addEventListener('click', () => runPairs(button.dataset.listSyncRun, false)));
+        node.querySelectorAll('[data-list-sync-toggle]').forEach(button => button.addEventListener('click', async () => {
+          button.disabled = true;
+          try {
+            const result = await apiPost('/api/profile/list-sync/toggle', { route_id: button.dataset.listSyncToggle, enabled: button.dataset.listSyncEnabled === '1' });
+            if (!result.ok) throw new Error(formatApiError(result.data, 'Could not update List Sync route.'));
+            await fetchListSyncRoutes(); await fetchPairs(); _forceStatusRefresh();
+          } catch (error) { showToast(error.message || 'Could not update List Sync route.', true, false); button.disabled = false; }
+        }));
       } catch {
         node.innerHTML = '<div class="empty">Could not load List Sync routes.</div>';
+      }
+    }
+
+    async function openListSyncEditor() {
+      const editor = el('list-sync-editor');
+      if (!editor) return;
+      editor.style.display = '';
+      editor.innerHTML = '<div class="catalog-note">Loading available collections and destination lists...</div>';
+      try {
+        const result = await apiPost('/api/profile/list-sync/capabilities', {});
+        if (!result.ok) throw new Error(formatApiError(result.data, 'Could not load List Sync capabilities.'));
+        const sources = result.data.sources || [];
+        const destinations = result.data.destinations || [];
+        if (!sources.length || !destinations.length) {
+          editor.innerHTML = '<div class="catalog-note">Connect the source provider and add PMDB or MDBList write access before creating a route.</div>';
+          return;
+        }
+        const sourceOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${esc(row.display_name)}</option>`;
+        const destinationOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${esc(row.display_name)}</option>`;
+        editor.innerHTML = `<div class="pair-sec-title">Create List Sync route</div>
+          <div class="pair-opt-grid"><label class="pair-flow-end"><span>Name</span><input class="pair-card-name" id="list-sync-name" placeholder="Weekend Movies"></label>
+          <label class="pair-flow-end"><span>Source collection</span><select id="list-sync-source">${sources.map(sourceOption).join('')}</select><button class="btn btn-sm" type="button" id="btn-list-sync-public-anilist">Import public AniList list</button></label>
+          <label class="pair-flow-end"><span>Destination list</span><select id="list-sync-destination">${destinations.map(destinationOption).join('')}</select><button class="btn btn-sm" type="button" id="btn-list-sync-new-destination">Create destination list</button></label>
+          <label class="pair-flow-end"><span>Behavior</span><select id="list-sync-mode"><option value="add_only">Add new items only</option><option value="managed_sync" selected>Keep managed items synchronized</option><option value="two_way">Two-way static sync</option></select></label>
+          <label class="pair-flow-end"><span>Schedule</span><select id="list-sync-interval"><option value="0">Manual only</option><option value="43200">Every 12 hours</option><option value="86400">Daily</option></select></label></div>
+          <div class="pair-card-foot"><button class="btn btn-primary btn-sm" type="button" id="btn-list-sync-create-submit">Create Route</button><button class="btn btn-sm" type="button" id="btn-list-sync-create-cancel">Cancel</button></div>`;
+        el('btn-list-sync-create-cancel').addEventListener('click', () => { editor.style.display = 'none'; editor.innerHTML = ''; });
+        el('btn-list-sync-public-anilist').addEventListener('click', async () => {
+          const username = window.prompt('Public AniList username');
+          if (!username || !username.trim()) return;
+          const button = el('btn-list-sync-public-anilist'); button.disabled = true;
+          try {
+            const publicLists = await apiPost('/api/profile/list-sync/anilist/public', { username: username.trim() });
+            if (!publicLists.ok) throw new Error(formatApiError(publicLists.data, 'Could not load public AniList lists.'));
+            const rows = publicLists.data.sources || [];
+            const select = el('list-sync-source');
+            rows.forEach(row => { select.insertAdjacentHTML('beforeend', sourceOption(row)); });
+            if (rows.length) select.value = `${rows[0].provider}|${rows[0].id}`;
+          } catch (error) { showToast(error.message || 'Could not load public AniList lists.', true, false); }
+          finally { button.disabled = false; }
+        });
+        el('btn-list-sync-new-destination').addEventListener('click', async () => {
+          const provider = el('list-sync-destination').value.split('|', 1)[0];
+          const name = window.prompt(`New ${providerLabel(provider)} list name`);
+          if (!name || !name.trim()) return;
+          const button = el('btn-list-sync-new-destination');
+          button.disabled = true;
+          try {
+            const created = await apiPost('/api/profile/list-sync/destinations/create', { provider, name: name.trim() });
+            if (!created.ok) throw new Error(formatApiError(created.data, 'Could not create destination list.'));
+            await openListSyncEditor();
+            showToast('Destination list created.', false, true);
+          } catch (error) { showToast(error.message || 'Could not create destination list.', true, false); }
+          finally { if (button) button.disabled = false; }
+        });
+        el('btn-list-sync-create-submit').addEventListener('click', async () => {
+          const [sourceProvider, sourceId] = el('list-sync-source').value.split('|', 2);
+          const [destinationProvider, destinationId] = el('list-sync-destination').value.split('|', 2);
+          const interval = Number(el('list-sync-interval').value || 0);
+          const button = el('btn-list-sync-create-submit');
+          button.disabled = true; button.textContent = 'Creating...';
+          try {
+            const created = await apiPost('/api/profile/list-sync/create', {
+              name: el('list-sync-name').value.trim(), source: { provider: sourceProvider, id: sourceId },
+              destination: { provider: destinationProvider, id: destinationId }, mode: el('list-sync-mode').value,
+              auto_sync: interval > 0, interval_seconds: interval || 43200,
+            });
+            if (!created.ok) throw new Error(formatApiError(created.data, 'Could not create List Sync route.'));
+            editor.style.display = 'none'; editor.innerHTML = '';
+            showToast('List Sync route created.', false, true);
+            await fetchListSyncRoutes(); await fetchPairs(); _forceStatusRefresh();
+          } catch (error) {
+            showToast(error.message || 'Could not create List Sync route.', true, false);
+          } finally { button.disabled = false; button.textContent = 'Create Route'; }
+        });
+      } catch (error) {
+        editor.innerHTML = `<div class="catalog-note" style="color:var(--red)">${esc(error.message || 'Could not load List Sync capabilities.')}</div>`;
       }
     }
 
@@ -10239,6 +10324,8 @@
 
     function bindRedesignEvents() {
       bindActivityPage();
+      const listSyncCreate = el('btn-list-sync-create');
+      if (listSyncCreate) listSyncCreate.addEventListener('click', openListSyncEditor);
       const searchBtn = el('btn-global-search');
       if (searchBtn) searchBtn.addEventListener('click', openSearchDialog);
       const kbd = el('nav-search-kbd');

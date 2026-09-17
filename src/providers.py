@@ -716,6 +716,10 @@ class ProviderAdapter:
         """Named lists items can be written into. Empty unless supported."""
         return []
 
+    def create_target_list(self, name: str, visibility: str = VISIBILITY_PRIVATE) -> dict:
+        """Create a writable static destination list when the provider supports it."""
+        raise ValueError(f"{self.label} cannot create destination lists")
+
     def search_lists(self, query: str) -> list[dict]:
         """Public lists matching a query, for adding one not already selected."""
         return []
@@ -1273,6 +1277,21 @@ class AniListAdapter(ProviderAdapter):
             return items
 
         by_status = {status: cat for status, _label, cat in self._STATUSES}
+        public_selected = [
+            (parts[1], parts[2]) for key in (source_lists or [])
+            if (parts := str(key).split(":", 2)) and len(parts) == 3
+            and parts[0] == "public" and by_status.get(parts[2]) == category
+        ]
+        if public_selected:
+            items: list[dict] = []
+            seen: set[str] = set()
+            for username, status in public_selected:
+                for item in self._client.get_public_status(username, status) or []:
+                    key = item_key(item)
+                    if key not in seen:
+                        seen.add(key)
+                        items.append({**item, PLANNED_FLAG: status == "PLANNING"})
+            return items
         selected = [
             str(key).split(":", 1)[1]
             for key in (source_lists or [])
@@ -1555,6 +1574,16 @@ class PmdbAdapter(ProviderAdapter):
                 continue
             out.append({"key": f"list:{list_id}", "label": str(entry.get("name") or f"List {list_id}")})
         return out
+
+    def create_target_list(self, name: str, visibility: str = VISIBILITY_PRIVATE) -> dict:
+        created = self._client.create_list(
+            str(name).strip(), "List Sync destination",
+            is_public=visibility == VISIBILITY_PUBLIC, list_type="custom",
+        )
+        list_id = created.get("id") if isinstance(created, dict) else None
+        if not list_id:
+            raise RuntimeError("PublicMetaDB did not return the created list id")
+        return {"key": f"list:{list_id}", "label": str(created.get("name") or name)}
 
     def accepts(self, category: str, item: dict, target_list: str = "") -> bool:
         """PublicMetaDB's native watchlist is a plan-to-watch list.
@@ -1875,6 +1904,13 @@ class MdbListAdapter(ProviderAdapter):
             for entry in by_id.values()
             if entry.get("id")
         ]
+
+    def create_target_list(self, name: str, visibility: str = VISIBILITY_PRIVATE) -> dict:
+        created = self._client.create_list(str(name).strip(), private=visibility != VISIBILITY_PUBLIC)
+        list_id = created.get("id") if isinstance(created, dict) else None
+        if not list_id:
+            raise RuntimeError("MDBList did not return the created list id")
+        return {"key": f"list:{list_id}", "label": str(created.get("name") or name)}
 
     def search_lists(self, query: str) -> list[dict]:
         return [

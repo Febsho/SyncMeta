@@ -1330,11 +1330,19 @@ def _build_provider_adapters(
         adapters["trakt"] = TraktAdapter(
             TraktClient(config.trakt, cancel_requested_callback=cancel_requested_callback),
         )
-    if config.anilist.username:
+    has_public_anilist_source = any(
+        str(pair.get("source") or "").lower() == "anilist"
+        and any(str(key).startswith("public:") for key in pair.get("source_lists") or [])
+        for pair in config.sync.sync_pairs or []
+    )
+    if config.anilist.username or has_public_anilist_source:
         # Readable with just a username; the adapter reports that writing needs a
         # token, so existing profiles keep working without re-authenticating.
+        anilist_config = config.anilist if config.anilist.username else copy.copy(config.anilist)
+        if not anilist_config.username:
+            anilist_config.username = "public-source"
         adapters["anilist"] = AniListAdapter(
-            AniListClient(config.anilist, cancel_requested_callback=cancel_requested_callback),
+            AniListClient(anilist_config, cancel_requested_callback=cancel_requested_callback),
         )
     if config.mdblist.api_key or config.mdblist.access_token:
         # Gate on either credential alone. mdblist.enabled additionally requires
@@ -4769,6 +4777,194 @@ def api_profile_list_sync():
             "next_sync_at": schedule.get("next_sync_at"),
         })
     return jsonify({"routes": routes})
+
+
+def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
+    """Collection capabilities for List Sync, kept out of frontend conditionals."""
+    sources = []
+    destinations = []
+    for provider, adapter in _build_provider_adapters(config, profile_id=profile_id).items():
+        if provider in {"pmdb", "mdblist", "simkl", "anilist"}:
+            for entry in adapter.safe_list_sources():
+                kind = str(entry.get("kind") or "").lower()
+                category = str(entry.get("category") or "")
+                # PMDB/MDBList contribute only actual static lists.  SIMKL and
+                # AniList may contribute read-only semantic collections, but
+                # never history/progress as list membership.
+                allowed = (provider in {"pmdb", "mdblist"} and kind == "list") or (
+                    provider in {"simkl", "anilist"} and kind in {"status", "list"}
+                    and category in {CATEGORY_WATCHLIST, CATEGORY_COLLECTION}
+                )
+                if not allowed:
+                    continue
+                sources.append({
+                    "provider": provider, "id": str(entry.get("key") or ""),
+                    "display_name": str(entry.get("label") or entry.get("key") or ""),
+                    "category": category, "group": "Personal Collections" if provider in {"simkl", "anilist"} else "Personal Lists",
+                    "readable": True, "writable": False, "static": kind == "list",
+                    "dynamic": False, "personal": True,
+                    "supportsCreate": False, "supportsRemove": False,
+                    "supportsTwoWay": provider in {"pmdb", "mdblist"} and kind == "list",
+                    "semanticStatus": provider in {"simkl", "anilist"} and kind == "status",
+                })
+        if provider in {"pmdb", "mdblist"}:
+            for entry in adapter.safe_target_lists():
+                if not str(entry.get("key") or "").startswith("list:"):
+                    continue  # native watchlist/Picks are semantic, not List Sync destinations
+                destinations.append({
+                    "provider": provider, "id": str(entry.get("key") or ""),
+                    "display_name": str(entry.get("label") or entry.get("key") or ""),
+                    "readable": True, "writable": True, "static": True, "dynamic": False,
+                    "personal": True, "supportsCreate": True, "supportsRemove": True,
+                    "supportsTwoWay": True, "semanticStatus": False,
+                })
+    return {"sources": sources, "destinations": destinations}
+
+
+@app.route("/api/profile/list-sync/capabilities", methods=["POST"])
+def api_profile_list_sync_capabilities():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    return jsonify(_list_sync_capabilities(_config_from_profile(profile), profile_id))
+
+
+@app.route("/api/profile/list-sync/anilist/public", methods=["POST"])
+def api_profile_list_sync_anilist_public():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    username = str((request.get_json(silent=True) or {}).get("username") or "").strip()
+    if not username:
+        return _json_error("AniList username is required", 400)
+    client = AniListClient(AniListConfig(username=username))
+    statuses = (("PLANNING", "Planning", CATEGORY_WATCHLIST), ("CURRENT", "Watching", CATEGORY_COLLECTION),
+                ("COMPLETED", "Completed", CATEGORY_COLLECTION), ("PAUSED", "Paused", CATEGORY_COLLECTION),
+                ("DROPPED", "Dropped", CATEGORY_COLLECTION))
+    try:
+        collections = [{"provider": "anilist", "id": f"public:{username}:{status}", "display_name": f"{username} · {label}", "category": category,
+                        "group": "Public Lists", "readable": True, "writable": False, "static": False, "dynamic": False, "personal": False,
+                        "supportsCreate": False, "supportsRemove": False, "supportsTwoWay": False, "semanticStatus": True,
+                        "item_count": len(client.get_public_status(username, status) or [])}
+                       for status, label, category in statuses]
+    except Exception as exc:
+        return _json_error(f"Could not load public AniList lists: {exc}", 502)
+    return jsonify({"sources": collections})
+
+
+@app.route("/api/profile/list-sync/create", methods=["POST"])
+def api_profile_list_sync_create():
+    """Create a List Sync route backed by the established safe pair runner."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    source = body.get("source") if isinstance(body.get("source"), dict) else {}
+    destination = body.get("destination") if isinstance(body.get("destination"), dict) else {}
+    source_provider = str(source.get("provider") or "").lower()
+    source_id = str(source.get("id") or "").strip()
+    destination_provider = str(destination.get("provider") or "").lower()
+    destination_id = str(destination.get("id") or "").strip()
+    mode = str(body.get("mode") or "managed_sync").strip().lower()
+    capabilities = _list_sync_capabilities(_config_from_profile(profile), profile_id)
+    source_row = next((row for row in capabilities["sources"] if row["provider"] == source_provider and row["id"] == source_id), None)
+    if source_row is None and source_provider == "anilist" and source_id.startswith("public:"):
+        parts = source_id.split(":", 2)
+        categories = {"PLANNING": CATEGORY_WATCHLIST, "CURRENT": CATEGORY_COLLECTION, "COMPLETED": CATEGORY_COLLECTION, "PAUSED": CATEGORY_COLLECTION, "DROPPED": CATEGORY_COLLECTION}
+        if len(parts) == 3 and parts[1] and parts[2] in categories:
+            source_row = {"provider": "anilist", "id": source_id, "display_name": f"{parts[1]} · {parts[2].title()}", "category": categories[parts[2]], "static": False, "supportsTwoWay": False}
+    destination_row = next((row for row in capabilities["destinations"] if row["provider"] == destination_provider and row["id"] == destination_id), None)
+    if source_row is None or destination_row is None:
+        return _json_error("Select a readable List Sync source and writable static destination list", 400)
+    if mode not in {"add_only", "managed_sync", "two_way"}:
+        return _json_error("List Sync mode must be add_only, managed_sync, or two_way", 400)
+    if mode == "two_way" and not (source_row["static"] and source_row["supportsTwoWay"] and destination_row["supportsTwoWay"]):
+        return _json_error("Two-way List Sync is only available between static PMDB and MDBList lists", 400)
+    route_id = f"list-{secrets.token_hex(6)}"
+    name = str(body.get("name") or "").strip() or f"{source_row['display_name']} → {destination_row['display_name']}"
+    interval = max(21600, int(body.get("interval_seconds") or 43200))
+    pair = SyncPair.from_dict({
+        "pair_id": route_id, "name": name, "source": source_provider, "target": destination_provider,
+        "categories": [source_row["category"]], "source_lists": [source_id], "target_list": destination_id,
+        "removal_mode": "additive" if mode == "add_only" else "managed",
+        "mode": "two_way" if mode == "two_way" else "one_way",
+        "enabled": True, "auto_sync": bool(body.get("auto_sync", False)), "interval_seconds": interval,
+    }).to_dict()
+    try:
+        _profile_store.update_sync_pairs(profile_id, [
+            *(profile.get("options", {}).get("sync_pairs") or []), pair,
+        ])
+        saved = _profile_store.upsert_list_sync_route(profile_id, {
+            "id": route_id, "name": name,
+            "source": {"provider": source_provider, "collection_type": "static_list" if source_row["static"] else "status", "collection_id": source_id},
+            "destination": {"provider": destination_provider, "list_id": destination_id, "list_name": destination_row["display_name"]},
+            "mode": mode, "managed_by_list_sync": True,
+        })
+    except (ValueError, KeyError) as exc:
+        return _json_error(str(exc), 400)
+    return jsonify({"status": "created", "profile": saved, "route_id": route_id})
+
+
+@app.route("/api/profile/list-sync/destinations/create", methods=["POST"])
+def api_profile_list_sync_destination_create():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider") or "").strip().lower()
+    name = str(body.get("name") or "").strip()
+    if provider not in {"pmdb", "mdblist"} or not name:
+        return _json_error("Choose PMDB or MDBList and enter a list name", 400)
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    adapter = _build_provider_adapters(_config_from_profile(profile), profile_id=profile_id).get(provider)
+    if adapter is None or not adapter.can_write():
+        return _json_error(f"{PROVIDER_LABELS.get(provider, provider)} is not configured for list creation", 409)
+    try:
+        created = adapter.create_target_list(name, str(body.get("visibility") or "private"))
+    except Exception as exc:
+        logger.exception("Could not create List Sync destination")
+        return _json_error(f"Could not create destination list: {exc}", 502)
+    return jsonify({"status": "created", "destination": {"provider": provider, "id": created["key"], "display_name": created["label"]}})
+
+
+@app.route("/api/profile/list-sync/toggle", methods=["POST"])
+def api_profile_list_sync_toggle():
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    route_id = str(body.get("route_id") or "").strip()
+    if not route_id:
+        return _json_error("route_id is required", 400)
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    route_ids = {str(route.get("id") or route.get("pair_id") or "") for route in (profile.get("options") or {}).get("list_sync_routes") or [] if isinstance(route, dict)}
+    if route_id not in route_ids:
+        return _json_error("List Sync route not found", 404)
+    pairs = list((profile.get("options") or {}).get("sync_pairs") or [])
+    changed = False
+    for pair in pairs:
+        if str(pair.get("pair_id") or "") == route_id:
+            pair["enabled"] = bool(body.get("enabled", not pair.get("enabled", True)))
+            changed = True
+            break
+    if not changed:
+        return _json_error("List Sync backing route not found", 404)
+    _profile_store.update_sync_pairs(profile_id, pairs)
+    return jsonify({"status": "updated", "route_id": route_id})
 
 
 @app.route("/api/profile/pairs/lists", methods=["POST"])

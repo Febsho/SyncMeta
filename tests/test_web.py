@@ -1093,6 +1093,40 @@ class WebTests(unittest.TestCase):
         self.assertEqual(route["destination"]["list_id"], "list:destination-list")
         self.assertTrue(route["auto_sync"])
 
+    @patch("web._list_sync_capabilities")
+    def test_list_sync_create_uses_a_backing_pair_without_status_writes(self, capabilities) -> None:
+        capabilities.return_value = {
+            "sources": [{
+                "provider": "simkl", "id": "status:plantowatch:anime", "display_name": "Plan to Watch — Anime",
+                "category": "watchlist", "static": False, "supportsTwoWay": False,
+            }],
+            "destinations": [{
+                "provider": "mdblist", "id": "list:anime-planning", "display_name": "Anime Planning",
+                "static": True, "supportsTwoWay": True,
+            }],
+        }
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        response = self.client.post("/api/profile/list-sync/create", json={
+            "name": "Anime Planning Backup",
+            "source": {"provider": "simkl", "id": "status:plantowatch:anime"},
+            "destination": {"provider": "mdblist", "id": "list:anime-planning"},
+            "mode": "managed_sync", "auto_sync": True, "interval_seconds": 43200,
+        })
+        self.assertEqual(response.status_code, 200)
+        private = web._profile_store.get_private_profile_by_id(profile["profile_id"])
+        pair = private["options"]["sync_pairs"][0]
+        self.assertEqual(pair["source_lists"], ["status:plantowatch:anime"])
+        self.assertEqual(pair["target_list"], "list:anime-planning")
+        self.assertEqual(pair["removal_mode"], "managed")
+        route = private["options"]["list_sync_routes"][0]
+        self.assertEqual(route["source"]["collection_type"], "status")
+        toggled = self.client.post("/api/profile/list-sync/toggle", json={
+            "route_id": route["id"], "enabled": False,
+        })
+        self.assertEqual(toggled.status_code, 200)
+        self.assertFalse(web._profile_store.get_private_profile_by_id(profile["profile_id"])["options"]["sync_pairs"][0]["enabled"])
+
     def test_saving_a_pair_that_uses_the_library_round_trips(self) -> None:
         """The Library is a provider like any other, at either end.
 

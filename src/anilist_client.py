@@ -3,6 +3,7 @@
 import atexit
 import json
 import logging
+from dataclasses import replace
 import os
 import threading
 import time
@@ -521,6 +522,16 @@ class AniListClient:
         underlying base status and post-filter by AniList media format.
         """
         return self.get_statuses([status]).get(status, [])
+
+    def get_public_status(self, username: str, status: str) -> list[dict]:
+        """Read another user's public AniList collection without their token."""
+        name = str(username or "").strip()
+        if not name:
+            return []
+        # A short-lived client keeps its username and status cache separate from
+        # the authenticated profile, and deliberately shares no write path.
+        public_client = AniListClient(replace(self._config, username=name, access_token=""))
+        return public_client.get_status(status)
 
     # Statuses that imply the user actually watched something. PLANNING is
     # excluded: a plan-to-watch entry has no progress to derive from, and one

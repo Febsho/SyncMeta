@@ -749,7 +749,16 @@ def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
             if isinstance(entry, dict) and str(entry.get("id") or "").strip():
                 previous_routes[str(entry["id"])] = dict(entry)
 
-    routes: list[dict] = []
+    pairs_by_id = {str(pair.get("pair_id") or ""): pair for pair in pairs}
+    # Routes authored in List Sync may use read-only semantic collections such
+    # as AniList Planning or SIMKL Anime Plan to Watch.  Their backing pair is
+    # still the executor, while this metadata keeps membership intent separate
+    # from the generic pair editor.
+    routes: list[dict] = [
+        route for route_id, route in previous_routes.items()
+        if route.get("managed_by_list_sync") and route_id in pairs_by_id
+    ]
+    route_ids = {str(route.get("id") or "") for route in routes}
     for pair in pairs:
         route_id = str(pair.get("pair_id") or "").strip()
         source = str(pair.get("source") or "").strip().lower()
@@ -770,6 +779,8 @@ def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
         previous = previous_routes.get(route_id, {})
         # Preserve a user-facing name and any future List Sync fields already
         # stored by a newer app version; derive only missing identity fields.
+        if route_id in route_ids:
+            continue
         routes.append({
             **previous,
             "id": route_id,
@@ -778,6 +789,7 @@ def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
             "destination": {"provider": target, "list_id": target_list},
             "mode": "two_way" if pair.get("mode") == "two_way" else "managed_sync",
             "pair_id": route_id,
+            "managed_by_list_sync": True,
         })
     return routes
 
@@ -2433,6 +2445,25 @@ class ProfileStore:
                     for pair_id, entry in stored_results.items()
                     if pair_id in live_ids
                 }
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return self._public_profile(profile, include_credentials=True)
+
+    def upsert_list_sync_route(self, profile_id: str, route: dict) -> dict:
+        """Persist List Sync presentation metadata without touching pair state."""
+        route_id = str((route or {}).get("id") or (route or {}).get("pair_id") or "").strip()
+        if not route_id:
+            raise ValueError("List Sync route needs an id")
+        with self._lock:
+            profile = self._profiles[self._normalize_profile_id(profile_id)]
+            options = dict(profile.get("options") or {})
+            existing = [entry for entry in options.get("list_sync_routes") or []
+                        if isinstance(entry, dict) and str(entry.get("id") or entry.get("pair_id") or "") != route_id]
+            existing.append({**dict(route), "id": route_id, "pair_id": route_id, "managed_by_list_sync": True})
+            options["list_sync_routes"] = _static_list_sync_routes(
+                list(options.get("sync_pairs") or []), existing,
+            )
+            profile["options"] = options
             profile["updated_at"] = utc_now_iso()
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
