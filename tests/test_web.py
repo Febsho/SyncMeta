@@ -1040,7 +1040,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("watchlist", by_key["pmdb"]["writes"])
         self.assertEqual(
             [c["key"] for c in data["categories"]],
-            ["watchlist", "history", "collection", "resume"],
+            ["watchlist", "history", "collection", "resume", "dropped"],
         )
         self.assertIn("resume", by_key["pmdb"]["reads"])
         self.assertIn("resume", by_key["pmdb"]["writes"])
@@ -1364,7 +1364,7 @@ class WebTests(unittest.TestCase):
         self.assertTrue(providers["anilist"]["configured"])
         # History reads too — derived from progress counts. It is never
         # writable, with or without a token.
-        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection", "history"])
+        self.assertEqual(providers["anilist"]["reads"], ["watchlist", "collection", "history", "dropped"])
         self.assertEqual(providers["anilist"]["writes"], [])
         self.assertIn("access token", providers["anilist"]["write_blocked_reason"])
 
@@ -3827,9 +3827,9 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="sync-settings" class="hidden" style="display:none!important"', html)
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
-        self.assertIn("Sync All Pairs", html)
-        self.assertLess(html.index(">Sync Setup<"), html.index('id="sync-settings"'),
-                        "the destination-first setup must remain the primary sync UI")
+        self.assertIn("Sync All Routes", html)
+        self.assertLess(html.index(">List Sync<"), html.index('id="sync-settings"'),
+                        "the destination-first setup must remain the primary list-sync UI")
         self.assertIn('id="multi-sync-target"', html)
         self.assertIn('id="multi-sync-sources"', html)
         self.assertIn('id="btn-multi-sync-add"', html)
@@ -3838,6 +3838,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('id="stab-behavior"', html)
         self.assertNotIn('id="snav-lists"', html)
         self.assertNotIn('id="snav-behavior"', html)
+        self.assertNotIn('id="snav-routes"', html)
         # The remaining provider inputs must exist exactly once — duplicated
         # ids would make the save logic read whichever copy came first.
         for element_id in ('id="opt-simkl-visibility"', 'id="simkl-status-groups"',
