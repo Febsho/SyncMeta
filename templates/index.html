@@ -1331,8 +1331,38 @@
 
       <div id="view-list-sync" style="display:none">
         <h1 class="page-title">List Sync</h1>
-        <p class="page-sub">Static-list membership routes. Watch status, history, and resume stay in Sync.</p>
-        <div class="panel"><div class="panel-header"><span>Your list routes</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Create Route</button></div><div class="panel-body" id="list-sync-editor" style="display:none"></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading List Sync routes...</div></div></div>
+        <p class="page-sub">Choose what each route synchronizes, including watchlists, collections, dropped shows, history, and saved lists.</p>
+        <div class="cards activity-cards" id="sync-cards" style="margin-bottom:20px"></div>
+        <div class="panel">
+          <div class="panel-header">
+            <span>Sync routes</span>
+            <span class="actions-bar" style="margin-top:0">
+              <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
+              <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Preview</button>
+              <button class="btn btn-sm" type="button" id="btn-pairs-run">Sync All Routes</button>
+            </span>
+          </div>
+          <div class="panel-body">
+            <div class="sync-builder" id="multi-source-builder">
+              <div class="sync-builder-head"><div><div class="sync-builder-title">Send several services to one place</div><div class="sync-builder-copy">Choose a destination once, then select every service that should feed it. SyncMeta creates and manages the routes for you.</div></div><span class="pair-badge">Quick setup</span></div>
+              <div id="multi-sync-recommendation" class="hub-recommendation hidden"></div>
+              <div class="sync-builder-grid">
+                <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">1</span>Destination</div><select id="multi-sync-target" aria-label="Sync destination"></select></div>
+                <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">2</span>Sources</div><div class="sync-source-grid" id="multi-sync-sources"></div></div>
+                <div class="sync-builder-step wide"><div class="sync-builder-label"><span class="sync-builder-num">3</span>Content</div><div class="sync-category-grid" id="multi-sync-categories"></div></div>
+              </div>
+              <div class="sync-builder-foot"><span class="sync-builder-summary" id="multi-sync-summary">Choose at least one source.</span><button class="btn btn-primary" type="button" id="btn-multi-sync-add">Create routes</button></div>
+            </div>
+            <div id="pairs-capabilities" class="pair-caps"></div>
+            <div class="sync-routes-head"><span class="sync-routes-title">Your sync routes</span><button class="btn btn-sm" type="button" id="btn-pair-add">Add advanced route</button></div>
+            <div id="pairs-topology" class="hidden"></div>
+            <div id="pairs-list"><div class="empty">Loading sync routes...</div></div>
+            <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px"><div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div><div class="live-activity-console" id="pairs-live-body"><div class="empty">Waiting for provider activity…</div></div></div>
+            <div id="pairs-results" style="margin-top:12px"></div>
+          </div>
+        </div>
+        <div class="panel"><div class="panel-header"><span>Static list routes</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Create static route</button></div><div class="panel-body" id="list-sync-editor" style="display:none"></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading static list routes...</div></div></div>
       </div>
 
       <div id="view-activity" style="display:none">
@@ -1531,10 +1561,6 @@
                 Connections
               </button>
               <div class="settings-nav-group">Sync</div>
-              <button class="settings-nav-item" id="snav-routes" onclick="showSettingsTab('routes')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6a3 3 0 013 3v6"/></svg>
-                Sync routes
-              </button>
               <button class="settings-nav-item" id="snav-schedule" onclick="showSettingsTab('schedule')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                 Schedule &amp; safety
@@ -1788,51 +1814,6 @@
 
             <!-- SYNC ROUTES TAB -->
             <div class="settings-tab" id="stab-routes">
-              <div class="settings-page-title">Sync routes</div>
-              <div class="settings-page-desc" id="sync-pairs-sub">Sync pairs move watchlists, collections, and history directly between any two compatible services.</div>
-        <div class="cards activity-cards" id="sync-cards" style="margin-bottom:20px"></div>
-
-        <div class="panel">
-          <!-- The run actions live in this header rather than the page topbar.
-               They used to sit in both places under the same element ids, so
-               getElementById bound only the topbar copy and the buttons down
-               here were dead — and "Run All" on a page that also holds the
-               service pipelines read as if it ran those too. -->
-          <div class="panel-header">
-            <span>Sync Pairs</span>
-            <span class="actions-bar" style="margin-top:0">
-              <span class="catalog-note" id="pairs-count" style="margin-top:0"></span>
-              <button class="btn btn-sm btn-primary" type="button" id="btn-pairs-save">Save</button>
-              <button class="btn btn-sm" type="button" id="btn-pairs-dry-run">Preview</button>
-              <button class="btn btn-sm" type="button" id="btn-pairs-run">Sync All Pairs</button>
-            </span>
-          </div>
-          <div class="panel-body">
-            <div class="sync-builder" id="multi-source-builder">
-              <div class="sync-builder-head">
-                <div><div class="sync-builder-title">Send several services to one place</div><div class="sync-builder-copy">Choose a destination once, then select every service that should feed it. SyncMeta creates and manages the routes for you.</div></div>
-                <span class="pair-badge">Quick setup</span>
-              </div>
-              <div id="multi-sync-recommendation" class="hub-recommendation hidden"></div>
-              <div class="sync-builder-grid">
-                <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">1</span>Destination</div><select id="multi-sync-target" aria-label="Sync destination"></select></div>
-                <div class="sync-builder-step"><div class="sync-builder-label"><span class="sync-builder-num">2</span>Sources</div><div class="sync-source-grid" id="multi-sync-sources"></div></div>
-                <div class="sync-builder-step wide"><div class="sync-builder-label"><span class="sync-builder-num">3</span>Content</div><div class="sync-category-grid" id="multi-sync-categories"></div></div>
-              </div>
-              <div class="sync-builder-foot"><span class="sync-builder-summary" id="multi-sync-summary">Choose at least one source.</span><button class="btn btn-primary" type="button" id="btn-multi-sync-add">Create routes</button></div>
-            </div>
-            <div id="pairs-capabilities" class="pair-caps"></div>
-            <div class="sync-routes-head"><span class="sync-routes-title">Your sync routes</span><button class="btn btn-sm" type="button" id="btn-pair-add">Add advanced route</button></div>
-            <div id="pairs-topology" class="hidden"></div>
-            <div id="pairs-list"><div class="empty">Loading sync pairs...</div></div>
-            <div class="pair-card hidden" id="pairs-live-panel" style="margin-top:12px">
-              <div class="live-activity-status" id="pairs-live-status"><span class="spinner"></span><span class="live-step">Starting…</span></div>
-              <div class="live-activity-console" id="pairs-live-body"><div class="empty">Waiting for provider activity…</div></div>
-            </div>
-            <div id="pairs-results" style="margin-top:12px"></div>
-          </div>
-        </div>
-
         <div id="sync-settings" class="hidden" style="display:none!important" aria-hidden="true">
           <div class="panel">
             <div class="panel-header">
@@ -2021,7 +2002,7 @@
                     <div class="settings-group-title">Every route has its own schedule</div>
                     <div class="settings-group-desc">A route defines its source, destination, content, removal behavior, and automatic frequency together. PublicMetaDB, SIMKL, Trakt, AniList, MDBList, and the local Library are treated by capability rather than as a fixed hub.</div>
                     <div class="route-schedule-list" id="route-schedule-list"><div class="empty">Loading route schedules...</div></div>
-                    <div class="actions-bar"><button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure routes</button></div>
+                    <div class="actions-bar"><button class="btn btn-sm" type="button" onclick="switchView('list-sync')">Configure routes</button></div>
                   </div>
                 </div>
               </div>
@@ -2036,12 +2017,12 @@
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Watch History</div>
                     <div class="settings-group-desc">History is a normal route category. Send it in either supported direction, include it in a two-way route, and schedule that route alongside watchlists and collections.</div>
-                    <button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure history routes</button>
+                    <button class="btn btn-sm" type="button" onclick="switchView('list-sync')">Configure history routes</button>
                   </div>
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Resume Progress</div>
                     <div class="settings-group-desc">Resume progress is a normal route category wherever both ends expose compatible playback APIs. Trakt and SIMKL can provide it; PublicMetaDB and Library can store it.</div>
-                    <button class="btn btn-sm" type="button" onclick="showSettingsTab('routes')">Configure resume routes</button>
+                    <button class="btn btn-sm" type="button" onclick="switchView('list-sync')">Configure resume routes</button>
                   </div>
                 </div>
               </div>
@@ -2306,8 +2287,8 @@
     let connectionHealth = {};
     let connectionReadiness = null;
     let connectionCheckRunning = false;
-    const SETTINGS_TABS = ['profile', 'appearance', 'connections', 'routes', 'schedule', 'notifications', 'danger', 'about'];
-    const SETTINGS_TAB_ALIASES = { lists: 'routes', behavior: 'routes', rules: 'routes', sync: 'routes', pairs: 'routes', stats: 'about', data: 'danger' };
+    const SETTINGS_TABS = ['profile', 'appearance', 'connections', 'schedule', 'notifications', 'danger', 'about'];
+    const SETTINGS_TAB_ALIASES = { stats: 'about', data: 'danger' };
     let activeSettingsTab = 'profile';
     let lastSiteStats = null;
     let currentResultsPage = 1;
@@ -3851,14 +3832,14 @@
       history: 'activity',
       mapping: 'issues',
       unresolved: 'issues',
-      sync: 'settings',
-      rules: 'settings',
-      lists: 'settings',
-      behavior: 'settings',
+      sync: 'list-sync',
+      rules: 'list-sync',
+      lists: 'list-sync',
+      behavior: 'list-sync',
       connections: 'settings',
     };
     // Where an alias lands *inside* its view.
-    const VIEW_ALIAS_SETTINGS_TAB = { sync: 'routes', rules: 'routes', lists: 'routes', behavior: 'routes', stats: 'about', connections: 'connections' };
+    const VIEW_ALIAS_SETTINGS_TAB = { stats: 'about', connections: 'connections' };
     let currentView = 'overview';
 
     function switchView(name) {
@@ -3880,7 +3861,7 @@
       if (target === 'settings') {
         if (settingsTab) showSettingsTab(settingsTab);
         if (requested === 'connections' && sessionProfileId) testConnections(undefined, true);
-        if (!settingsTab && (activeSettingsTab === 'routes' || activeSettingsTab === 'schedule')) fetchPairs();
+        if (!settingsTab && activeSettingsTab === 'schedule') fetchPairs();
         if (settingsTab === 'about' || activeSettingsTab === 'about') {
           fetchSiteStats();
           if (!siteStatsPolling) siteStatsPolling = setInterval(() => { if (!document.hidden) fetchSiteStats(); }, 30000);
@@ -3892,7 +3873,10 @@
       }
 
       if (target === 'library') openLibrary();
-      if (target === 'list-sync') fetchListSyncRoutes();
+      if (target === 'list-sync') {
+        fetchPairs();
+        fetchListSyncRoutes();
+      }
       if (target === 'activity') {
         renderActivityPage();
         loadActivityRuns(activityPage);
@@ -10466,7 +10450,7 @@
       if (tabEl) tabEl.classList.add('active');
       if (navEl) { navEl.classList.add('active'); navEl.setAttribute('aria-current', 'true'); }
       // Opening a section is what should pay for its data, not every page load.
-      if (target === 'routes' || target === 'schedule') fetchPairs();
+      if (target === 'schedule') fetchPairs();
       if (target === 'about') fetchSiteStats();
       if (target === 'connections' && sessionProfileId) testConnections(undefined, true);
       if (target === 'notifications') renderNotificationSettings();
@@ -10605,7 +10589,7 @@
       const pair = pairsState.pairs[Number(index)];
       if (!pair) return;
       setPairExpanded(pair, true);
-      showSettingsTab('routes');
+      switchView('list-sync');
       setTimeout(() => {
         const card = document.querySelector(`[data-pair-card="${Number(index)}"]`);
         if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
