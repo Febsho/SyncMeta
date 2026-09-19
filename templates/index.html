@@ -8119,9 +8119,10 @@
         }
         if (!silent) showToast('Profile loaded.', false, true);
         return profile;
-      } catch {
+      } catch (error) {
         loadBtns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText || 'Load Profile'; });
-        if (!silent) showToast('Network error while loading profile.', true, false);
+        console.error('Profile load failed:', error);
+        if (!silent) showToast(`Profile load failed: ${error?.message || 'Unknown error'}`, true, false);
         return null;
       }
     }
@@ -8715,12 +8716,21 @@
     // Source reads and confirmed writes are intentionally separate. A route
     // checking 4,000 already-matching items has not "synced" 4,000 items.
     function syncMetricTotals(profile, results) {
-      const total = { checked: 0, changes: 0, added: 0, removed: 0, updated: 0, skipped: 0, seen: false };
+      const total = {
+        checked: 0,
+        changes: 0,
+        added: 0,
+        removed: 0,
+        updated: 0,
+        skipped: 0,
+        seen: false
+      };
       const counted = new Set();
       for (const row of results || []) {
         if (typeof row.items_fetched === 'number') { total.checked += row.items_fetched; total.seen = true; }
         total.added += Number(row.items_added || 0);
         total.removed += Number(row.items_removed || 0);
+        total.updated += Number(row.items_updated || 0);
         total.skipped += Number(row.items_skipped_duplicate || 0) + Number(row.items_skipped_unresolved || 0);
         if (row.pair_id) counted.add(String(row.pair_id));
       }
@@ -8734,9 +8744,13 @@
         if (counted.has(key)) continue;
         if (livePairs.size && !livePairs.has(key)) continue;
         const value = pairResults[key];
-        if (value && typeof value.checked === 'number') { total += value.checked; seen = true; }
+        if (value && typeof value.checked === 'number') {
+          total.checked += value.checked;
+          total.seen = true;
+        }
       }
-      return seen ? total : null;
+      total.changes = total.added + total.removed + total.updated;
+      return total.seen ? total : null;
     }
 
     function metricValue(value) {
