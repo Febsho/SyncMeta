@@ -278,6 +278,9 @@ class PairCategoryStats:
     #: `unmapped`. PublicMetaDB's native watchlist declines anything that is not
     #: plan-to-watch, which is the case this exists for.
     skipped_unsupported: int = 0
+    #: Writes sent to a provider which it did not positively acknowledge. This
+    #: needs verification, but is not itself a provider failure.
+    unconfirmed: int = 0
     errors: list[str] = field(default_factory=list)
     managed_keys: list[str] = field(default_factory=list)
     #: Provider reads this category answered from the batch cache instead of the
@@ -307,6 +310,7 @@ class PairCategoryStats:
             "unmapped": self.unmapped,
             "skipped_existing": self.skipped_existing,
             "skipped_unsupported": self.skipped_unsupported,
+            "unconfirmed": self.unconfirmed,
             "cached_reads": self.cached_reads,
             "added_back": self.added_back,
             "removed_back": self.removed_back,
@@ -346,6 +350,10 @@ class PairRunStats:
         return sum(c.cached_reads for c in self.categories)
 
     @property
+    def unconfirmed(self) -> int:
+        return sum(c.unconfirmed for c in self.categories)
+
+    @property
     def checked(self) -> int:
         """Source items this run actually inspected, across every category."""
         return sum(c.source_items for c in self.categories)
@@ -371,6 +379,7 @@ class PairRunStats:
             "removed": self.removed,
             "checked": self.checked,
             "unmapped": self.unmapped,
+            "unconfirmed": self.unconfirmed,
             "cached_reads": self.cached_reads,
             "blocked_removals": self.blocked_removals,
             "error_count": self.error_count,
@@ -889,6 +898,7 @@ class CrossSyncService:
             result.added = execution.added
             result.removed = execution.removed
             result.unmapped += execution.not_found
+            result.unconfirmed += execution.unconfirmed
             wrote_added = [
                 outcome.action.item for outcome in execution.outcomes
                 if outcome.status == STATUS_SUCCESS and outcome.action.kind != ACTION_REMOVE
@@ -897,10 +907,6 @@ class CrossSyncService:
                 outcome.action.item for outcome in execution.outcomes
                 if outcome.status == STATUS_SUCCESS and outcome.action.kind == ACTION_REMOVE
             ]
-            if execution.outstanding():
-                result.errors.append(
-                    f"{len(execution.outstanding())} {category} write(s) were not confirmed"
-                )
             if cache is not None and (execution.errors or execution.outstanding()):
                 cache.invalidate_provider(target.identity)
             result.changes.extend(self._change_rows(wrote_added, "added", category))
@@ -1367,6 +1373,9 @@ class CrossSyncService:
         *, removals: int, target_size: int, percent: int, where: str,
         items: list[dict] | None = None, detail: str = "",
     ) -> None:
+        # A zero-item diff is never a safety incident.
+        if removals <= 0:
+            return
         review_items = []
         for item in items or []:
             ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
@@ -1721,6 +1730,7 @@ class CrossSyncService:
         result.added += execution.added
         result.removed += execution.removed
         result.unmapped += execution.not_found
+        result.unconfirmed += execution.unconfirmed
         if not forward:
             result.added_back += execution.added
             result.removed_back += execution.removed
@@ -2026,7 +2036,16 @@ class CrossSyncService:
                     synced=STATE_PRESENT if (on_source and on_destination) else STATE_ABSENT,
                     managed=key in managed,
                 )
-            self._state_store.commit(pair.pair_id, category, items=items)
+            if result.unconfirmed:
+                # Keep the agreement open while retaining only writes with a
+                # positive receipt; the unconfirmed tail must be retried.
+                applied = {key: items[key] for key in added_keys | removed_keys if key in items}
+                self._state_store.record_partial(
+                    pair.pair_id, category, applied=applied,
+                    error=f"{result.unconfirmed} write(s) could not be verified",
+                )
+            else:
+                self._state_store.commit(pair.pair_id, category, items=items)
         except Exception:
             logger.warning(
                 "Could not record baseline for %s/%s", pair.display_name(), category,
@@ -2258,8 +2277,10 @@ class CrossSyncService:
             source_fetch=source_fetch, destination_fetch=destination_fetch,
             # A write that raised leaves the destination in a state this run
             # cannot describe, so the agreement must not be advanced from it.
-            complete=not result.errors,
-            error="; ".join(result.errors)[:500],
+            complete=not result.errors and not result.unconfirmed,
+            error=("; ".join(result.errors) or (
+                f"{result.unconfirmed} write(s) could not be verified" if result.unconfirmed else ""
+            ))[:500],
         )
 
     def _record_managed_keys(

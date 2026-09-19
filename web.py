@@ -954,6 +954,15 @@ def _run_profile_sync(profile: dict, dry_run: bool = False, sync_modes: dict | N
         detailed_result_dicts: list[dict] = []
         service = None
         run_regular = any(bool(modes.get(key)) for key in ("lists", "history", "resume"))
+        if run_regular:
+            # Adopt only historical SyncMeta write receipts before the merged
+            # native-watchlist pass decides what it may remove.
+            baseline_keys = _pmdb_native_watchlist_baseline_keys(
+                profile, _sync_state_store_for(profile_id),
+            )
+            profile = _profile_store.recover_pmdb_watchlist_ownership(
+                profile_id, baseline_keys,
+            )
         config = _config_from_profile(profile, dry_run=dry_run, sync_modes=modes)
         if run_regular:
             service = SyncService(
@@ -1246,6 +1255,28 @@ def _seed_sync_state_from_managed_keys(profile_id: str, store: SyncStateStore) -
             "Seeded %d managed item(s) into sync baselines for profile %s",
             adopted, profile_id,
         )
+
+
+def _pmdb_native_watchlist_baseline_keys(profile: dict, store: SyncStateStore) -> set[str]:
+    """Return baseline ownership only for PMDB's native watchlist routes."""
+    keys: set[str] = set()
+    for pair in (profile.get("options") or {}).get("sync_pairs") or []:
+        if not isinstance(pair, dict):
+            continue
+        if (
+            str(pair.get("target") or "").lower() != "pmdb"
+            or str(pair.get("target_list") or "").strip()
+            or "watchlist" not in (pair.get("categories") or [])
+        ):
+            continue
+        pair_id = str(pair.get("pair_id") or "").strip()
+        if not pair_id:
+            continue
+        baseline = store.baseline(pair_id, "watchlist")
+        for key, state in baseline.items.items():
+            if getattr(state, "managed", False):
+                keys.add(str(key))
+    return keys
 
 
 def _persist_route_baselines(profile_id: str, service, dry_run: bool) -> None:
@@ -4784,16 +4815,16 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
     sources = []
     destinations = []
     for provider, adapter in _build_provider_adapters(config, profile_id=profile_id).items():
-        if provider in {"pmdb", "mdblist", "simkl", "anilist"}:
+        if provider in {"pmdb", "mdblist", "simkl", "anilist", "trakt"}:
             for entry in adapter.safe_list_sources():
                 kind = str(entry.get("kind") or "").lower()
                 category = str(entry.get("category") or "")
                 # PMDB/MDBList contribute only actual static lists.  SIMKL and
                 # AniList may contribute read-only semantic collections, but
                 # never history/progress as list membership.
-                allowed = (provider in {"pmdb", "mdblist"} and kind == "list") or (
+                allowed = (provider in {"pmdb", "mdblist", "trakt"} and kind == "list") or (
                     provider in {"simkl", "anilist"} and kind in {"status", "list"}
-                    and category in {CATEGORY_WATCHLIST, CATEGORY_COLLECTION}
+                    and category in {CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED}
                 )
                 if not allowed:
                     continue
@@ -4804,7 +4835,7 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
                     "readable": True, "writable": False, "static": kind == "list",
                     "dynamic": False, "personal": True,
                     "supportsCreate": False, "supportsRemove": False,
-                    "supportsTwoWay": provider in {"pmdb", "mdblist"} and kind == "list",
+                    "supportsTwoWay": provider in {"pmdb", "mdblist", "trakt"} and kind == "list",
                     "semanticStatus": provider in {"simkl", "anilist"} and kind == "status",
                 })
         if provider in {"pmdb", "mdblist"}:
@@ -4884,17 +4915,17 @@ def api_profile_list_sync_create():
     destination_row = next((row for row in capabilities["destinations"] if row["provider"] == destination_provider and row["id"] == destination_id), None)
     if source_row is None or destination_row is None:
         return _json_error("Select a readable List Sync source and writable static destination list", 400)
-    if mode not in {"add_only", "managed_sync", "two_way"}:
-        return _json_error("List Sync mode must be add_only, managed_sync, or two_way", 400)
+    if mode not in {"add_only", "managed_sync", "snapshot_once", "two_way"}:
+        return _json_error("List Sync mode must be add_only, managed_sync, snapshot_once, or two_way", 400)
     if mode == "two_way" and not (source_row["static"] and source_row["supportsTwoWay"] and destination_row["supportsTwoWay"]):
-        return _json_error("Two-way List Sync is only available between static PMDB and MDBList lists", 400)
+        return _json_error("Two-way List Sync is only available between writable static lists", 400)
     route_id = f"list-{secrets.token_hex(6)}"
     name = str(body.get("name") or "").strip() or f"{source_row['display_name']} → {destination_row['display_name']}"
     interval = max(21600, int(body.get("interval_seconds") or 43200))
     pair = SyncPair.from_dict({
         "pair_id": route_id, "name": name, "source": source_provider, "target": destination_provider,
         "categories": [source_row["category"]], "source_lists": [source_id], "target_list": destination_id,
-        "removal_mode": "additive" if mode == "add_only" else "managed",
+        "removal_mode": "additive" if mode in {"add_only", "snapshot_once"} else "managed",
         "mode": "two_way" if mode == "two_way" else "one_way",
         "enabled": True, "auto_sync": bool(body.get("auto_sync", False)), "interval_seconds": interval,
     }).to_dict()

@@ -801,7 +801,7 @@ class TraktAdapter(ProviderAdapter):
     supports_target_lists = True
     supports_visibility = True
     supports_list_search = True
-    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED)
 
     _SIMKL_STATUS_LABELS = {
         "watching": "Watching",
@@ -1361,7 +1361,7 @@ class PmdbAdapter(ProviderAdapter):
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
-    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED)
 
     _COLLECTION_LIST_NAME = "SyncMeta · Collection"
     _PICKS_LIST_TYPE = "picks"
@@ -1872,14 +1872,14 @@ class MdbListAdapter(ProviderAdapter):
 
     key = "mdblist"
     label = "MDBList"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_DROPPED)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_DROPPED)
     supports_list_selection = True
     supports_list_search = True
     supports_target_lists = True
     # A named MDBList list is a curation; watch history has no such destination,
     # the same split Trakt makes.
-    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED)
 
     #: Sync sources that are not one of the user's static lists.
     _NATIVE_SOURCES = (

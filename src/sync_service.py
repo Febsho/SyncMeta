@@ -2828,7 +2828,8 @@ class SyncService:
             return stats
 
         if (
-            previous_state
+            not force_remove_missing
+            and previous_state
             and previous_state.get("fingerprint")
             and previous_state.get("fingerprint") == source_fingerprint
         ):

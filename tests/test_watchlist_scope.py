@@ -20,6 +20,7 @@ from src.cross_sync import CrossSyncService
 from src.library_store import LibraryStore
 from src.providers import (
     CATEGORY_COLLECTION,
+    CATEGORY_DROPPED,
     CATEGORY_WATCHLIST,
     PLANNED_FLAG,
     MdbListAdapter,
@@ -84,6 +85,27 @@ class SourceMarksPlannedTests(unittest.TestCase):
         self.assertIs(is_planned(planned[0]), True)
         completed = adapter.fetch(CATEGORY_COLLECTION, ["status:completed:movies"])
         self.assertIs(is_planned(completed[0]), False)
+
+    def test_simkl_status_sources_are_read_through_scoped_status_calls(self) -> None:
+        class FakeSimkl:
+            def __init__(self):
+                self.calls = []
+
+            def get_status(self, status, media_types):
+                self.calls.append((status, tuple(media_types)))
+                return {media_types[0]: [_movie(status)]}
+
+        client = FakeSimkl()
+        adapter = SimklAdapter(client, media_types=["movies"])
+        cases = [
+            ("dropped", CATEGORY_DROPPED), ("hold", CATEGORY_COLLECTION),
+            ("watching", CATEGORY_COLLECTION), ("completed", CATEGORY_COLLECTION),
+            ("plantowatch", CATEGORY_WATCHLIST),
+        ]
+        for status, category in cases:
+            items = adapter.fetch(category, [f"status:{status}:movies"])
+            self.assertEqual(items[0]["_syncmeta_source_status"], status)
+        self.assertEqual([status for status, _types in client.calls], [case[0] for case in cases])
 
     def test_an_mdblist_curated_list_is_not_planned(self) -> None:
         # A curated list answers both watchlist and collection because it has no

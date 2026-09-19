@@ -1165,6 +1165,53 @@ class PairResultPruningTests(unittest.TestCase):
         self.assertIn("b", managed)
 
 
+class PmdbWatchlistOwnershipMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.store = ProfileStore(Path(self._dir.name) / "profiles.json")
+        self.profile_id = self.store.create_profile("secret", {}, {})["profile_id"]
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_recovers_only_proven_native_watchlist_writes(self) -> None:
+        profile = self.store._profiles[self.store._normalize_profile_id(self.profile_id)]
+        profile["activity_state"]["pmdb_watchlist_managed_keys"] = ["1:movie"]
+        profile["last_results"] = [{
+            "display_name": "PMDB Watchlist", "row_key": "watchlist-row",
+            "synced_keys": ["2:tv"],
+        }]
+        profile["list_state"] = {"watchlist-row": {"write_keys": ["3:movie"]}}
+        profile["sync_runs_detailed"] = [{"rows": [{
+            "display_name": "PMDB Watchlist", "row_key": "watchlist-row",
+            "row_state": {"write_keys": ["4:tv"]},
+        }]}]
+        # This key is from another SyncMeta list and is not proof that the
+        # matching item in the native watchlist was written by SyncMeta.
+        profile["list_state"]["other-list"] = {"write_keys": ["999:movie"]}
+
+        self.store.recover_pmdb_watchlist_ownership(
+            self.profile_id, {"movie:tmdb:5", "title:manual:6"},
+        )
+        managed = profile["activity_state"]["pmdb_watchlist_managed_keys"]
+        self.assertEqual(managed, ["1:movie", "2:tv", "3:movie", "4:tv", "5:movie"])
+        self.assertNotIn("999:movie", managed)
+
+    def test_recovers_the_4560_item_legacy_pollution_set_from_a_write_receipt(self) -> None:
+        profile = self.store._profiles[self.store._normalize_profile_id(self.profile_id)]
+        polluted = [f"{10_000 + index}:movie" for index in range(4560)]
+        profile["last_results"] = [{
+            "display_name": "PMDB Watchlist", "row_key": "legacy-watchlist",
+            "synced_keys": polluted,
+        }]
+
+        self.store.recover_pmdb_watchlist_ownership(self.profile_id)
+        managed = profile["activity_state"]["pmdb_watchlist_managed_keys"]
+        self.assertEqual(len(managed), 4560)
+        self.assertEqual(managed[0], "10000:movie")
+        self.assertEqual(managed[-1], "14559:movie")
+
+
 class ListSyncMigrationTests(unittest.TestCase):
     def _options(self, pairs):
         return normalize_profile_options({
@@ -1187,10 +1234,25 @@ class ListSyncMigrationTests(unittest.TestCase):
         self.assertEqual(route["source"]["collection_id"], "list:pmdb-favs")
         self.assertEqual(route["destination"]["list_id"], "list:mdblist-favs")
 
-    def test_semantic_and_mixed_routes_remain_general_sync_pairs(self) -> None:
+    def test_account_state_routes_remain_general_sync_pairs_but_list_routes_migrate(self) -> None:
         options = self._options([
             {"pair_id": "history", "source": "pmdb", "target": "mdblist", "categories": ["history"], "source_lists": ["list:1"], "target_list": "list:2"},
             {"pair_id": "mixed", "source": "pmdb", "target": "mdblist", "categories": ["watchlist"], "source_lists": ["list:1", "list:3"], "target_list": "list:2"},
             {"pair_id": "status", "source": "simkl", "target": "mdblist", "categories": ["watchlist"], "source_lists": ["status:plantowatch:anime"], "target_list": "list:2"},
         ])
-        self.assertEqual(options["list_sync_routes"], [])
+        self.assertEqual(
+            [route["id"] for route in options["list_sync_routes"]],
+            ["mixed", "status"],
+        )
+
+    def test_custom_and_named_routes_migrate_without_rewriting_execution_state(self) -> None:
+        options = self._options([
+            {"pair_id": "anilist-custom", "source": "anilist", "target": "pmdb", "categories": ["watchlist"], "source_lists": ["custom:Favorites"], "target_list": "list:pmdb-favs", "removal_mode": "managed"},
+            {"pair_id": "trakt-liked", "source": "trakt", "target": "pmdb", "categories": ["watchlist"], "source_lists": ["list:friend/liked"], "target_list": "list:pmdb-likes", "removal_mode": "managed"},
+            {"pair_id": "native", "source": "trakt", "target": "pmdb", "categories": ["watchlist"], "source_lists": ["watchlist"], "target_list": ""},
+        ])
+        self.assertEqual(
+            [route["id"] for route in options["list_sync_routes"]],
+            ["anilist-custom", "trakt-liked"],
+        )
+        self.assertEqual(options["sync_pairs"][0]["pair_id"], "anilist-custom")

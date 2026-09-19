@@ -211,6 +211,60 @@ def _normalize_list_state(raw_state: dict | None) -> dict:
     return normalized
 
 
+def _pmdb_watchlist_key(value: object) -> str:
+    """Normalize ownership evidence into SyncService's ``tmdb:type`` key.
+
+    List Sync persisted native-watchlist writes as ``123:movie`` while the
+    cross-route baseline uses ``movie:tmdb:123``.  Both identify a PMDB item
+    SyncMeta wrote; other namespaces cannot prove native PMDB ownership.
+    """
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) == 2 and parts[0].isdigit() and parts[1] in {"movie", "tv"}:
+        return text
+    if len(parts) == 3 and parts[0] in {"movie", "tv"} and parts[1] == "tmdb" and parts[2].isdigit():
+        return f"{parts[2]}:{parts[0]}"
+    return ""
+
+
+def _pmdb_watchlist_evidence(profile: dict) -> set[str]:
+    """Return only historical records that prove a PMDB watchlist write."""
+    keys: set[str] = set()
+    row_keys: set[str] = set()
+
+    def collect(row: object) -> None:
+        if not isinstance(row, dict) or str(row.get("display_name") or "").strip() != "PMDB Watchlist":
+            return
+        row_key = str(row.get("row_key") or "").strip()
+        if row_key:
+            row_keys.add(row_key)
+        for raw_key in [*(row.get("synced_keys") or []), *((row.get("row_state") or {}).get("write_keys") or [])]:
+            if key := _pmdb_watchlist_key(raw_key):
+                keys.add(key)
+
+    for row in profile.get("last_results") or []:
+        collect(row)
+    for entry in (profile.get("activity_results") or {}).values():
+        if isinstance(entry, dict):
+            collect(entry.get("row"))
+    for row in ((profile.get("last_sync_job_snapshot") or {}).get("results") or []):
+        collect(row)
+    for run in profile.get("sync_runs_detailed") or []:
+        if isinstance(run, dict):
+            for row in run.get("rows") or []:
+                collect(row)
+    # list_state itself has no destination identity. It becomes valid evidence
+    # only after a PMDB Watchlist result has tied its opaque row key to that
+    # destination.
+    for row_key in row_keys:
+        state = (profile.get("list_state") or {}).get(row_key)
+        if isinstance(state, dict):
+            for raw_key in state.get("write_keys") or []:
+                if key := _pmdb_watchlist_key(raw_key):
+                    keys.add(key)
+    return keys
+
+
 def _normalize_detailed_runs(raw_runs: list | None) -> list[dict]:
     if not isinstance(raw_runs, list):
         return []
@@ -753,8 +807,11 @@ def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
     planner's baselines, captures, retries, tombstones, managed ownership and
     schedule are all keyed by that id.  This migration is therefore purely a
     presentation/model classification, never a destructive config rewrite.
-    Only a one-list PMDB <-> MDBList curation is unambiguously membership sync;
-    status/history/resume routes and mixed selections are left as normal pairs.
+    A named/custom/status-list source feeding a named destination is membership
+    sync, regardless of which supported provider owns either end. Native
+    account state (watchlist, collection, history and resume) stays in Normal
+    Sync. This is classification only: pair ids and state keyed by them remain
+    untouched.
     """
     previous_routes: dict[str, dict] = {}
     if isinstance(existing, list):
@@ -779,14 +836,17 @@ def _static_list_sync_routes(pairs: list[dict], existing: object) -> list[dict]:
         source_lists = [str(value).strip() for value in pair.get("source_lists") or [] if str(value).strip()]
         target_list = str(pair.get("target_list") or "").strip()
         categories = set(pair.get("categories") or [])
+        explicit_list_source = bool(source_lists) and all(
+            key.startswith(("list:", "custom:", "status:", "public:"))
+            or (source == "pmdb" and key == "picks")
+            for key in source_lists
+        )
         if (
             not route_id
-            or {source, target} != {"pmdb", "mdblist"}
-            or len(source_lists) != 1
-            or not source_lists[0].startswith("list:")
+            or not explicit_list_source
             or not target_list.startswith("list:")
             or not categories
-            or not categories.issubset({"watchlist", "collection"})
+            or not categories.issubset({"watchlist", "collection", "dropped"})
         ):
             continue
         previous = previous_routes.get(route_id, {})
@@ -2509,6 +2569,7 @@ class ProfileStore:
             now = utc_now_iso()
             activity = list(profile.get("item_activity") or [])
             snapshot_changes = []
+            completed_snapshots: set[str] = set()
             for result in results or []:
                 if not isinstance(result, dict):
                     continue
@@ -2519,6 +2580,12 @@ class ProfileStore:
                 entry["timestamp"] = now
                 entry["dry_run"] = bool(dry_run)
                 merged[pair_id] = entry
+                if (
+                    not dry_run
+                    and not entry.get("error_count")
+                    and not entry.get("unconfirmed")
+                    and not any(category.get("unconfirmed") for category in entry.get("categories") or [])):
+                    completed_snapshots.add(pair_id)
                 run_id = str(profile.get("sync_job_id") or f"pair:{now}")
                 for category in result.get("categories") or []:
                     for change in category.get("changes") or []:
@@ -2534,6 +2601,18 @@ class ProfileStore:
                             **copy.deepcopy(change),
                         })
             profile["last_pair_results"] = merged
+            # Snapshot routes are intentionally one-shot. Their execution id
+            # remains the established pair id; only future scheduling is
+            # paused after a fully confirmed run.
+            snapshot_ids = {
+                str(route.get("id") or route.get("pair_id") or "")
+                for route in (profile.get("options") or {}).get("list_sync_routes") or []
+                if isinstance(route, dict) and route.get("mode") == "snapshot_once"
+            }
+            if completed_snapshots & snapshot_ids:
+                for pair in (profile.get("options") or {}).get("sync_pairs") or []:
+                    if str(pair.get("pair_id") or "") in completed_snapshots & snapshot_ids:
+                        pair["enabled"] = False
             if not dry_run:
                 profile["item_activity"] = activity[:1000]
                 if snapshot_changes:
@@ -2550,6 +2629,35 @@ class ProfileStore:
                     })
                     profile["change_snapshots"] = snapshots[:25]
             self._save_locked()
+
+    def recover_pmdb_watchlist_ownership(self, profile_id: str, extra_keys: object = None) -> dict:
+        """Adopt provable legacy PMDB-watchlist writes before reconciliation.
+
+        This is deliberately additive: current managed keys stay authoritative,
+        and the migration only adds identifiers retained by SyncMeta's own
+        write records or native-watchlist pair baselines.  It never infers
+        ownership from an item merely being present in PMDB.
+        """
+        with self._lock:
+            profile = self._profiles[self._normalize_profile_id(profile_id)]
+            state = _normalize_activity_state(profile.get("activity_state"))
+            recovered = _pmdb_watchlist_evidence(profile)
+            for raw_key in extra_keys or []:
+                if key := _pmdb_watchlist_key(raw_key):
+                    recovered.add(key)
+            existing = {key for raw_key in state.get("pmdb_watchlist_managed_keys") or []
+                        if (key := _pmdb_watchlist_key(raw_key))}
+            merged = existing | recovered
+            if merged != existing:
+                state["pmdb_watchlist_managed_keys"] = sorted(merged)
+                profile["activity_state"] = state
+                profile["updated_at"] = utc_now_iso()
+                self._save_locked()
+                logger.info(
+                    "Recovered %d provable legacy PMDB watchlist ownership key(s)",
+                    len(merged - existing),
+                )
+            return copy.deepcopy(profile)
 
     def get_item_activity(self, profile_id: str, limit: int = 200) -> list[dict]:
         with self._lock:

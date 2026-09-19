@@ -87,6 +87,23 @@ def _resume(tmdb_id: str, position_ms: int, runtime_ms: int = 100_000) -> dict:
     return {**_movie(tmdb_id), "position_ms": position_ms, "runtime_ms": runtime_ms}
 
 
+class UnconfirmedWriteTests(unittest.TestCase):
+    def test_unconfirmed_receipt_is_a_warning_state_not_a_provider_error(self) -> None:
+        class AmbiguousTarget(FakeAdapter):
+            def add(self, category, items, target_list=""):
+                self.added.append((category, list(items)))
+                return {"added": 0}
+
+        source = FakeAdapter("trakt", {CATEGORY_WATCHLIST: [_movie("1")]})
+        target = AmbiguousTarget("pmdb", {CATEGORY_WATCHLIST: []})
+        result = CrossSyncService({"trakt": source, "pmdb": target}).run_pair(
+            _pair(target="pmdb")
+        )
+        self.assertEqual(result.unconfirmed, 1)
+        self.assertEqual(result.error_count, 0)
+        self.assertEqual(result.to_dict()["categories"][0]["unconfirmed"], 1)
+
+
 class ResumePairTests(unittest.TestCase):
     def test_changed_progress_upserts_an_existing_item(self) -> None:
         source = FakeAdapter(
@@ -1695,6 +1712,18 @@ class RemovalGuardTests(unittest.TestCase):
         self.assertEqual(target.removed, [])
         # And it rides out on the payload the dashboard reads.
         self.assertEqual(len(result.to_dict()["blocked_removals"]), 1)
+
+    def test_zero_removals_never_create_a_blocked_removal_record(self):
+        from src.cross_sync import PairCategoryStats
+        service = CrossSyncService({})
+        pair = _pair()
+        for target_size in (4634, 514, 4812):
+            result = PairCategoryStats(category=CATEGORY_WATCHLIST)
+            service._note_blocked(
+                pair, CATEGORY_WATCHLIST, result, removals=0,
+                target_size=target_size, percent=0, where="PublicMetaDB",
+            )
+            self.assertEqual(result.blocked_removals, [])
 
     def test_ordinary_removal_still_happens(self):
         result, target = self._run(self._movies(38), self._movies(40))
