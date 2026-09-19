@@ -843,17 +843,33 @@ class SyncService:
 
         job_order = {job: i for i, job in enumerate(fetch_jobs)}
         all_items_by_status: list[tuple[str, str, list[dict]]] = []
-        with ThreadPoolExecutor(max_workers=min(_SIMKL_FETCH_WORKERS, len(fetch_jobs))) as pool:
-            futures = {pool.submit(_fetch_one, t, s): (t, s) for t, s in fetch_jobs}
-            for future in self._iter_completed_futures(futures):
+        # SIMKL v2 explicitly asks clients to make the first, full-library pull
+        # sequentially.  After a watermark has been persisted the existing
+        # activity gate makes the narrower configured status reads safe to fan
+        # out, while a new profile never spikes three large libraries at once.
+        bootstrap = not str(self._config.sync.simkl_activities_ts or "").strip()
+        if bootstrap:
+            logger.info("SIMKL v2 bootstrap: fetching configured lists sequentially")
+            for simkl_type, status_key in fetch_jobs:
                 self._check_cancelled()
                 try:
-                    all_items_by_status.append(future.result())
+                    all_items_by_status.append(_fetch_one(simkl_type, status_key))
                 except SyncCancelled:
                     raise
                 except Exception as exc:
-                    t, s = futures[future]
-                    logger.error("Failed to fetch SIMKL %s %s: %s", t, s, exc)
+                    logger.error("Failed to fetch SIMKL %s %s: %s", simkl_type, status_key, exc)
+        else:
+            with ThreadPoolExecutor(max_workers=min(_SIMKL_FETCH_WORKERS, len(fetch_jobs))) as pool:
+                futures = {pool.submit(_fetch_one, t, s): (t, s) for t, s in fetch_jobs}
+                for future in self._iter_completed_futures(futures):
+                    self._check_cancelled()
+                    try:
+                        all_items_by_status.append(future.result())
+                    except SyncCancelled:
+                        raise
+                    except Exception as exc:
+                        t, s = futures[future]
+                        logger.error("Failed to fetch SIMKL %s %s: %s", t, s, exc)
 
         all_items_by_status.sort(key=lambda x: job_order.get((x[0], x[1]), 9999))
         logger.info(

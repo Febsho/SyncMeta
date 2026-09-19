@@ -26,8 +26,9 @@ REQUEST_TIMEOUT = (5, _env_timeout("SYNCMETA_SIMKL_READ_TIMEOUT", 20))
 # stop a wide parallel anime fetch from bursting, not to slow a normal sync.
 RATE_LIMIT_MAX = 200
 RATE_LIMIT_WINDOW = 10.0
-# Batch /sync writes so one failure costs less work.
-SIMKL_SYNC_BATCH_SIZE = 100
+# SIMKL recommends batching around 50 items per Sync write.  This also avoids
+# fighting its per-user, single-write lock with a burst of small requests.
+SIMKL_SYNC_BATCH_SIZE = 50
 
 # Status codes from SIMKL that map to our list names
 SIMKL_STATUS_WATCHING = "watching"
@@ -36,19 +37,26 @@ SIMKL_STATUS_COMPLETED = "completed"
 SIMKL_STATUS_ON_HOLD = "hold"
 SIMKL_STATUS_DROPPED = "dropped"
 
+# The current Sync API uses its internal status keys and plural media segments
+# in URLs: /sync/all-items/shows/plantowatch, not the legacy display labels
+# such as /tv/plan%20to%20watch.
 SIMKL_API_STATUS_MAP = {
     SIMKL_STATUS_WATCHING: "watching",
-    SIMKL_STATUS_PLAN_TO_WATCH: "plan to watch",
+    SIMKL_STATUS_PLAN_TO_WATCH: "plantowatch",
     SIMKL_STATUS_COMPLETED: "completed",
-    SIMKL_STATUS_ON_HOLD: "on hold",
+    SIMKL_STATUS_ON_HOLD: "hold",
     SIMKL_STATUS_DROPPED: "dropped",
 }
 
 SIMKL_API_TYPE_MAP = {
-    "shows": "tv",
-    "movies": "movie",
+    "shows": "shows",
+    "movies": "movies",
     "anime": "anime",
 }
+
+SIMKL_APP_NAME = "syncmeta"
+SIMKL_APP_VERSION = "1.0"
+SIMKL_USER_AGENT = "SyncMeta/1.0"
 
 SIMKL_NORMALIZED_STATUS_MAP = {
     "watching": SIMKL_STATUS_WATCHING,
@@ -108,7 +116,7 @@ class SimklClient:
         session = requests.Session()
         session.headers.update({
             "Content-Type": "application/json",
-            "simkl-api-key": self._config.client_id,
+            "User-Agent": SIMKL_USER_AGENT,
         })
         if self._config.access_token:
             session.headers["Authorization"] = f"Bearer {self._config.access_token}"
@@ -131,12 +139,26 @@ class SimklClient:
             pass
         return session
 
+    def _request_params(self, params: dict | None = None) -> dict:
+        """Return v2's required application-identification parameters.
+
+        SIMKL authenticates user data through the bearer token, but also
+        requires these URL parameters on every API call, including PIN auth.
+        Call-specific params intentionally win only when they carry a real
+        value; callers cannot accidentally omit the client identity.
+        """
+        merged = dict(params or {})
+        merged["client_id"] = self._config.client_id
+        merged["app-name"] = SIMKL_APP_NAME
+        merged["app-version"] = SIMKL_APP_VERSION
+        return merged
+
     def _get(self, path: str, params: dict | None = None) -> dict | list | None:
         url = f"{self._config.base_url}{path}"
         logger.debug("GET %s params=%s", url, params)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
-        resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        resp = self._session.get(url, params=self._request_params(params), timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
         resp.raise_for_status()
         if resp.status_code == 204 or not resp.text:
@@ -155,7 +177,7 @@ class SimklClient:
         logger.debug("POST %s", url)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
-        resp = self._session.post(url, json=data, timeout=REQUEST_TIMEOUT)
+        resp = self._session.post(url, params=self._request_params(), json=data, timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
         resp.raise_for_status()
         if resp.status_code == 204 or not resp.text:
@@ -244,6 +266,8 @@ class SimklClient:
             media_type = str(item.get("media_type") or "").strip().lower()
             entry: dict = {"ids": ids}
             if to_list:
+                # v2 requires the destination on each media object; the
+                # old top-level form is rejected with ``empty_field``.
                 entry["to"] = to_list
             if item.get("title"):
                 entry["title"] = item["title"]
@@ -339,10 +363,11 @@ class SimklClient:
         return self._sync_write("/sync/add-to-list", items, to_list=to_list)
 
     def remove_from_list(self, items: list[dict], category: str) -> dict:
-        to_list = self._LIST_FOR_CATEGORY.get(category)
-        if not to_list:
+        if category not in self._LIST_FOR_CATEGORY:
             raise ValueError(f"SIMKL has no list mapping for category {category!r}")
-        return self._sync_write("/sync/remove-from-list", items, to_list=to_list)
+        # v2's documented untrack/delete-from-list operation is
+        # /sync/history/remove; /sync/remove-from-list is a legacy route.
+        return self._sync_write("/sync/history/remove", items)
 
     def add_to_history(self, items: list[dict]) -> dict:
         return self._sync_write(
@@ -356,14 +381,14 @@ class SimklClient:
 
     def request_pin(self) -> dict:
         """Request a SIMKL PIN/device-code payload."""
-        data = self._get(f"/oauth/pin?client_id={self._config.client_id}")
+        data = self._get("/oauth/pin")
         if not data or data.get("result") != "OK":
             raise RuntimeError(f"Failed to request PIN: {data}")
         return data
 
     def check_pin(self, user_code: str) -> dict | None:
         """Check whether a SIMKL PIN has been approved yet."""
-        return self._get(f"/oauth/pin/{user_code}?client_id={self._config.client_id}")
+        return self._get(f"/oauth/pin/{quote(user_code, safe='')}")
 
     def authenticate_pin(self) -> str:
         """Run the SIMKL PIN authentication flow. Returns an access token."""
@@ -1007,7 +1032,7 @@ class SimklClient:
         params = {"extended": "full"}
         if since:
             params["date_from"] = since
-        raw = self._get("/sync/all-items/movie/completed", params=params)
+        raw = self._get("/sync/all-items/movies/completed", params=params)
         items = raw.get("movies", []) if isinstance(raw, dict) else []
         history: list[dict] = []
         for entry in items:
@@ -1078,6 +1103,10 @@ class SimklClient:
     def _get_show_history_for_status(self, media_key: str, status: str, since: str | None = None) -> list[dict]:
         api_type = self._api_type(media_key)
         params = {"extended": "full", "episode_watched_at": "yes"}
+        # Completed and dropped entries omit episode rows unless this is set;
+        # without it SyncMeta would miss a user's full watched baseline.
+        if status in {SIMKL_STATUS_COMPLETED, SIMKL_STATUS_DROPPED}:
+            params["include_all_episodes"] = "yes"
         if since:
             params["date_from"] = since
         raw = self._get(

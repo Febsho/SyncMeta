@@ -182,6 +182,15 @@ class SimklWritePayloadTests(unittest.TestCase):
         client.remove_from_history([_episode(1, 1)])
         self.assertEqual(seen, ["/sync/history", "/sync/history/remove"])
 
+    def test_list_removal_uses_the_v2_untrack_endpoint(self) -> None:
+        client = SimklClient(SimklConfig(client_id="c", access_token="t"))
+        seen: list[str] = []
+        client._post = lambda path, data: seen.append(path) or {}  # type: ignore[method-assign]
+
+        client.remove_from_list([_movie()], "watchlist")
+
+        self.assertEqual(seen, ["/sync/history/remove"])
+
     def test_not_found_reduces_the_added_count(self) -> None:
         client = SimklClient(SimklConfig(client_id="c", access_token="t"))
         client._post = lambda path, data: {"not_found": {"movies": [{"ids": {}}]}}  # type: ignore[method-assign]

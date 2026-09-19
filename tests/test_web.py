@@ -98,8 +98,11 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('<option value="counterlock">Counterlock</option>', html)
         self.assertIn('id="theme-mode-toggle"', html)
         self.assertIn('onclick="toggleSyncMetaMode()"', html)
+        self.assertIn("document.documentElement.dataset.theme = 'syncmeta'", html)
+        self.assertIn("document.documentElement.dataset.mode = mode === 'light' ? 'light' : 'dark'", html)
         self.assertIn("localStorage.setItem(THEME_MODE_KEY, selected)", html)
         self.assertIn("function toggleSyncMetaMode()", html)
+        self.assertIn("function storageGet(key)", html)
         # AniList's redirect URL is a fixed AniList endpoint, not this site's
         # address, and it is what makes the connect flow work at all.
         self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)

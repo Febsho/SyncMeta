@@ -10,7 +10,11 @@
       try {
         mode = localStorage.getItem('syncmeta_theme_mode') || 'dark';
       } catch (_) {}
-      document.documentElement.dataset.mode = mode;
+      // The light palette is intentionally scoped to the SyncMeta theme.  Set
+      // both attributes before stylesheets parse so a persisted light choice
+      // neither flashes dark nor becomes a no-op.
+      document.documentElement.dataset.theme = 'syncmeta';
+      document.documentElement.dataset.mode = mode === 'light' ? 'light' : 'dark';
     })();
   </script>
   <style>
@@ -2152,6 +2156,7 @@
     }
     function setSyncMetaMode(mode) {
       const selected = mode === 'light' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = 'syncmeta';
       document.documentElement.dataset.mode = selected;
       try { localStorage.setItem(THEME_MODE_KEY, selected); } catch (_) {}
       syncThemeModeToggle();
@@ -2168,6 +2173,18 @@
     const SIMKL_PIN_KEY = 'simkl_pin_state';
     const TRAKT_DEVICE_KEY = 'trakt_device_state';
     const RESULTS_PAGE_SIZE = 25;
+    // Storage is only a convenience cache.  Browsers can deny it in private
+    // windows or hardened contexts; that must never turn a completed profile
+    // login into a misleading network failure.
+    function storageGet(key) {
+      try { return localStorage.getItem(key); } catch (_) { return null; }
+    }
+    function storageSet(key, value) {
+      try { localStorage.setItem(key, value); return true; } catch (_) { return false; }
+    }
+    function storageRemove(key) {
+      try { localStorage.removeItem(key); return true; } catch (_) { return false; }
+    }
     const LINKED_SIMKL_STATUSES = {
       shows: ['watching', 'plantowatch'],
       movies: ['plantowatch'],
@@ -2592,7 +2609,7 @@
       const node = el('profile-quick-setup');
       const needsSetup = !sessionProfileId || onboardingCompleted === false;
       if (node) node.style.display = needsSetup ? '' : 'none';
-      if (needsSetup && !onboardingAutoOpened && localStorage.getItem(ENTERED_KEY) && el('app').classList.contains('active')) {
+      if (needsSetup && !onboardingAutoOpened && storageGet(ENTERED_KEY) && el('app').classList.contains('active')) {
         onboardingAutoOpened = true;
         setTimeout(() => openOnboardingWizard(), 0);
       }
@@ -2780,7 +2797,7 @@
             connectionHealth = { ...(profile.connection_health || {}) };
             populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
             renderDashboard(profile);
-            localStorage.setItem(PROFILE_KEY, profile.profile_id);
+            storageSet(PROFILE_KEY, profile.profile_id);
           }
           onboardingCompleted = false;
           await fetchPairs();
@@ -2852,7 +2869,7 @@
 
     function loadJson(key, fallback) {
       try {
-        const value = localStorage.getItem(key);
+        const value = storageGet(key);
         return value ? JSON.parse(value) : fallback;
       } catch {
         return fallback;
@@ -2860,7 +2877,7 @@
     }
 
     function saveJson(key, value) {
-      localStorage.setItem(key, JSON.stringify(value));
+      storageSet(key, JSON.stringify(value));
     }
 
     function gatherProfileAuth() {
@@ -2899,7 +2916,7 @@
     }
 
     function clearSimklPinState() {
-      localStorage.removeItem(SIMKL_PIN_KEY);
+      storageRemove(SIMKL_PIN_KEY);
       if (simklPinPoller) {
         clearTimeout(simklPinPoller);
         simklPinPoller = null;
@@ -2915,7 +2932,7 @@
     }
 
     function clearTraktDeviceState() {
-      localStorage.removeItem(TRAKT_DEVICE_KEY);
+      storageRemove(TRAKT_DEVICE_KEY);
       if (traktDevicePoller) {
         clearTimeout(traktDevicePoller);
         traktDevicePoller = null;
@@ -3750,13 +3767,13 @@
     }
 
     function enterApp(defaultView) {
-      const targetView = defaultView || (localStorage.getItem(PROFILE_KEY) ? 'overview' : 'settings');
+      const targetView = defaultView || (storageGet(PROFILE_KEY) ? 'overview' : 'settings');
       el('hero').style.display = 'none';
       el('app').classList.add('active');
       document.querySelectorAll('.nav-link').forEach(link => { link.style.display = ''; });
       const searchBtn = el('btn-global-search');
       if (searchBtn) searchBtn.style.display = '';
-      localStorage.setItem(ENTERED_KEY, '1');
+      storageSet(ENTERED_KEY, '1');
       fetchSiteStats();
       switchView(targetView);
       renderQuickSetupVisibility();
@@ -3769,7 +3786,7 @@
       const searchBtn = el('btn-global-search');
       if (searchBtn) searchBtn.style.display = 'none';
       closeSearchDialog();
-      localStorage.removeItem(ENTERED_KEY);
+      storageRemove(ENTERED_KEY);
       if (siteStatsPolling) {
         clearInterval(siteStatsPolling);
         siteStatsPolling = null;
@@ -6950,7 +6967,7 @@
       if (profile.profile_id) {
         sessionProfileId = profile.profile_id;
         el('profile-id').value = profile.profile_id;
-        localStorage.setItem(PROFILE_KEY, profile.profile_id);
+        storageSet(PROFILE_KEY, profile.profile_id);
       }
       lastDashboardProfile = profile;
       applyHostedOAuthUi(profile.hosted_oauth || {});
@@ -8132,7 +8149,7 @@
 
       const request = (async () => {
       try {
-        const fallbackProfileId = sessionProfileId || el('profile-id').value.trim() || localStorage.getItem(PROFILE_KEY) || '';
+        const fallbackProfileId = sessionProfileId || el('profile-id').value.trim() || storageGet(PROFILE_KEY) || '';
         const result = await apiPost('/api/profile/status', {
           include_credentials: wantsCredentials,
           profile_id: fallbackProfileId,
@@ -8155,7 +8172,7 @@
         if (profile && profile.profile_id) {
           sessionProfileId = profile.profile_id;
           el('profile-id').value = profile.profile_id;
-          localStorage.setItem(PROFILE_KEY, profile.profile_id);
+          storageSet(PROFILE_KEY, profile.profile_id);
         }
         refreshPollingForProfile(profile);
         if (wantsCredentials) {
@@ -8426,9 +8443,9 @@
       } catch {}
       sessionProfileId = '';
       secretState = emptySecretState();
-      localStorage.removeItem(CREDS_KEY);
-      localStorage.removeItem(OPTIONS_KEY);
-      localStorage.removeItem(PROFILE_KEY);
+      storageRemove(CREDS_KEY);
+      storageRemove(OPTIONS_KEY);
+      storageRemove(PROFILE_KEY);
       el('profile-id').value = '';
       el('profile-password').value = '';
       populateForm({
@@ -8568,10 +8585,10 @@
 
       sessionProfileId = '';
       secretState = emptySecretState();
-      localStorage.removeItem(CREDS_KEY);
-      localStorage.removeItem(OPTIONS_KEY);
-      localStorage.removeItem(PROFILE_KEY);
-      localStorage.removeItem(ENTERED_KEY);
+      storageRemove(CREDS_KEY);
+      storageRemove(OPTIONS_KEY);
+      storageRemove(PROFILE_KEY);
+      storageRemove(ENTERED_KEY);
       clearSimklPinState();
       clearTraktDeviceState();
       populateForm({
@@ -8732,9 +8749,14 @@
       const names = (metrics.connected || []).map(key => brand(key).label).join(' · ');
       return `
         <div class="metric-card">
-          <div class="card-label">Items synced</div>
-          <div class="metric-value">${metricValue(metrics.items)}</div>
-          <div class="card-sub">${live ? 'Checked in the last run' : 'No run recorded yet'}</div>
+          <div class="card-label">Changes applied</div>
+          <div class="metric-value">${metricValue(metrics.changes)}</div>
+          <div class="card-sub">${live ? `${metrics.added} added · ${metrics.removed} removed · ${metrics.updated} updated` : 'No run recorded yet'}</div>
+        </div>
+        <div class="metric-card">
+          <div class="card-label">Items checked</div>
+          <div class="metric-value">${metricValue(metrics.checked)}</div>
+          <div class="card-sub">${live ? `${metrics.skipped} skipped or unmatched` : 'No run recorded yet'}</div>
         </div>
         <div class="metric-card metric-card-actionable" id="metric-services" role="button" tabindex="0" aria-label="Services connected — open connection settings">
           <div class="card-label">Services connected</div>
@@ -10366,7 +10388,7 @@
       const draftOptions = loadJson(OPTIONS_KEY, { auto_sync: false, interval_seconds: 43200, media_types: ['shows', 'movies', 'anime'], activity_history_source: 'off', auto_history_sync: false, simkl_history_anime_only: false, simkl_reconcile_watched_history: false, trakt_reconcile_watched_history: false, activity_resume_source: 'off', auto_resume_sync: false, trakt_watched_history_interval_seconds: 86400, trakt_resume_progress_interval_seconds: 86400 });
     enhanceConnectionCards();
     populateForm(draftCreds, draftOptions, {});
-    const storedProfileId = localStorage.getItem(PROFILE_KEY);
+    const storedProfileId = storageGet(PROFILE_KEY);
     if (storedProfileId && !el('profile-id').value.trim()) {
       el('profile-id').value = storedProfileId;
       sessionProfileId = storedProfileId;
@@ -10377,11 +10399,11 @@
     resumeSimklPinState();
     resumeTraktDeviceState();
 
-    if (localStorage.getItem(ENTERED_KEY)) enterApp();
+    if (storageGet(ENTERED_KEY)) enterApp();
     bindRedesignEvents();
     fetchStatus(false).then(profile => {
       if (profile) {
-        if (localStorage.getItem(ENTERED_KEY)) switchView('overview');
+        if (storageGet(ENTERED_KEY)) switchView('overview');
         fetchUnresolved();
       } else {
         renderEmptyDashboard('Save or load a profile in Settings to enable background sync.');

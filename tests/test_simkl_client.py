@@ -13,7 +13,7 @@ class RecordingSimklClient(SimklClient):
     def _get(self, path: str, params: dict | None = None) -> dict | list | None:
         self.paths.append(path)
         self.requests.append((path, params))
-        if path == "/sync/all-items/tv/watching":
+        if path == "/sync/all-items/shows/watching":
             return {
                 "shows": [
                     {
@@ -42,7 +42,7 @@ class RecordingSimklClient(SimklClient):
                     },
                 ]
             }
-        if path == "/sync/all-items/anime/plan%20to%20watch":
+        if path == "/sync/all-items/anime/plantowatch":
             return {
                 "anime": [
                     {
@@ -56,7 +56,7 @@ class RecordingSimklClient(SimklClient):
                     }
                 ]
             }
-        if path == "/sync/all-items/movie/completed":
+        if path == "/sync/all-items/movies/completed":
             return {
                 "movies": [
                     {
@@ -68,7 +68,7 @@ class RecordingSimklClient(SimklClient):
                     }
                 ]
             }
-        if path == "/sync/all-items/tv/watching":
+        if path == "/sync/all-items/shows/watching":
             return {
                 "shows": [
                     {
@@ -87,7 +87,7 @@ class RecordingSimklClient(SimklClient):
                     }
                 ]
             }
-        if path == "/sync/all-items/tv/completed":
+        if path == "/sync/all-items/shows/completed":
             return {
                 "shows": [
                     {
@@ -104,15 +104,15 @@ class RecordingSimklClient(SimklClient):
                     }
                 ]
             }
-        if path == "/sync/all-items/tv/on%20hold":
+        if path == "/sync/all-items/shows/hold":
             return {
                 "shows": []
             }
-        if path == "/sync/all-items/tv/dropped":
+        if path == "/sync/all-items/shows/dropped":
             return {
                 "shows": []
             }
-        if path == "/sync/all-items/tv/plan%20to%20watch":
+        if path == "/sync/all-items/shows/plantowatch":
             return {
                 "shows": []
             }
@@ -145,7 +145,7 @@ class RecordingSimklClient(SimklClient):
                     }
                 ]
             }
-        if path == "/sync/all-items/anime/on%20hold":
+        if path == "/sync/all-items/anime/hold":
             return {
                 "anime": []
             }
@@ -153,7 +153,7 @@ class RecordingSimklClient(SimklClient):
             return {
                 "anime": []
             }
-        if path == "/sync/all-items/anime/plan%20to%20watch":
+        if path == "/sync/all-items/anime/plantowatch":
             return {
                 "anime": []
             }
@@ -224,7 +224,7 @@ class SimklClientTests(unittest.TestCase):
 
         grouped = client.get_status("watching", ["shows"])
 
-        self.assertEqual(client.paths, ["/sync/all-items/tv/watching"])
+        self.assertEqual(client.paths, ["/sync/all-items/shows/watching"])
         self.assertEqual(len(grouped["shows"]), 1)
         self.assertEqual(grouped["shows"][0]["title"], "Demo Show")
         self.assertEqual(grouped["shows"][0]["media_type"], "tv")
@@ -234,9 +234,33 @@ class SimklClientTests(unittest.TestCase):
 
         grouped = client.get_status("plantowatch", ["anime"])
 
-        self.assertEqual(client.paths, ["/sync/all-items/anime/plan%20to%20watch"])
+        self.assertEqual(client.paths, ["/sync/all-items/anime/plantowatch"])
         self.assertEqual(grouped["anime"][0]["title"], "Demo Anime")
         self.assertEqual(grouped["anime"][0]["anilist_id"], "44")
+
+    def test_v2_request_metadata_uses_query_params_and_user_agent(self) -> None:
+        client = RecordingSimklClient()
+
+        self.assertEqual(
+            client._request_params({"date_from": "2026-04-01T00:00:00Z"}),
+            {
+                "date_from": "2026-04-01T00:00:00Z",
+                "client_id": "client",
+                "app-name": "syncmeta",
+                "app-version": "1.0",
+            },
+        )
+        self.assertEqual(client._session.headers["User-Agent"], "SyncMeta/1.0")
+        self.assertNotIn("simkl-api-key", client._session.headers)
+
+    def test_v2_list_write_uses_a_per_item_destination(self) -> None:
+        payload = SimklClient._build_sync_payload(
+            [{"tmdb_id": 123, "media_type": "movie", "title": "Demo"}],
+            to_list="plantowatch",
+        )
+
+        self.assertNotIn("to", payload)
+        self.assertEqual(payload["movies"][0]["to"], "plantowatch")
 
     def test_normalize_anime_item_returns_direct_ids_without_root_walk(self) -> None:
         # Plain root-season anime keeps its direct ids; sequel/part titles get
@@ -361,6 +385,12 @@ class SimklClientTests(unittest.TestCase):
             for _, params in client.requests
         ))
         self.assertTrue(any(
+            path.endswith(("/completed", "/dropped"))
+            and params
+            and params.get("include_all_episodes") == "yes"
+            for path, params in client.requests
+        ))
+        self.assertTrue(any(
             item.get("tmdb_id") == 7005
             for item in history
         ))
@@ -387,7 +417,7 @@ class SimklClientTests(unittest.TestCase):
                 self.requests.append((path, params))
                 if path == "/sync/playback":
                     return []
-                if path == "/sync/all-items/tv/watching":
+                if path == "/sync/all-items/shows/watching":
                     return {
                         "shows": [{
                             "show": {
@@ -400,7 +430,7 @@ class SimklClientTests(unittest.TestCase):
                             "last_watched_at": "2026-04-05T10:00:00Z",
                         }]
                     }
-                if path == "/sync/all-items/tv/on%20hold":
+                if path == "/sync/all-items/shows/hold":
                     return {"shows": []}
                 if path == "/sync/all-items/anime/watching":
                     return {
@@ -415,7 +445,7 @@ class SimklClientTests(unittest.TestCase):
                             "last_watched_at": "2026-04-05T11:00:00Z",
                         }]
                     }
-                if path == "/sync/all-items/anime/on%20hold":
+                if path == "/sync/all-items/anime/hold":
                     return {"anime": []}
                 return None
 
