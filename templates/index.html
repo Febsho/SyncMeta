@@ -6,13 +6,10 @@
   <title>SyncMeta</title>
   <script>
     (function () {
-      let style = 'syncmeta', mode = 'dark';
+      let mode = 'dark';
       try {
-        style = localStorage.getItem('syncmeta_theme_style') ||
-          (localStorage.getItem('syncmeta_theme') === 'counterlock' ? 'counterlock' : 'syncmeta');
-        mode = localStorage.getItem('syncmeta_theme_mode') || (style === 'counterlock' ? 'light' : 'dark');
+        mode = localStorage.getItem('syncmeta_theme_mode') || 'dark';
       } catch (_) {}
-      document.documentElement.dataset.theme = style;
       document.documentElement.dataset.mode = mode;
     })();
   </script>
@@ -812,11 +809,6 @@
     html[data-theme="counterlock"] .toast{background:rgba(246,242,232,.96);border:2px solid #191917}
     html[data-theme="counterlock"][data-mode="dark"] .hero-card{background:rgba(25,25,23,.92);border-color:#d9ff43;box-shadow:8px 8px 0 #000}
     html[data-theme="counterlock"][data-mode="dark"] .toast{background:rgba(25,25,23,.96);border-color:#777269}
-    .theme-preview{display:grid;grid-template-columns:repeat(5,1fr);height:44px;margin-top:12px;border:1px solid var(--line)}
-    .theme-preview span:nth-child(1){background:#191917}.theme-preview span:nth-child(2){background:#eee9dc}.theme-preview span:nth-child(3){background:#d9ff43}.theme-preview span:nth-child(4){background:#ff493d}.theme-preview span:nth-child(5){background:#63b96f}
-    .mode-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
-    .mode-switch{position:relative;display:inline-flex;width:48px;height:26px;flex:none}.mode-switch input{position:absolute;opacity:0;pointer-events:none}.mode-switch span{position:absolute;inset:0;border:1px solid var(--z700);border-radius:999px;background:var(--z900);cursor:pointer}.mode-switch span:before{content:'☀';position:absolute;display:grid;place-items:center;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:var(--z100);color:var(--black);font-size:11px;transition:transform .2s}.mode-switch input:checked + span:before{content:'●';transform:translateX(22px)}
-
     /* ═══════════════════════════════════════════════════════════════════════
        Redesign: app shell, health hero, sync graph, activity, issues, dialogs.
        Everything below reuses the existing tokens — surfaces on --surface, a
@@ -1188,6 +1180,7 @@
         <button class="nav-tool nav-search" type="button" id="btn-global-search" style="display:none" aria-label="Search synchronized media">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span class="nav-search-text">Search media</span><kbd class="nav-kbd" id="nav-search-kbd">Ctrl K</kbd>
         </button>
+        <button class="nav-tool" type="button" id="theme-mode-toggle" onclick="toggleSyncMetaMode()" aria-label="Switch to light mode" aria-pressed="true">☾ Dark</button>
         <a class="nav-tool nav-icon-link" href="https://github.com/Febsho/SyncMeta-for-PublicMetaDB" target="_blank" rel="noopener" aria-label="SyncMeta on GitHub" title="SyncMeta on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.3-1.7-1.3-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.5 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5z"/></svg></a>
       </div>
     </div>
@@ -1552,10 +1545,6 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
                 Profile
               </button>
-              <button class="settings-nav-item" id="snav-appearance" onclick="showSettingsTab('appearance')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18V3z"/></svg>
-                Appearance
-              </button>
               <div class="settings-nav-group">Services</div>
               <button class="settings-nav-item" id="snav-connections" onclick="showSettingsTab('connections')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
@@ -1622,29 +1611,6 @@
                   <button class="btn btn-ghost btn-sm" onclick="logoutProfile()">Log Out</button>
                   <button class="btn btn-ghost btn-sm" type="button" onclick="openOnboardingWizard(true)">Run Setup Wizard</button>
                   <span class="save-flash" id="save-flash">Saved</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- APPEARANCE TAB -->
-
-            <div class="settings-tab" id="stab-appearance">
-              <div class="settings-page-title">Appearance</div>
-              <div class="settings-page-desc">Choose how SyncMeta looks in this browser. The selection also applies to the admin panel.</div>
-              <div class="settings-group form-section">
-                <div class="settings-group-title">Theme</div>
-                <div class="form-row">
-                  <label for="app-theme-select">Interface theme</label>
-                  <select id="app-theme-select" data-theme-select onchange="setSyncMetaTheme(this.value)">
-                    <option value="syncmeta">SyncMeta</option>
-                    <option value="counterlock">Counterlock</option>
-                  </select>
-                  <div class="hint">Counterlock uses warm paper, hard black rules, acid highlights, and red accents.</div>
-                  <div class="theme-preview" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
-                  <div class="mode-toggle-row">
-                    <div><strong>Dark mode</strong><div class="hint">Available for both SyncMeta and Counterlock.</div></div>
-                    <label class="mode-switch" for="app-dark-mode"><span class="sr-only">Toggle dark mode</span><input id="app-dark-mode" data-mode-toggle type="checkbox" onchange="setSyncMetaMode(this.checked ? 'dark' : 'light')"><span aria-hidden="true"></span></label>
-                  </div>
                 </div>
               </div>
             </div>
@@ -2174,27 +2140,26 @@
   </div>
 
   <script>
-    const THEME_STYLE_KEY = 'syncmeta_theme_style';
     const THEME_MODE_KEY = 'syncmeta_theme_mode';
-    function syncAppearanceControls() {
-      const style = document.documentElement.dataset.theme || 'syncmeta';
+    function syncThemeModeToggle() {
       const mode = document.documentElement.dataset.mode || 'dark';
-      document.querySelectorAll('[data-theme-select]').forEach(node => { node.value = style; });
-      document.querySelectorAll('[data-mode-toggle]').forEach(node => { node.checked = mode === 'dark'; });
-    }
-    function setSyncMetaTheme(theme) {
-      const selected = theme === 'counterlock' ? 'counterlock' : 'syncmeta';
-      document.documentElement.dataset.theme = selected;
-      try { localStorage.setItem(THEME_STYLE_KEY, selected); } catch (_) {}
-      syncAppearanceControls();
+      const toggle = document.getElementById('theme-mode-toggle');
+      if (!toggle) return;
+      const dark = mode === 'dark';
+      toggle.textContent = dark ? '☾ Dark' : '☀ Light';
+      toggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
+      toggle.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
     }
     function setSyncMetaMode(mode) {
       const selected = mode === 'light' ? 'light' : 'dark';
       document.documentElement.dataset.mode = selected;
       try { localStorage.setItem(THEME_MODE_KEY, selected); } catch (_) {}
-      syncAppearanceControls();
+      syncThemeModeToggle();
     }
-    syncAppearanceControls();
+    function toggleSyncMetaMode() {
+      setSyncMetaMode(document.documentElement.dataset.mode === 'dark' ? 'light' : 'dark');
+    }
+    syncThemeModeToggle();
 
     const CREDS_KEY = 'sync_credentials';
     const OPTIONS_KEY = 'sync_options';
@@ -2288,7 +2253,7 @@
     let connectionHealth = {};
     let connectionReadiness = null;
     let connectionCheckRunning = false;
-    const SETTINGS_TABS = ['profile', 'appearance', 'connections', 'schedule', 'notifications', 'danger', 'about'];
+    const SETTINGS_TABS = ['profile', 'connections', 'schedule', 'notifications', 'danger', 'about'];
     const SETTINGS_TAB_ALIASES = { stats: 'about', data: 'danger' };
     let activeSettingsTab = 'profile';
     let lastSiteStats = null;
@@ -10451,7 +10416,7 @@
       input.addEventListener('input', scheduleAutoSave);
       input.addEventListener('change', scheduleAutoSave);
     });
-    document.querySelectorAll('#view-settings select:not([data-theme-select]), #sync-settings select').forEach(select => {
+    document.querySelectorAll('#view-settings select, #sync-settings select').forEach(select => {
       select.addEventListener('change', scheduleAutoSave);
     });
     const routeScheduleNode = el('route-schedule-list');

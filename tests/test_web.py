@@ -90,15 +90,16 @@ class WebTests(unittest.TestCase):
         self.assertIn("if (traktInput) traktInput.value = OOB_REDIRECT_URI;", html)
         self.assertIn("if (mdblistInput) mdblistInput.value = currentSiteRoot();", html)
 
-    def test_index_offers_persistent_counterlock_theme(self) -> None:
+    def test_index_offers_persistent_topbar_mode_toggle(self) -> None:
         html = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn('id="snav-appearance"', html)
-        self.assertIn('<option value="counterlock">Counterlock</option>', html)
-        self.assertIn("localStorage.setItem(THEME_STYLE_KEY, selected)", html)
+        self.assertNotIn('id="snav-appearance"', html)
+        self.assertNotIn('id="stab-appearance"', html)
+        self.assertNotIn('<option value="counterlock">Counterlock</option>', html)
+        self.assertIn('id="theme-mode-toggle"', html)
+        self.assertIn('onclick="toggleSyncMetaMode()"', html)
         self.assertIn("localStorage.setItem(THEME_MODE_KEY, selected)", html)
-        self.assertIn('html[data-theme="counterlock"]', html)
-        self.assertIn('data-mode-toggle', html)
+        self.assertIn("function toggleSyncMetaMode()", html)
         # AniList's redirect URL is a fixed AniList endpoint, not this site's
         # address, and it is what makes the connect flow work at all.
         self.assertIn('value="https://anilist.co/api/v2/oauth/pin"', html)
