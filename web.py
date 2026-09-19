@@ -67,6 +67,7 @@ from src.mdblist_client import MdbListClient
 from src import fribb_client
 from src.publicmetadb_client import PublicMetaDBClient
 from src.profile_store import ProfileStore, merge_credentials, normalize_credentials, normalize_profile_options
+from src.oauth_credentials import get_oauth_app_credentials, hosted_oauth_status
 from src.simkl_client import SimklClient
 from src.tmdb_client import TmdbClient, TmdbError, normalize_media_type as tmdb_media_kind
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
@@ -442,6 +443,13 @@ def _sanitize_error_text(text: str) -> str:
         return ""
     for pattern in _SECRET_PATTERNS:
         cleaned = pattern.sub(lambda match: f"{match.group(1)}=[redacted]", cleaned)
+    # Some upstream exceptions echo request bodies rather than URL-style
+    # key/value pairs. Ensure a hosted application secret is still never kept
+    # in profile diagnostics or the live log feed.
+    for provider in ("trakt", "simkl", "anilist", "mdblist"):
+        secret = str(get_oauth_app_credentials(provider)["client_secret"])
+        if secret:
+            cleaned = cleaned.replace(secret, "[redacted]")
     return cleaned
 
 
@@ -574,6 +582,9 @@ def _stats_to_dict(stats: SyncStats) -> dict:
 
 def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict | None = None) -> AppConfig:
     credentials = normalize_credentials(profile.get("credentials"))
+    simkl_app = get_oauth_app_credentials("simkl", credentials)
+    trakt_app = get_oauth_app_credentials("trakt", credentials)
+    mdblist_app = get_oauth_app_credentials("mdblist", credentials)
     options = normalize_profile_options(profile.get("options"))
     activity_state = profile.get("activity_state", {}) if isinstance(profile.get("activity_state"), dict) else {}
     anilist_username = credentials["anilist"]["username"]
@@ -590,8 +601,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
 
     return AppConfig(
         simkl=SimklConfig(
-            client_id=credentials["simkl"]["client_id"],
-            client_secret=credentials["simkl"]["client_secret"],
+            client_id=str(simkl_app["client_id"]), client_secret=str(simkl_app["client_secret"]),
             access_token=credentials["simkl"]["access_token"],
             selected_statuses=credentials["simkl"]["selected_statuses"],
         ),
@@ -602,13 +612,12 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
             selected_statuses=credentials["anilist"]["selected_statuses"],
         ),
         trakt=TraktConfig(
-            client_id=credentials["trakt"]["client_id"],
-            client_secret=credentials["trakt"]["client_secret"],
+            client_id=str(trakt_app["client_id"]), client_secret=str(trakt_app["client_secret"]),
             access_token=credentials["trakt"]["access_token"],
             refresh_token=credentials["trakt"]["refresh_token"],
             access_token_expires_at=credentials["trakt"]["access_token_expires_at"],
             username=trakt_username,
-            enabled=bool(credentials["trakt"]["client_id"] and credentials["trakt"]["access_token"]),
+            enabled=bool(trakt_app["client_id"] and credentials["trakt"]["access_token"]),
             sync_watchlist=credentials["trakt"]["sync_watchlist"],
             sync_watchlist_movies=credentials["trakt"]["sync_watchlist_movies"],
             sync_watchlist_shows=credentials["trakt"]["sync_watchlist_shows"],
@@ -617,8 +626,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
         ),
         mdblist=MdbListConfig(
             api_key=credentials["mdblist"]["api_key"],
-            client_id=credentials["mdblist"].get("client_id", ""),
-            client_secret=credentials["mdblist"].get("client_secret", ""),
+            client_id=str(mdblist_app["client_id"]), client_secret=str(mdblist_app["client_secret"]),
             access_token=credentials["mdblist"].get("access_token", ""),
             refresh_token=credentials["mdblist"].get("refresh_token", ""),
             access_token_expires_at=credentials["mdblist"].get("access_token_expires_at", ""),
@@ -793,6 +801,7 @@ def _profile_response(profile: dict, include_credentials: bool = False):
     if not include_credentials:
         payload.pop("credentials", None)
     payload["queue_status"] = _sync_runner.snapshot(payload.get("profile_id"))
+    payload["hosted_oauth"] = hosted_oauth_status()
     try:
         private_profile = _profile_store.get_private_profile_by_id(payload.get("profile_id"))
         config = _config_from_profile(private_profile)
@@ -1826,9 +1835,10 @@ def _remove_managed_selection(profile: dict, managed_entry: dict) -> dict:
             )
             return credentials
         if kind == "liked-auto":
+            app_credentials = get_oauth_app_credentials("trakt", credentials)
             trakt_config = TraktConfig(
-                client_id=credentials["trakt"]["client_id"],
-                client_secret=credentials["trakt"]["client_secret"],
+                client_id=str(app_credentials["client_id"]),
+                client_secret=str(app_credentials["client_secret"]),
                 access_token=credentials["trakt"]["access_token"],
                 refresh_token=credentials["trakt"]["refresh_token"],
                 access_token_expires_at=credentials["trakt"]["access_token_expires_at"],
@@ -2300,13 +2310,17 @@ def api_profile_delete():
     return _clear_session_cookie(make_response(jsonify({"status": "deleted"})))
 
 
+def _resolved_oauth_app(provider: str, private_profile: dict | None) -> dict[str, str | bool]:
+    credentials = normalize_credentials((private_profile or {}).get("credentials"))
+    return get_oauth_app_credentials(provider, credentials)
+
+
 @app.route("/api/simkl/pin/start", methods=["POST"])
 def api_simkl_pin_start():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    if not client_id and private_profile:
-        client_id = private_profile["credentials"]["simkl"]["client_id"]
+    app_credentials = _resolved_oauth_app("simkl", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
 
     if not client_id:
         return _json_error("SIMKL client ID is required", 400)
@@ -2336,10 +2350,9 @@ def api_simkl_pin_start():
 def api_simkl_pin_check():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
+    app_credentials = _resolved_oauth_app("simkl", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
     user_code = str(body.get("user_code", "")).strip()
-    if not client_id and private_profile:
-        client_id = private_profile["credentials"]["simkl"]["client_id"]
 
     if not client_id:
         return _json_error("SIMKL client ID is required", 400)
@@ -2375,9 +2388,8 @@ def api_anilist_auth_start():
     """Return the AniList authorize URL for the pin flow."""
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    if not client_id and private_profile:
-        client_id = private_profile["credentials"]["anilist"]["client_id"]
+    app_credentials = _resolved_oauth_app("anilist", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
     if not client_id:
         return _json_error("AniList client ID is required", 400)
 
@@ -2392,12 +2404,13 @@ def api_anilist_auth_check():
     """Exchange the pasted AniList code for an access token."""
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
+    app_credentials = _resolved_oauth_app("anilist", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
     code = str(body.get("code", "")).strip()
 
     # Fall back to the stored credentials so a saved secret need not be retyped.
-    if private_profile:
+    if private_profile and not app_credentials["hosted"]:
         stored = private_profile["credentials"]["anilist"]
         client_id = client_id or stored["client_id"]
         client_secret = client_secret or stored["client_secret"]
@@ -2427,7 +2440,12 @@ def api_anilist_auth_check():
         # Persist immediately so the token survives even if the user navigates
         # away without pressing Save.
         try:
-            _profile_store.update_anilist_auth(profile_id, client_id, client_secret, access_token)
+            _profile_store.update_anilist_auth(
+                profile_id,
+                "" if app_credentials["hosted"] else client_id,
+                "" if app_credentials["hosted"] else client_secret,
+                access_token,
+            )
             saved = True
         except KeyError:
             saved = False
@@ -2472,8 +2490,8 @@ def _exchange_mdblist_authorization(
         try:
             _profile_store.update_mdblist_auth(
                 profile_id,
-                client_id=client_id,
-                client_secret=client_secret,
+                client_id="" if get_oauth_app_credentials("mdblist")["hosted"] else client_id,
+                client_secret="" if get_oauth_app_credentials("mdblist")["hosted"] else client_secret,
                 access_token=access_token,
                 refresh_token=refresh_token,
                 access_token_expires_at=expires_at,
@@ -2497,10 +2515,11 @@ def api_mdblist_auth_start():
     """Begin the MDBList PKCE flow and return the authorize URL."""
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
+    app_credentials = _resolved_oauth_app("mdblist", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
     redirect_uri = str(body.get("redirect_uri", "")).strip()
-    if private_profile:
+    if private_profile and not app_credentials["hosted"]:
         stored = private_profile["credentials"]["mdblist"]
         client_id = client_id or stored.get("client_id", "")
         client_secret = client_secret or stored.get("client_secret", "")
@@ -2542,9 +2561,10 @@ def api_mdblist_auth_check():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
     code = str(body.get("code", "")).strip()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
-    if private_profile:
+    app_credentials = _resolved_oauth_app("mdblist", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
+    if private_profile and not app_credentials["hosted"]:
         stored = private_profile["credentials"]["mdblist"]
         client_id = client_id or stored.get("client_id", "")
         client_secret = client_secret or stored.get("client_secret", "")
@@ -2582,9 +2602,10 @@ def api_mdblist_auth_check():
 def api_trakt_device_start():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
-    if private_profile:
+    app_credentials = _resolved_oauth_app("trakt", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
+    if private_profile and not app_credentials["hosted"]:
         client_id = client_id or private_profile["credentials"]["trakt"]["client_id"]
         client_secret = client_secret or private_profile["credentials"]["trakt"]["client_secret"]
 
@@ -2618,10 +2639,11 @@ def api_trakt_device_start():
 def api_trakt_device_check():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
+    app_credentials = _resolved_oauth_app("trakt", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
     device_code = str(body.get("device_code", "")).strip()
-    if private_profile:
+    if private_profile and not app_credentials["hosted"]:
         client_id = client_id or private_profile["credentials"]["trakt"]["client_id"]
         client_secret = client_secret or private_profile["credentials"]["trakt"]["client_secret"]
 
@@ -2692,15 +2714,17 @@ def api_trakt_device_check():
 def api_trakt_catalogs():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    client_id = str(body.get("client_id", "")).strip()
-    client_secret = str(body.get("client_secret", "")).strip()
+    app_credentials = _resolved_oauth_app("trakt", private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("client_secret") or app_credentials["client_secret"]).strip()
     access_token = str(body.get("access_token", "")).strip()
     refresh_token = str(body.get("refresh_token", "")).strip()
     access_token_expires_at = str(body.get("access_token_expires_at", "")).strip()
     query = str(body.get("query", "")).strip()
     if private_profile:
-        client_id = client_id or private_profile["credentials"]["trakt"]["client_id"]
-        client_secret = client_secret or private_profile["credentials"]["trakt"]["client_secret"]
+        if not app_credentials["hosted"]:
+            client_id = client_id or private_profile["credentials"]["trakt"]["client_id"]
+            client_secret = client_secret or private_profile["credentials"]["trakt"]["client_secret"]
         access_token = access_token or private_profile["credentials"]["trakt"]["access_token"]
         refresh_token = refresh_token or private_profile["credentials"]["trakt"]["refresh_token"]
         access_token_expires_at = access_token_expires_at or private_profile["credentials"]["trakt"]["access_token_expires_at"]
@@ -2950,7 +2974,10 @@ def api_profile_status():
     if not profile:
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
 
-    return _profile_response(profile, include_credentials=include_credentials)
+    response = _profile_response(profile, include_credentials=include_credentials)
+    payload = response.get_json()
+    payload["hosted_oauth"] = hosted_oauth_status()
+    return jsonify(payload)
 
 
 @app.route("/api/profile/connections/check", methods=["POST"])
@@ -2980,6 +3007,12 @@ def api_profile_connections_check():
         merge_credentials(private_profile.get("credentials"), draft)
         if has_draft else normalize_credentials(private_profile.get("credentials"))
     )
+    # Health checks create real provider clients, so they need the same app
+    # resolution as sync jobs while preserving only per-user tokens.
+    for provider in ("simkl", "trakt", "mdblist"):
+        app_credentials = get_oauth_app_credentials(provider, credentials)
+        credentials[provider]["client_id"] = str(app_credentials["client_id"])
+        credentials[provider]["client_secret"] = str(app_credentials["client_secret"])
     force = bool(body.get("force", True)) or has_draft
     cached = private_profile.get("connection_health") or {}
     checks_by_provider: dict[str, dict] = {}

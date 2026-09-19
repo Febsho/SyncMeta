@@ -899,6 +899,14 @@ class CrossSyncService:
             result.removed = execution.removed
             result.unmapped += execution.not_found
             result.unconfirmed += execution.unconfirmed
+            # execute_plan isolates writer failures so other actions can be
+            # reported, but a failure still means this observation is not an
+            # agreement.  Propagate it before baseline persistence; otherwise
+            # an initial failed write can establish a removable baseline.
+            for error in execution.errors:
+                result.errors.append(
+                    f"Could not write {category} to {target.label}: {self._describe_error(error)}"
+                )
             wrote_added = [
                 outcome.action.item for outcome in execution.outcomes
                 if outcome.status == STATUS_SUCCESS and outcome.action.kind != ACTION_REMOVE

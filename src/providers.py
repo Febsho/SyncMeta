@@ -1872,14 +1872,17 @@ class MdbListAdapter(ProviderAdapter):
 
     key = "mdblist"
     label = "MDBList"
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_DROPPED)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_DROPPED)
+    # MDBList's sync API has watchlist, collection, and watched-history
+    # endpoints. It has no dropped-status endpoint; advertising one lets routes
+    # be saved that can only fail at runtime.
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
     supports_list_selection = True
     supports_list_search = True
     supports_target_lists = True
     # A named MDBList list is a curation; watch history has no such destination,
     # the same split Trakt makes.
-    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_DROPPED)
+    target_list_categories = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION)
 
     #: Sync sources that are not one of the user's static lists.
     _NATIVE_SOURCES = (

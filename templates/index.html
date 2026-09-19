@@ -115,6 +115,7 @@
     .conn-token-error{display:none;margin-top:8px;padding:8px 12px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25);border-radius:7px;font-size:12px;color:var(--red);gap:6px;align-items:flex-start}
     .conn-token-error.visible{display:flex}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--z800);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    .hosted-oauth-config .manual-oauth{display:none}
     .empty{text-align:center;padding:40px 20px;color:var(--z600);font-size:13px}.history-item{padding:12px 18px;border-bottom:1px solid rgba(39,39,46,.3);font-size:13px;display:flex;justify-content:space-between;align-items:center}.history-item:last-child{border-bottom:none}.history-time{color:var(--z500);font-size:12px}.history-stats{display:flex;gap:14px;font-variant-numeric:tabular-nums}
     .log-console{min-height:280px;max-height:62vh;overflow:auto;background:#000;border-top:1px solid var(--z900);padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.55}
     .log-row{display:grid;grid-template-columns:170px 58px 130px minmax(0,1fr);gap:10px;padding:3px 0;color:var(--z400);border-bottom:1px solid rgba(39,39,46,.18)}
@@ -1685,16 +1686,16 @@
                 <div class="conn-card form-section" id="connection-card-simkl">
                   <div class="conn-card-title"><span class="dot" id="dot-simkl"></span> SIMKL</div>
                   <div class="conn-card-desc">Movies, shows, anime, watch history, and PIN auth.</div>
-                  <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
-                  <div class="form-row">
+                  <div class="hint manual-oauth" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
+                  <div class="form-row manual-oauth">
                     <label for="simkl-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="simkl-redirect-url" readonly value="">
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('simkl-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label for="simkl-client-id">Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
-                  <div class="form-row"><label for="simkl-client-secret">Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="simkl-client-id">Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="simkl-client-secret">Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
                   <div class="form-row"><label for="simkl-access-token">Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-simkl-auth" onclick="startSimklAuth()">Get SIMKL Token</button>
@@ -1719,7 +1720,7 @@
                   <div class="conn-card-desc">Watchlist, watch history, collections, custom lists, resume progress, and device auth.</div>
                   <input type="checkbox" id="trakt-watchlist-movies-toggle" checked class="hidden">
                   <input type="checkbox" id="trakt-watchlist-shows-toggle" checked class="hidden">
-                  <div class="hint" style="margin-bottom:10px">Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>, then paste the credentials below. Use the redirect URI if asked.</div>
+                  <div class="hint manual-oauth" style="margin-bottom:10px">Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>, then paste the credentials below. Use the redirect URI if asked.</div>
                   <div class="form-row">
                     <label for="trakt-redirect-url">Redirect URI</label>
                     <div class="copy-row">
@@ -1727,8 +1728,8 @@
                       <button class="btn btn-sm" type="button" onclick="copyRedirectUrl('trakt-redirect-url')">Copy</button>
                     </div>
                   </div>
-                  <div class="form-row"><label for="trakt-client-id">Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
-                  <div class="form-row"><label for="trakt-client-secret">Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="trakt-client-id">Client ID</label><input type="text" id="trakt-client-id" placeholder="From Trakt API app settings" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="trakt-client-secret">Client Secret</label><input type="password" id="trakt-client-secret" placeholder="Required for device auth" autocomplete="off"></div>
                   <div class="form-row"><label for="trakt-access-token">Access Token</label><input type="password" id="trakt-access-token" placeholder="Filled after Trakt auth" autocomplete="off"></div>
                   <div class="form-row"><label for="trakt-refresh-token">Refresh Token</label><input type="password" id="trakt-refresh-token" placeholder="Saved for future refresh support" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
@@ -1755,9 +1756,9 @@
                   <div class="conn-card-title"><span class="dot" id="dot-anilist"></span> AniList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Anime list sync directly from AniList.</div>
                   <div class="form-row"><label for="anilist-username">Username</label><input type="text" id="anilist-username" placeholder="Your AniList username" autocomplete="off"><div class="hint">Leave empty if anime should come only from SIMKL.</div></div>
-                  <div class="form-row"><label for="anilist-client-id">Client ID <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="text" id="anilist-client-id" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
-                  <div class="form-row"><label for="anilist-client-secret">Client Secret</label><input type="password" id="anilist-client-secret" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
-                  <div class="form-row">
+                  <div class="form-row manual-oauth"><label for="anilist-client-id">Client ID <span style="font-size:11px;color:var(--z600);font-weight:400">Optional</span></label><input type="text" id="anilist-client-id" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="anilist-client-secret">Client Secret</label><input type="password" id="anilist-client-secret" placeholder="From anilist.co/settings/developer" autocomplete="off"></div>
+                  <div class="form-row manual-oauth">
                     <label for="anilist-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="anilist-redirect-url" readonly value="https://anilist.co/api/v2/oauth/pin">
@@ -1791,9 +1792,9 @@
                   <div class="conn-card-title"><span class="dot" id="dot-mdblist"></span> MDBList <span style="font-size:11px;color:var(--z600);font-weight:400;margin-left:auto">Optional</span></div>
                   <div class="conn-card-desc">Your MDBList lists, watchlist, collection and watch history. An API key is enough to read; connect with OAuth to also write back to MDBList.</div>
                   <div class="form-row"><label for="mdblist-api-key">API Key</label><input type="password" id="mdblist-api-key" placeholder="From mdblist.com settings" autocomplete="off"><div class="hint"><a href="https://mdblist.com/" target="_blank" rel="noopener">Open MDBList</a> and copy the API key from settings.</div></div>
-                  <div class="form-row"><label for="mdblist-client-id">Client ID</label><input type="text" id="mdblist-client-id" placeholder="From mdblist.com/developer" autocomplete="off"><div class="hint">Create an app at <a href="https://mdblist.com/developer/" target="_blank" rel="noopener">mdblist.com/developer</a> to sync <em>into</em> MDBList.</div></div>
-                  <div class="form-row"><label for="mdblist-client-secret">Client Secret</label><input type="password" id="mdblist-client-secret" placeholder="From mdblist.com/developer" autocomplete="off"></div>
-                  <div class="form-row">
+                  <div class="form-row manual-oauth"><label for="mdblist-client-id">Client ID</label><input type="text" id="mdblist-client-id" placeholder="From mdblist.com/developer" autocomplete="off"><div class="hint">Create an app at <a href="https://mdblist.com/developer/" target="_blank" rel="noopener">mdblist.com/developer</a> to sync <em>into</em> MDBList.</div></div>
+                  <div class="form-row manual-oauth"><label for="mdblist-client-secret">Client Secret</label><input type="password" id="mdblist-client-secret" placeholder="From mdblist.com/developer" autocomplete="off"></div>
+                  <div class="form-row manual-oauth">
                     <label for="mdblist-redirect-url">Redirect URL</label>
                     <div class="copy-row">
                       <input type="text" id="mdblist-redirect-url" readonly value="">
@@ -2431,7 +2432,7 @@
     async function startMdbListAuth() {
       const btn = el('btn-mdblist-auth');
       const clientId = el('mdblist-client-id').value.trim();
-      if (!clientId && !hasSavedSecret('mdblist', 'client_secret_saved')) {
+      if (!hostedOAuth.mdblist && !clientId && !hasSavedSecret('mdblist', 'client_secret_saved')) {
         setMdbListAuthStatus('Enter your MDBList client ID first.', true);
         return;
       }
@@ -2518,7 +2519,7 @@
     async function startAniListAuth() {
       const btn = el('btn-anilist-auth');
       const clientId = el('anilist-client-id').value.trim();
-      if (!clientId && !hasSavedSecret('anilist', 'client_secret_saved')) {
+      if (!hostedOAuth.anilist && !clientId && !hasSavedSecret('anilist', 'client_secret_saved')) {
         setAniListAuthStatus('Enter your AniList client ID first.', true);
         return;
       }
@@ -6332,7 +6333,7 @@
 
     async function startSimklAuth() {
       const clientId = el('simkl-client-id').value.trim();
-      if (!clientId) {
+      if (!hostedOAuth.simkl && !clientId) {
         showToast('Enter your SIMKL client ID first.', true, false);
         return;
       }
@@ -6371,7 +6372,7 @@
     async function startTraktAuth() {
       const clientId = el('trakt-client-id').value.trim();
       const clientSecret = el('trakt-client-secret').value.trim();
-      if (!clientId || (!clientSecret && !hasSavedSecret('trakt', 'client_secret_saved'))) {
+      if (!hostedOAuth.trakt && (!clientId || (!clientSecret && !hasSavedSecret('trakt', 'client_secret_saved')))) {
         showToast('Enter your Trakt client ID and client secret first.', true, false);
         return;
       }
@@ -6956,6 +6957,25 @@
       }
     }
 
+    let hostedOAuth = {};
+    function applyHostedOAuthUi(status) {
+      hostedOAuth = status || {};
+      ['simkl', 'trakt', 'anilist', 'mdblist'].forEach(provider => {
+        const card = el(`connection-card-${provider}`);
+        if (!card) return;
+        const hosted = !!hostedOAuth[provider];
+        card.classList.toggle('hosted-oauth-config', hosted);
+        let note = card.querySelector('.hosted-oauth-note');
+        if (hosted && !note) {
+          note = document.createElement('div');
+          note.className = 'hint hosted-oauth-note';
+          note.textContent = 'OAuth application configured by this SyncMeta server.';
+          card.querySelector('.conn-card-desc')?.after(note);
+        }
+        if (note) note.hidden = !hosted;
+      });
+    }
+
     function renderDashboard(profile) {
       if (!profile) {
         renderEmptyDashboard('Save a profile in Settings to enable background sync.');
@@ -6968,6 +6988,7 @@
         localStorage.setItem(PROFILE_KEY, profile.profile_id);
       }
       lastDashboardProfile = profile;
+      applyHostedOAuthUi(profile.hosted_oauth || {});
       connectionHealth = { ...(profile.connection_health || connectionHealth || {}) };
       connectionReadiness = profile.connection_readiness || connectionReadiness;
       renderConnectionHealth(connectionHealth, connectionReadiness);

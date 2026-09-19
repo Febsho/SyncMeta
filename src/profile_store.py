@@ -15,6 +15,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.security import check_password_hash, generate_password_hash
+from .oauth_credentials import get_oauth_app_credentials
 
 from .config import ANILIST_DEFAULT_SELECTED_STATUSES, SIMKL_DEFAULT_SELECTED_STATUSES
 
@@ -344,11 +345,13 @@ def _result_totals(rows: list[dict] | None) -> dict[str, int]:
 
 def _configured_sources_for_profile(profile: dict) -> list[str]:
     credentials = normalize_credentials(profile.get("credentials"))
+    simkl_app = get_oauth_app_credentials("simkl", credentials)
+    trakt_app = get_oauth_app_credentials("trakt", credentials)
     options = normalize_profile_options(profile.get("options"))
     sources: list[str] = []
 
     if (
-        credentials["simkl"]["client_id"]
+        simkl_app["client_id"]
         and credentials["simkl"]["access_token"]
         and (
             any(credentials["simkl"]["selected_statuses"].get(media_type) for media_type in ["shows", "movies", "anime"])
@@ -365,7 +368,7 @@ def _configured_sources_for_profile(profile: dict) -> list[str]:
         sources.append("anilist")
 
     if (
-        credentials["trakt"]["client_id"]
+        trakt_app["client_id"]
         and credentials["trakt"]["access_token"]
         and (
             credentials["trakt"]["sync_watchlist_movies"]
@@ -919,7 +922,7 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
                 simkl_categories.append(category)
     if migrated.get("activity_history_source") == "simkl":
         simkl_categories.append("history")
-    if credentials["simkl"]["client_id"] and credentials["simkl"]["access_token"]:
+    if get_oauth_app_credentials("simkl", credentials)["client_id"] and credentials["simkl"]["access_token"]:
         add_or_merge("simkl", simkl_categories, simkl_lists, migrated.get("simkl_visibility", "private"))
 
     anilist_lists = [f"status:{status}" for status in credentials["anilist"]["selected_statuses"]]
@@ -945,7 +948,7 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
         trakt_categories.append("watchlist")
     if migrated.get("activity_history_source") == "trakt":
         trakt_categories.append("history")
-    if credentials["trakt"]["client_id"] and credentials["trakt"]["access_token"]:
+    if get_oauth_app_credentials("trakt", credentials)["client_id"] and credentials["trakt"]["access_token"]:
         add_or_merge("trakt", trakt_categories, trakt_lists, migrated.get("trakt_personal_visibility", "private"))
 
     mdblist_lists = [f"list:{entry['id']}" for entry in credentials["mdblist"]["selected_lists"]]
