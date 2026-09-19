@@ -4281,12 +4281,13 @@ def api_profile_list_delete():
         else:
             existing = pmdb_client.find_list_by_name(list_name)
             if existing:
-                pmdb_client.delete_list(str(existing.get("id", "")).strip())
+                list_id = str(existing.get("id", "")).strip()
+                pmdb_client.delete_list(list_id)
         # Also unselect the source entry so the deleted PMDB list is not
         # recreated during the next list sync.
         updated_credentials = _remove_managed_selection(profile, managed_entry)
         updated_profile = _profile_store.delete_managed_list_by_id(
-            profile_id, list_name, updated_credentials
+            profile_id, list_name, updated_credentials, list_id
         )
     except Exception as exc:
         logger.exception("Failed to delete managed list %s for profile %s", list_name, profile_id[:8])
@@ -4403,6 +4404,8 @@ def api_profile_data_delete_pmdb_lists():
             list_id = str(managed.get("list_id") or "").strip()
             if list_id and client.delete_list(list_id):
                 deleted += 1
+            if list_id:
+                _profile_store.mark_pmdb_target_list_deleted(profile_id, list_id)
         except Exception as exc:
             errors.append(str(exc))
     if errors:
@@ -4818,6 +4821,7 @@ def api_profile_list_sync():
 
     config = _config_from_profile(private_profile)
     pairs = {pair.pair_id: pair for pair in _sync_pairs_from_config(config)}
+    adapters = _build_provider_adapters(config, profile_id=profile_id)
     results = private_profile.get("last_pair_results") or {}
     schedules = private_profile.get("pair_sync_schedule") or {}
     routes = []
@@ -4829,7 +4833,7 @@ def api_profile_list_sync():
         if pair is None:
             continue
         schedule = schedules.get(route_id) if isinstance(schedules.get(route_id), dict) else {}
-        routes.append({
+        route = {
             **raw,
             "id": route_id,
             "pair_id": route_id,
@@ -4839,8 +4843,46 @@ def api_profile_list_sync():
             "last_result": results.get(route_id) or None,
             "last_sync_at": schedule.get("last_sync_at"),
             "next_sync_at": schedule.get("next_sync_at"),
-        })
+            "problem": CrossSyncService(adapters).validate_pair(pair),
+            "destination_needs_selection": pair.destination_needs_selection,
+        }
+        if pair.destination_needs_selection:
+            target = adapters.get(pair.target)
+            route["destination_options"] = target.safe_target_lists() if target else []
+        routes.append(route)
     return jsonify({"routes": routes})
+
+
+@app.route("/api/profile/list-sync/destination", methods=["POST"])
+def api_profile_list_sync_destination():
+    """Replace a missing named destination without silently changing a route."""
+    profile_id = _current_profile_id()
+    if not profile_id:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    body = request.get_json(silent=True) or {}
+    route_id = str(body.get("route_id") or "").strip()
+    target_list = str(body.get("target_list") or "").strip()
+    if not route_id or not target_list:
+        return _json_error("route_id and target_list are required", 400)
+    try:
+        profile = _profile_store.get_private_profile_by_id(profile_id)
+    except KeyError:
+        return _clear_session_cookie(_json_error("Profile not found", 404)[0]), 404
+    config = _config_from_profile(profile)
+    raw_pairs = list((profile.get("options") or {}).get("sync_pairs") or [])
+    index = next((i for i, raw in enumerate(raw_pairs) if str(raw.get("pair_id") or "") == route_id), None)
+    if index is None:
+        return _json_error("List Sync route not found", 404)
+    pair = SyncPair.from_dict(raw_pairs[index])
+    target = _build_provider_adapters(config, profile_id=profile_id).get(pair.target)
+    if target is None or target_list not in {str(entry.get("key") or "") for entry in target.safe_target_lists()}:
+        return _json_error("Select an existing writable destination list", 400)
+    raw_pairs[index] = {
+        **pair.to_dict(), "target_list": target_list,
+        "destination_needs_selection": False,
+    }
+    updated = _profile_store.update_sync_pairs(profile_id, raw_pairs)
+    return _profile_response(updated, include_credentials=True)
 
 
 def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
@@ -4864,7 +4906,10 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
                 sources.append({
                     "provider": provider, "id": str(entry.get("key") or ""),
                     "display_name": str(entry.get("label") or entry.get("key") or ""),
-                    "category": category, "group": "Personal Collections" if provider in {"simkl", "anilist"} else "Personal Lists",
+                    "category": category,
+                    "group": "SIMKL Custom Lists" if provider == "simkl" and entry.get("group") == "custom" else (
+                        "Personal Collections" if provider in {"simkl", "anilist"} else "Personal Lists"
+                    ),
                     "readable": True, "writable": False, "static": kind == "list",
                     "dynamic": False, "personal": True,
                     "supportsCreate": False, "supportsRemove": False,

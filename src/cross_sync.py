@@ -533,6 +533,8 @@ class CrossSyncService:
             return f"Source '{pair.source}' is not configured."
         if target is None:
             return f"Target '{pair.target}' is not configured."
+        if getattr(pair, "destination_needs_selection", False):
+            return "PublicMetaDB destination list no longer exists. Select another destination list."
         if not target.can_write():
             return target.write_blocked_reason() or f"{target.label} cannot be written to."
         two_way = getattr(pair, "is_two_way", lambda: False)()

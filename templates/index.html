@@ -3907,10 +3907,21 @@
           const result = route.last_result || {};
           const last = result.timestamp ? `Last sync ${esc(timeAgo(result.timestamp))}` : 'Never run';
           const changes = result.timestamp ? ` · +${Number(result.added || 0)} / −${Number(result.removed || 0)}` : '';
-          const state = route.enabled === false ? 'Paused' : (result.error_count ? 'Needs review' : 'Healthy');
-          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_name || source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_name || destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button><button class="btn btn-sm" type="button" data-list-sync-toggle="${escAttr(route.pair_id)}" data-list-sync-enabled="${route.enabled ? '0' : '1'}">${route.enabled ? 'Disable' : 'Enable'}</button></div></div>`;
+          const state = route.destination_needs_selection ? 'Destination required' : (route.enabled === false ? 'Paused' : (result.error_count ? 'Needs review' : 'Healthy'));
+          const destinationPicker = route.destination_needs_selection ? `<div class="pair-card-foot"><span class="catalog-note">${esc(route.problem || 'Destination list was deleted. Select a replacement.')}</span><select data-list-sync-destination="${escAttr(route.pair_id)}"><option value="">Select destination…</option>${(route.destination_options || []).map(entry => `<option value="${escAttr(entry.key)}">${esc(entry.label)}</option>`).join('')}</select><button class="btn btn-sm" type="button" data-list-sync-destination-save="${escAttr(route.pair_id)}">Use destination</button></div>` : '';
+          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_name || source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_name || destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button><button class="btn btn-sm" type="button" data-list-sync-toggle="${escAttr(route.pair_id)}" data-list-sync-enabled="${route.enabled ? '0' : '1'}">${route.enabled ? 'Disable' : 'Enable'}</button></div>${destinationPicker}</div>`;
         }).join('');
         node.querySelectorAll('[data-list-sync-run]').forEach(button => button.addEventListener('click', () => runPairs(button.dataset.listSyncRun, false)));
+        node.querySelectorAll('[data-list-sync-destination-save]').forEach(button => button.addEventListener('click', async () => {
+          const targetList = node.querySelector(`[data-list-sync-destination="${button.dataset.listSyncDestinationSave}"]`)?.value || '';
+          if (!targetList) { showToast('Select a replacement destination first.', true, false); return; }
+          button.disabled = true;
+          try {
+            const result = await apiPost('/api/profile/list-sync/destination', { route_id: button.dataset.listSyncDestinationSave, target_list: targetList });
+            if (!result.ok) throw new Error(formatApiError(result.data, 'Could not update destination.'));
+            await fetchListSyncRoutes(); await fetchPairs();
+          } catch (error) { showToast(error.message || 'Could not update destination.', true, false); button.disabled = false; }
+        }));
         node.querySelectorAll('[data-list-sync-toggle]').forEach(button => button.addEventListener('click', async () => {
           button.disabled = true;
           try {
@@ -3938,7 +3949,7 @@
           editor.innerHTML = '<div class="catalog-note">Connect the source provider and add PMDB or MDBList write access before creating a route.</div>';
           return;
         }
-        const sourceOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${esc(row.display_name)}</option>`;
+        const sourceOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${row.group === 'SIMKL Custom Lists' ? 'Custom List (read-only) · ' : ''}${esc(row.display_name)}</option>`;
         const destinationOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${esc(row.display_name)}</option>`;
         editor.innerHTML = `<div class="pair-sec-title">Create List Sync route</div>
           <div class="pair-opt-grid"><label class="pair-flow-end"><span>Name</span><input class="pair-card-name" id="list-sync-name" placeholder="Weekend Movies"></label>
@@ -11028,7 +11039,17 @@
           </div>
         </div>`);
 
-      const accountLists = visibleKnown.filter(entry => entry.kind === 'list');
+      const customLists = visibleKnown.filter(entry => entry.kind === 'list' && entry.group === 'custom');
+      const accountLists = visibleKnown.filter(entry => entry.kind === 'list' && entry.group !== 'custom');
+      if (customLists.length) {
+        sections.push(`
+        <div class="pair-list-group">
+          <div class="pair-list-group-title">Custom Lists <span class="catalog-note">read-only</span></div>
+          <div class="pair-list-grid">
+            ${customLists.map(entry => pairOptionCheckboxHtml(pair, index, entry)).join('')}
+          </div>
+        </div>`);
+      }
       if (accountLists.length) {
         sections.push(`
         <div class="pair-list-group">
@@ -11115,11 +11136,15 @@
         (targetProvider.target_list_categories || []).includes(category))) return '';
       ensurePairTargetLists(pair.target);
       const targetLists = pairTargetListsByProvider[pair.target] || [];
+      const missingTarget = pair.destination_needs_selection
+        ? `<option value="${escAttr(pair.target_list || '')}" selected disabled>Missing/deleted destination — select another list</option>`
+        : '';
       return `
         <div class="form-row" style="margin-top:10px;margin-bottom:8px">
           <label for="pair-target-list-${index}">Write into</label>
           <select id="pair-target-list-${index}" data-pair-index="${index}" data-pair-field="target_list">
             <option value="">${esc(providerLabel(pair.target))} default for each category</option>
+            ${missingTarget}
             ${targetLists.map(entry => `<option value="${escAttr(entry.key)}" ${entry.key === pair.target_list ? 'selected' : ''}>${esc(entry.label)}</option>`).join('')}
           </select>
         </div>`;
@@ -11503,6 +11528,9 @@
             // Likewise a destination list belonging to the previous target.
             pair.target_list = '';
           }
+          if (field === 'target_list' && previous !== pair[field]) {
+            pair.destination_needs_selection = false;
+          }
           if (field === 'source' || field === 'target') {
             const supported = pairSupportedCategories(pair).map(category => category.key);
             pair.categories = (pair.categories || []).filter(category => supported.includes(category));
@@ -11817,6 +11845,7 @@
         categories: pair.categories || [],
         source_lists: pair.source_lists || [],
         target_list: pair.target_list || '',
+        destination_needs_selection: !!pair.destination_needs_selection,
         removal_mode: pair.removal_mode || 'additive',
         visibility: pair.visibility === 'public' ? 'public' : 'private',
         mode: pair.mode || 'one_way',

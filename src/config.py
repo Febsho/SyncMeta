@@ -167,6 +167,9 @@ class SyncPair:
     # watchlist/collection for the category. Only meaningful for providers that
     # declare supports_target_lists.
     target_list: str = ""
+    # A managed PMDB destination was intentionally deleted.  Keep its ID for
+    # display/audit, but block execution until the user chooses a replacement.
+    destination_needs_selection: bool = False
     removal_mode: str = "additive"
     #: "one_way" (default) or "two_way". Two-way keeps both services holding the
     #: union of the two rather than running a second pair in reverse.
@@ -196,6 +199,7 @@ class SyncPair:
             "categories": list(self.categories),
             "source_lists": list(self.source_lists),
             "target_list": self.target_list,
+            "destination_needs_selection": bool(self.destination_needs_selection),
             "removal_mode": self.removal_mode,
             "mode": self.mode,
             "enabled": bool(self.enabled),
@@ -303,6 +307,7 @@ class SyncPair:
             categories=categories,
             source_lists=source_lists,
             target_list=str(raw.get("target_list", "") or "").strip(),
+            destination_needs_selection=bool(raw.get("destination_needs_selection", False)),
             removal_mode=removal_mode,
             mode=mode,
             enabled=bool(raw.get("enabled", True)),

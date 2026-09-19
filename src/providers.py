@@ -23,6 +23,8 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import quote, unquote
 
+import requests
+
 from .media_kind import is_anime
 
 logger = logging.getLogger(__name__)
@@ -1062,6 +1064,10 @@ class SimklAdapter(ProviderAdapter):
         self._client = client
         # SIMKL is queried per media type; default to everything it supports.
         self._media_types = list(media_types or ["shows", "movies", "anime"])
+        # Discovery is metadata for a rendered picker, not sync data.  Keep it
+        # only for this adapter lifetime so repeated rendering does not make
+        # another index request, while a later adapter can see renamed lists.
+        self._custom_lists_cache: list[dict] | None = None
 
     #: SIMKL's own list names, with the neutral category each maps onto.
     _STATUSES = (
@@ -1083,6 +1089,32 @@ class SimklAdapter(ProviderAdapter):
                     "category": category,
                     "kind": "status",
                 })
+        # Custom Lists are a read-only v2 beta capability.  Do not let an
+        # unavailable/premium-only index hide SIMKL's established status chips.
+        if self._custom_lists_cache is None:
+            try:
+                self._custom_lists_cache = list(self._client.get_custom_lists() or [])
+            except Exception:
+                logger.warning("SIMKL: could not enumerate custom lists", exc_info=True)
+                self._custom_lists_cache = []
+        custom_lists = self._custom_lists_cache
+        seen: set[str] = set()
+        for entry in custom_lists:
+            if not isinstance(entry, dict):
+                continue
+            list_id = str(entry.get("id") or "").strip()
+            if not list_id or list_id in seen:
+                continue
+            seen.add(list_id)
+            label = str(entry.get("name") or entry.get("slug") or f"List {list_id}").strip()
+            out.append({
+                "key": f"custom:{list_id}",
+                "label": label,
+                "category": CATEGORY_WATCHLIST,
+                "kind": "list",
+                "group": "custom",
+                "read_only": True,
+            })
         return out
 
     def _fetch_status(self, status: str) -> list[dict]:
@@ -1109,11 +1141,20 @@ class SimklAdapter(ProviderAdapter):
         if category == CATEGORY_RESUME:
             return list(self._client.get_playback_progress() or [])
 
-        selected = self._selected_statuses(category, source_lists)
-        if selected:
+        selected_statuses = self._selected_statuses(category, source_lists)
+        selected_custom = self._selected_custom_list_ids(category, source_lists)
+        if selected_statuses or selected_custom:
             items: list[dict] = []
             seen: set[str] = set()
-            for status, media_type in selected:
+
+            def add(item: dict) -> None:
+                key = item_key(item)
+                if key in seen:
+                    return
+                seen.add(key)
+                items.append(item)
+
+            for status, media_type in selected_statuses:
                 planned = str(status or "").strip().lower() in PLANNED_STATUSES
                 for item in self._client.get_status(status, [media_type]).get(media_type, []) or []:
                     item = {
@@ -1121,11 +1162,10 @@ class SimklAdapter(ProviderAdapter):
                         "_syncmeta_source_status": status,
                         PLANNED_FLAG: planned,
                     }
-                    key = item_key(item)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    items.append(item)
+                    add(item)
+            for list_id in selected_custom:
+                for item in self._client.get_custom_list_items(list_id) or []:
+                    add(item)
             return items
 
         if source_lists:
@@ -1138,6 +1178,8 @@ class SimklAdapter(ProviderAdapter):
             return self._fetch_status("plantowatch")
         if category == CATEGORY_COLLECTION:
             return self._fetch_status("completed")
+        if category == CATEGORY_DROPPED:
+            return self._fetch_status("dropped")
         return self._unsupported(category, "read")
 
     def _selected_statuses(self, category: str, source_lists: list[str] | None) -> list[tuple[str, str]]:
@@ -1152,6 +1194,24 @@ class SimklAdapter(ProviderAdapter):
             if by_status.get(status) != category:
                 continue
             out.append((status, media_type))
+        return out
+
+    @staticmethod
+    def _selected_custom_list_ids(category: str, source_lists: list[str] | None) -> list[str]:
+        """Return selected SIMKL Custom List IDs only for their watchlist source."""
+        if category != CATEGORY_WATCHLIST:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for key in source_lists or []:
+            text = str(key or "")
+            if not text.startswith("custom:"):
+                continue
+            list_id = text.removeprefix("custom:").strip()
+            if not list_id or list_id in seen:
+                continue
+            seen.add(list_id)
+            out.append(list_id)
         return out
 
     def add(
@@ -1371,6 +1431,7 @@ class PmdbAdapter(ProviderAdapter):
 
     def __init__(self, client):
         self._client = client
+        self._missing_target_lists: set[str] = set()
 
     def can_write(self) -> bool:
         return bool(getattr(self._client, "_config", None) and self._client._config.api_key)
@@ -1588,6 +1649,44 @@ class PmdbAdapter(ProviderAdapter):
                     out.append(normalized)
             return out
         return self._unsupported(category, "read")
+
+    def fetch_target(self, category: str, target_list: str = "") -> list[dict]:
+        """Read a named PMDB target without mistaking a deleted list for empty."""
+        destination = str(target_list or "").strip()
+        if not destination.startswith("list:"):
+            return super().fetch_target(category, destination)
+        list_id = destination.split(":", 1)[1].strip()
+        if not list_id:
+            raise RuntimeError("PublicMetaDB destination list no longer exists. Select another destination list.")
+        if list_id in self._missing_target_lists:
+            raise RuntimeError("PublicMetaDB destination list no longer exists. Select another destination list.")
+        try:
+            raw_items = self._client.get_list_items(list_id) or []
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            if getattr(response, "status_code", None) != 404:
+                raise
+            # A 404 may be a stale API edge, so refresh the index exactly once
+            # before declaring the saved reference dead.
+            lists = self._client.get_lists() or []
+            exists = any(str(entry.get("id") or "").strip() == list_id for entry in lists if isinstance(entry, dict))
+            if exists:
+                raise
+            self._missing_target_lists.add(list_id)
+            raise RuntimeError(
+                "PublicMetaDB destination list no longer exists. Select another destination list."
+            ) from exc
+        items: list[dict] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            normalized = self._normalize_pmdb_entry(raw)
+            if not normalized:
+                continue
+            key = item_key(normalized)
+            if key not in seen:
+                seen.add(key)
+                items.append(normalized)
+        return items
 
     def target_lists(self) -> list[dict]:
         out = [{"key": "watchlist", "label": "Watchlist"}, {"key": "picks", "label": "Picks"}]

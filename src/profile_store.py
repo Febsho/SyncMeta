@@ -2795,7 +2795,9 @@ class ProfileStore:
                     return copy.deepcopy(run)
             raise KeyError(run_id)
 
-    def delete_managed_list_by_id(self, profile_id: str, list_name: str, credentials: dict) -> dict:
+    def delete_managed_list_by_id(
+        self, profile_id: str, list_name: str, credentials: dict, deleted_list_id: str = "",
+    ) -> dict:
         with self._lock:
             normalized_id = self._normalize_profile_id(profile_id)
             profile = self._profiles[normalized_id]
@@ -2813,6 +2815,7 @@ class ProfileStore:
                 item for item in profile.get("last_results", [])
                 if str(item.get("list_name", "")).strip() != list_name
             ]
+            self._mark_pmdb_target_list_deleted_locked(profile, deleted_list_id)
 
             trimmed_history = []
             for entry in profile.get("history", []):
@@ -2831,6 +2834,39 @@ class ProfileStore:
             profile["sync_updated_at"] = now
             self._save_locked()
             return self._public_profile(profile, include_credentials=True)
+
+    @staticmethod
+    def _mark_pmdb_target_list_deleted_locked(profile: dict, list_id: str) -> int:
+        """Block routes still aimed at an intentionally deleted PMDB list."""
+        list_id = str(list_id or "").strip()
+        if not list_id:
+            return 0
+        affected = 0
+        options = profile.get("options") if isinstance(profile.get("options"), dict) else {}
+        pairs = options.get("sync_pairs") if isinstance(options.get("sync_pairs"), list) else []
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            if str(pair.get("target") or "").strip().lower() != "pmdb":
+                continue
+            if str(pair.get("target_list") or "").strip() != f"list:{list_id}":
+                continue
+            pair["destination_needs_selection"] = True
+            pair["enabled"] = False
+            affected += 1
+        return affected
+
+    def mark_pmdb_target_list_deleted(self, profile_id: str, list_id: str) -> int:
+        """Persist that explicitly deleted PMDB destinations require replacement."""
+        with self._lock:
+            profile = self._profiles[self._normalize_profile_id(profile_id)]
+            affected = self._mark_pmdb_target_list_deleted_locked(profile, list_id)
+            if affected:
+                profile["updated_at"] = utc_now_iso()
+                profile["sync_status"] = "Destination selection required"
+                profile["sync_updated_at"] = profile["updated_at"]
+                self._save_locked()
+            return affected
 
     def delete_profile_by_id(self, profile_id: str) -> None:
         with self._lock:

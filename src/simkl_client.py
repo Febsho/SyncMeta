@@ -432,6 +432,92 @@ class SimklClient:
         """Fetch items with status 'plantowatch', grouped by media type."""
         return self.get_status(SIMKL_STATUS_PLAN_TO_WATCH, media_types)
 
+    # ── Custom lists (read-only API beta) ──────────────────────────
+
+    def get_custom_lists(self) -> list[dict]:
+        """Return every custom list available to the authenticated user.
+
+        The list index is deliberately not persisted: it is only used while an
+        adapter is alive (the frontend already loads source lists lazily), while
+        list contents always stay fresh for a sync run.
+        """
+        settings = self._get("/users/settings") or {}
+        account = settings.get("account") if isinstance(settings, dict) else {}
+        user_id = account.get("id") if isinstance(account, dict) else None
+        if not user_id:
+            raise RuntimeError("SIMKL did not return an authenticated account ID")
+
+        lists: list[dict] = []
+        page = 1
+        while True:
+            raw = self._get(f"/lists/user/{quote(str(user_id), safe='')}", {
+                "limit": 500, "page": page,
+            }) or {}
+            if not isinstance(raw, dict):
+                break
+            if raw.get("error"):
+                raise RuntimeError(str(raw.get("message") or raw.get("error")))
+            batch = raw.get("lists")
+            if not isinstance(batch, list):
+                break
+            lists.extend(entry for entry in batch if isinstance(entry, dict))
+            pagination = raw.get("pagination") if isinstance(raw.get("pagination"), dict) else {}
+            total_pages = _safe_lookup_int(pagination.get("total_pages")) or 1
+            if page >= total_pages or not batch:
+                break
+            page += 1
+        return lists
+
+    def get_custom_list_items(self, list_id: str | int) -> list[dict]:
+        """Fetch and normalize a custom list without caching its contents."""
+        list_id = str(list_id or "").strip()
+        if not list_id:
+            return []
+        items: list[dict] = []
+        page = 1
+        while True:
+            raw = self._get(f"/lists/{quote(list_id, safe='')}", {
+                "limit": 500, "page": page,
+            }) or {}
+            if not isinstance(raw, dict):
+                break
+            # A free account receives this as HTTP 200, without `items`.
+            if raw.get("error"):
+                raise RuntimeError(str(raw.get("message") or raw.get("error")))
+            batch = raw.get("items")
+            if not isinstance(batch, list):
+                break
+            for entry in batch:
+                normalized = self._normalize_custom_list_item(entry)
+                if normalized:
+                    items.append(normalized)
+            pagination = raw.get("pagination") if isinstance(raw.get("pagination"), dict) else {}
+            total_pages = _safe_lookup_int(pagination.get("total_pages")) or 1
+            if page >= total_pages or not batch:
+                break
+            page += 1
+        return items
+
+    def _normalize_custom_list_item(self, entry: object) -> dict | None:
+        """Adapt the Custom Lists item shape to the regular SIMKL normalizer."""
+        if not isinstance(entry, dict):
+            return None
+        raw_type = str(entry.get("type") or "").strip().lower()
+        media_type = {"movie": "movies", "movies": "movies", "tv": "shows", "show": "shows", "shows": "shows", "anime": "anime"}.get(raw_type)
+        if not media_type:
+            return None
+        media = dict(entry)
+        ids = dict(media.get("ids") or {})
+        if not ids.get("simkl") and ids.get("simkl_id"):
+            ids["simkl"] = ids["simkl_id"]
+        # Some custom-list responses carry the SIMKL ID at the item level.
+        if not ids.get("simkl") and media.get("id"):
+            ids["simkl"] = media["id"]
+        media["ids"] = ids
+        return self._normalize_item(
+            {"movie" if media_type == "movies" else "show": media}, media_type,
+        )
+
     def get_status(self, status: str, media_types: list[str] | None = None) -> dict[str, list[dict]]:
         """Fetch items for any SIMKL watchlist status."""
         return self._fetch_list(status, media_types)
@@ -585,6 +671,7 @@ class SimklClient:
             "year": media.get("year"),
             "media_type": pmdb_type,
             "simkl_type": media_type,
+            "simkl_id": str(ids["simkl"]) if ids.get("simkl") else None,
             "imdb_id": ids.get("imdb"),
             "tmdb_id": str(ids["tmdb"]) if ids.get("tmdb") else None,
             "mal_id": str(ids["mal"]) if ids.get("mal") else None,
