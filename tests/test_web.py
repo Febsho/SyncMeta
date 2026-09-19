@@ -4059,3 +4059,81 @@ class ClearLibraryEndpointTests(unittest.TestCase):
         self.client.post("/api/profile/logout", json={})
         response = self.client.post("/api/profile/data/clear-library", json={})
         self.assertEqual(response.status_code, 401)
+
+
+class ClearPmdbWatchlistEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        store_path = Path(self.tmpdir.name) / "profiles.json"
+        web._profile_store = web.ProfileStore(store_path)
+        web.PROFILE_STORE_FILE = store_path
+        web._sync_state_stores = {}
+        web._session_store = web.ServerSessionStore(ttl_seconds=3600)
+        web._login_limiter = web.LoginAttemptLimiter(max_attempts=5, window_seconds=60)
+        web.SITE_ACCESS_PASSWORD = ""
+        self.client = web.app.test_client()
+        credentials = _blank_credentials()
+        credentials["pmdb"]["api_key"] = "pmdb-key"
+        profile = web._profile_store.create_profile("secret", credentials, {
+            "auto_sync": False,
+            "sync_pairs": [
+                {"pair_id": "pmdb-watch", "source": "simkl", "target": "pmdb",
+                 "categories": ["watchlist", "collection"]},
+                {"pair_id": "pmdb-custom", "source": "simkl", "target": "pmdb",
+                 "target_list": "list:custom", "categories": ["watchlist"]},
+            ],
+        })
+        self.profile_id = profile["profile_id"]
+        self.client.post("/api/profile/login", json={"profile_id": self.profile_id, "password": "secret"})
+        private = web._profile_store._profiles[self.profile_id]
+        private["activity_state"]["pmdb_watchlist_managed_keys"] = ["movie:tmdb:1"]
+        private["activity_state"]["pair_managed_keys"] = {
+            "pmdb-watch": {"watchlist": ["movie:tmdb:1"], "collection": ["movie:tmdb:2"]},
+            "pmdb-custom": {"watchlist": ["movie:tmdb:3"]},
+        }
+        self.state = web._sync_state_store_for(self.profile_id)
+        from src.sync.models import ItemState
+        self.state.commit("pmdb-watch", "watchlist", items={"movie:tmdb:1": ItemState(managed=True)})
+        self.state.commit("pmdb-watch", "collection", items={"movie:tmdb:2": ItemState(managed=True)})
+        self.state.commit("pmdb-custom", "watchlist", items={"movie:tmdb:3": ItemState(managed=True)})
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    @patch("web.PublicMetaDBClient.clear_watchlist", return_value=4865)
+    def test_clears_native_watchlist_and_resets_only_its_ownership(self, clear_watchlist) -> None:
+        response = self.client.post("/api/profile/data/clear-pmdb-watchlist", json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed"], 4865)
+        clear_watchlist.assert_called_once()
+        state = web._profile_store._profiles[self.profile_id]["activity_state"]
+        self.assertEqual(state["pmdb_watchlist_managed_keys"], [])
+        self.assertEqual(state["pair_managed_keys"]["pmdb-watch"], {"collection": ["movie:tmdb:2"]})
+        self.assertEqual(state["pair_managed_keys"]["pmdb-custom"], {"watchlist": ["movie:tmdb:3"]})
+        self.assertFalse(self.state.baseline("pmdb-watch", "watchlist").allows_removals)
+        self.assertTrue(self.state.baseline("pmdb-watch", "collection").allows_removals)
+        self.assertTrue(self.state.baseline("pmdb-custom", "watchlist").allows_removals)
+
+    def test_requires_authentication(self) -> None:
+        self.client.post("/api/profile/logout", json={})
+        self.assertEqual(self.client.post("/api/profile/data/clear-pmdb-watchlist", json={}).status_code, 401)
+
+    @patch("web.PublicMetaDBClient.clear_watchlist")
+    def test_partial_api_failure_reports_removed_count_without_resetting_ownership(self, clear_watchlist) -> None:
+        from src.publicmetadb_client import PublicMetaDBListClearError
+        clear_watchlist.side_effect = PublicMetaDBListClearError("watchlist", 2, RuntimeError("API failed"))
+        response = self.client.post("/api/profile/data/clear-pmdb-watchlist", json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("2 item(s) were removed", response.get_json()["error"])
+        state = web._profile_store._profiles[self.profile_id]["activity_state"]
+        self.assertEqual(state["pmdb_watchlist_managed_keys"], ["movie:tmdb:1"])
+
+
+class ClearPmdbWatchlistUiTests(unittest.TestCase):
+    def test_ui_has_a_confirmed_single_flight_pmdb_watchlist_clear_action(self) -> None:
+        html = Path("templates/index.html").read_text(encoding="utf-8")
+        self.assertIn("Clear PMDB Watchlist", html)
+        self.assertIn("Clear PublicMetaDB Watchlist?", html)
+        self.assertIn("Active sync routes that target the PMDB Watchlist may add items back during the next sync.", html)
+        self.assertIn("/api/profile/data/clear-pmdb-watchlist", html)
+        self.assertIn("if (!button || button.disabled) return false;", html)

@@ -3,10 +3,67 @@ import unittest
 import requests
 
 from src.config import PublicMetaDBConfig
-from src.publicmetadb_client import PublicMetaDBClient
+from src.publicmetadb_client import PublicMetaDBClient, PublicMetaDBListClearError
 
 
 class PublicMetaDBClientTests(unittest.TestCase):
+    def test_clear_watchlist_returns_zero_when_missing_or_empty(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        client.find_list_by_type = lambda kind: None  # type: ignore[method-assign]
+        self.assertEqual(client.clear_watchlist(), 0)
+
+        client.find_list_by_type = lambda kind: {"id": "watchlist-1"}  # type: ignore[method-assign]
+        client.get_list_items = lambda list_id: []  # type: ignore[method-assign]
+        self.assertEqual(client.clear_watchlist(), 0)
+
+    def test_clear_watchlist_reads_every_page_before_removing_anything(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        calls: list[tuple[str, object]] = []
+        client.find_list_by_type = lambda kind: {"id": "watchlist-1"}  # type: ignore[method-assign]
+
+        def fake_get(path: str, params: dict | None = None):
+            calls.append(("get", params))
+            page = int((params or {}).get("page", 1))
+            return {
+                "items": ([{"id": "a"}, {"id": "b"}] if page == 1 else [{"id": "c"}]),
+                "totalPages": 2,
+            }
+
+        client._get = fake_get  # type: ignore[method-assign]
+        client.remove_item_from_list = lambda list_id, item_id: calls.append(("delete", item_id))  # type: ignore[method-assign]
+
+        self.assertEqual(client.clear_watchlist(), 3)
+        self.assertEqual(calls, [
+            ("get", {"page": 1, "perPage": 100}),
+            ("get", {"page": 2, "perPage": 100}),
+            ("delete", "a"), ("delete", "b"), ("delete", "c"),
+        ])
+
+    def test_clear_watchlist_never_deletes_the_list_or_other_pmdb_data(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        client.find_list_by_type = lambda kind: {"id": "native-watchlist"}  # type: ignore[method-assign]
+        client.get_list_items = lambda list_id: [{"id": "watch-item"}]  # type: ignore[method-assign]
+        deleted: list[tuple[str, str]] = []
+        client.remove_item_from_list = lambda list_id, item_id: deleted.append((list_id, item_id))  # type: ignore[method-assign]
+        client.delete_list = lambda list_id: self.fail("clear_watchlist must not delete a list")  # type: ignore[method-assign]
+
+        self.assertEqual(client.clear_watchlist(), 1)
+        self.assertEqual(deleted, [("native-watchlist", "watch-item")])
+
+    def test_clear_watchlist_reports_how_many_items_landed_before_a_failure(self) -> None:
+        client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
+        client.find_list_by_type = lambda kind: {"id": "watchlist-1"}  # type: ignore[method-assign]
+        client.get_list_items = lambda list_id: [{"id": "a"}, {"id": "b"}]  # type: ignore[method-assign]
+
+        def fail_on_second(list_id: str, item_id: str) -> None:
+            if item_id == "b":
+                raise requests.HTTPError("500")
+
+        client.remove_item_from_list = fail_on_second  # type: ignore[method-assign]
+        with self.assertRaises(PublicMetaDBListClearError) as raised:
+            client.clear_watchlist()
+        self.assertEqual(raised.exception.removed, 1)
+
     def test_dropped_shows_use_native_dropped_endpoints(self) -> None:
         client = PublicMetaDBClient(PublicMetaDBConfig(api_key="pmdb-key"))
         calls: list[tuple[str, object]] = []

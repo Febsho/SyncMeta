@@ -445,6 +445,18 @@ class SyncStateStore:
                     self._save_locked()
             return len(doomed)
 
+    def forget_category(self, route_id: str, category: str, save: bool = True) -> bool:
+        """Drop one route/category baseline without disturbing its other routes."""
+        key = (str(route_id), str(category))
+        with self._lock:
+            if key not in self._baselines:
+                return False
+            self._baselines.pop(key, None)
+            self._dirty = True
+            if save:
+                self._save_locked()
+            return True
+
     def prune_to(self, route_ids, save: bool = True) -> int:
         """Forget every route not in ``route_ids``."""
         keep = {str(value) for value in route_ids or ()}

@@ -64,6 +64,15 @@ class PublicMetaDBStats:
     list_write_failures: int = 0
 
 
+class PublicMetaDBListClearError(RuntimeError):
+    """A list clear stopped after some entries had already been removed."""
+
+    def __init__(self, list_id: str, removed: int, cause: Exception):
+        self.list_id = str(list_id)
+        self.removed = int(removed)
+        super().__init__(f"Could not remove every item from list {self.list_id}: {cause}")
+
+
 class PublicMetaDBClient:
     """Client for the PublicMetaDB external API."""
 
@@ -681,3 +690,31 @@ class PublicMetaDBClient:
             self._record_stat("list_write_failures")
             raise
         logger.debug("Removed item %s from list %s", item_id, list_id)
+
+    def clear_list_items(self, list_id: str) -> int:
+        """Remove every item from one existing PMDB list, without deleting it.
+
+        Read the complete list before the first deletion.  Fetching pages while
+        the list shrinks can skip entries as later pages shift forward.
+        """
+        entries = list(self.get_list_items(list_id) or [])
+        removed = 0
+        for entry in entries:
+            item_id = str((entry or {}).get("id") or "").strip()
+            if not item_id:
+                cause = ValueError("list item is missing its id")
+                raise PublicMetaDBListClearError(list_id, removed, cause)
+            try:
+                self.remove_item_from_list(list_id, item_id)
+            except Exception as exc:
+                raise PublicMetaDBListClearError(list_id, removed, exc) from exc
+            removed += 1
+        return removed
+
+    def clear_watchlist(self) -> int:
+        """Empty PMDB's native Watchlist while keeping the list itself."""
+        watchlist = self.find_list_by_type("watchlist")
+        if not isinstance(watchlist, dict):
+            return 0
+        list_id = str(watchlist.get("id") or "").strip()
+        return self.clear_list_items(list_id) if list_id else 0

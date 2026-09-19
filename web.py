@@ -65,7 +65,7 @@ from src.anilist_client import (
 from src.matcher import ItemMatcher
 from src.mdblist_client import MdbListClient
 from src import fribb_client
-from src.publicmetadb_client import PublicMetaDBClient
+from src.publicmetadb_client import PublicMetaDBClient, PublicMetaDBListClearError
 from src.profile_store import ProfileStore, merge_credentials, normalize_credentials, normalize_profile_options
 from src.oauth_credentials import get_oauth_app_credentials, hosted_oauth_status
 from src.simkl_client import SimklClient
@@ -4417,6 +4417,39 @@ def api_profile_data_delete_pmdb_lists():
         stored["last_results"] = []
         _profile_store._save_locked()
     return jsonify({"status": "deleted", "deleted": deleted})
+
+
+@app.route("/api/profile/data/clear-pmdb-watchlist", methods=["POST"])
+def api_profile_data_clear_pmdb_watchlist():
+    """Manually empty only PMDB's native Watchlist, never the list object."""
+    profile_id = _current_profile_id()
+    profile = _current_private_profile()
+    if not profile_id or not profile:
+        return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
+    if profile.get("sync_running"):
+        return _json_error("Wait for the current sync to finish", 409)
+    config = _config_from_profile(profile)
+    if not config.pmdb.api_key:
+        return _json_error("PublicMetaDB needs an API key before its Watchlist can be cleared", 409)
+    try:
+        removed = PublicMetaDBClient(config.pmdb).clear_watchlist()
+    except PublicMetaDBListClearError as exc:
+        logger.warning("PMDB Watchlist clear stopped after %d removals for profile %s", exc.removed, profile_id[:8])
+        return _json_error(f"PMDB Watchlist clear stopped after {exc.removed} item(s) were removed: {exc}", 502)
+    except Exception as exc:
+        logger.exception("Could not clear PMDB Watchlist for profile %s", profile_id[:8])
+        return _json_error(f"Could not clear PMDB Watchlist: {exc}", 502)
+
+    route_ids = _profile_store.clear_pmdb_watchlist_ownership(profile_id)
+    routes_reset = 0
+    try:
+        state_store = _sync_state_store_for(profile_id)
+        for pair_id in route_ids:
+            if state_store.forget_category(pair_id, CATEGORY_WATCHLIST):
+                routes_reset += 1
+    except Exception:
+        logger.warning("Cleared PMDB Watchlist but could not reset its route baselines for %s", profile_id[:8], exc_info=True)
+    return jsonify({"status": "cleared", "removed": removed, "routes_reset": routes_reset})
 
 
 _NOTIFICATION_CHANNELS = {"discord", "ntfy", "gotify", "webhook"}

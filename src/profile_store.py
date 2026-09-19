@@ -2712,6 +2712,44 @@ class ProfileStore:
             profile["activity_state"] = state
             self._save_locked()
 
+    def clear_pmdb_watchlist_ownership(self, profile_id: str) -> list[str]:
+        """Forget ownership only for routes writing to PMDB's native Watchlist.
+
+        A manual Watchlist clear must not make a later managed sync infer that
+        deleted entries are still present.  Other categories and destinations
+        retain their independent ownership records.
+        """
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            state = _normalize_activity_state(profile.get("activity_state"))
+            managed = dict(state.get("pair_managed_keys") or {})
+            affected: list[str] = []
+            for pair in (profile.get("options") or {}).get("sync_pairs") or []:
+                if not isinstance(pair, dict):
+                    continue
+                if str(pair.get("target") or "").strip().lower() != "pmdb":
+                    continue
+                categories = {str(value).strip().lower() for value in pair.get("categories") or []}
+                destination = str(pair.get("target_list") or "").strip().lower()
+                if "watchlist" not in categories or destination not in {"", "watchlist"}:
+                    continue
+                pair_id = str(pair.get("pair_id") or "").strip()
+                if not pair_id:
+                    continue
+                category_keys = dict(managed.get(pair_id) or {})
+                category_keys.pop("watchlist", None)
+                if category_keys:
+                    managed[pair_id] = category_keys
+                else:
+                    managed.pop(pair_id, None)
+                affected.append(pair_id)
+            state["pmdb_watchlist_managed_keys"] = []
+            state["pair_managed_keys"] = managed
+            profile["activity_state"] = state
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
+            return affected
+
     def update_sync_status(self, profile_id: str, status: str) -> None:
         # Returns nothing on purpose: this fires from the pipeline's status
         # callback many times per run and every caller discards the result, so
