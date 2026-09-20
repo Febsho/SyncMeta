@@ -3076,6 +3076,13 @@ def api_profile_connections_check():
         app_credentials = get_oauth_app_credentials(provider, credentials)
         credentials[provider]["client_id"] = str(app_credentials["client_id"])
         credentials[provider]["client_secret"] = str(app_credentials["client_secret"])
+    # SIMKL AUTH V2 is registered separately from the legacy client.  A V2
+    # profile must be checked with the V2 app ID or the connection checker
+    # incorrectly reports a valid hosted V2 connection as unconfigured.
+    if credentials["simkl"].get("auth_version") == "v2":
+        simkl_v2_app = get_simkl_v2_app_credentials(credentials)
+        credentials["simkl"]["client_id"] = str(simkl_v2_app["client_id"])
+        credentials["simkl"]["client_secret"] = str(simkl_v2_app["client_secret"])
     force = bool(body.get("force", True)) or has_draft
     cached = private_profile.get("connection_health") or {}
     checks_by_provider: dict[str, dict] = {}

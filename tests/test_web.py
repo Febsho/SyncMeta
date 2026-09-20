@@ -362,6 +362,30 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.get_json()["checks"][0]["message"], "cached")
         check_connections_mock.assert_not_called()
 
+    @patch("web.check_connections")
+    def test_connection_check_uses_hosted_simkl_v2_app(self, check_connections_mock) -> None:
+        credentials = _blank_credentials()
+        credentials["simkl"].update({
+            "auth_version": "v2",
+            "access_token": "user-access-token",
+            "refresh_token": "user-refresh-token",
+        })
+        profile = web._profile_store.create_profile("secret", credentials, {"auto_sync": False, "media_types": ["movies"]})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+        check_connections_mock.return_value = [{
+            "provider": "simkl", "status": "healthy", "code": "ok", "message": "checked",
+            "checked_at": "2026-08-03T12:00:00+00:00",
+            "capabilities": {"readable": True, "writable": True}, "identity": "", "recovery_action": "none",
+        }]
+
+        with patch.dict(os.environ, {"SIMKL_V2_CLIENT_ID": "hosted-v2-id", "SIMKL_V2_CLIENT_SECRET": "hosted-v2-secret"}, clear=False):
+            response = self.client.post("/api/profile/connections/check", json={"providers": ["simkl"]})
+
+        self.assertEqual(response.status_code, 200)
+        checked_credentials = check_connections_mock.call_args.args[0]
+        self.assertEqual("hosted-v2-id", checked_credentials["simkl"]["client_id"])
+        self.assertEqual("hosted-v2-secret", checked_credentials["simkl"]["client_secret"])
+
     def test_connection_readiness_reports_missing_and_bad_pairs(self) -> None:
         profile = {
             "credentials": _blank_credentials(),

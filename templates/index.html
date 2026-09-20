@@ -2971,7 +2971,11 @@
     }
 
     function isSimklLinked() {
-      return !!(el('simkl-client-id').value.trim() && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved'));
+      // Hosted app IDs intentionally never cross into the profile or browser.
+      // Once AUTH V2 has saved a user token, treating an empty manual input as
+      // "not connected" prevented the source picker from loading its lists.
+      return !!((hostedOAuth.simkl || el('simkl-client-id').value.trim() || el('simkl-v2-client-id').value.trim())
+        && hasSecretInputOrSaved('simkl-access-token', 'simkl', 'access_token_saved'));
     }
 
     function isAniListLinked() {
@@ -3065,7 +3069,8 @@
     }
 
     function isTraktConnected() {
-      return !!(el('trakt-client-id').value.trim() && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved'));
+      return !!((hostedOAuth.trakt || el('trakt-client-id').value.trim())
+        && hasSecretInputOrSaved('trakt-access-token', 'trakt', 'access_token_saved'));
     }
 
     function isTraktWatchlistEnabled(mediaType) {
