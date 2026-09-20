@@ -15,7 +15,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.security import check_password_hash, generate_password_hash
-from .oauth_credentials import get_oauth_app_credentials
+from .oauth_credentials import get_oauth_app_credentials, get_simkl_v2_app_credentials
 
 from .config import ANILIST_DEFAULT_SELECTED_STATUSES, SIMKL_DEFAULT_SELECTED_STATUSES
 
@@ -345,7 +345,9 @@ def _result_totals(rows: list[dict] | None) -> dict[str, int]:
 
 def _configured_sources_for_profile(profile: dict) -> list[str]:
     credentials = normalize_credentials(profile.get("credentials"))
-    simkl_app = get_oauth_app_credentials("simkl", credentials)
+    simkl_app = (get_simkl_v2_app_credentials(credentials)
+                 if credentials["simkl"].get("auth_version") == "v2"
+                 else get_oauth_app_credentials("simkl", credentials))
     trakt_app = get_oauth_app_credentials("trakt", credentials)
     options = normalize_profile_options(profile.get("options"))
     sources: list[str] = []
@@ -443,7 +445,12 @@ def normalize_credentials(credentials: dict | None) -> dict:
         "simkl": {
             "client_id": str(simkl.get("client_id", "")).strip(),
             "client_secret": str(simkl.get("client_secret", "")).strip(),
+            "v2_client_id": str(simkl.get("v2_client_id", "")).strip(),
+            "v2_client_secret": str(simkl.get("v2_client_secret", "")).strip(),
             "access_token": str(simkl.get("access_token", "")).strip(),
+            "refresh_token": str(simkl.get("refresh_token", "")).strip(),
+            "access_token_expires_at": str(simkl.get("access_token_expires_at", simkl.get("expires_at", ""))).strip(),
+            "auth_version": "v2" if str(simkl.get("auth_version", "")).strip().lower() == "v2" else "v1",
             "selected_statuses": _normalize_simkl_selected_statuses(simkl.get("selected_statuses")),
         },
         "anilist": {
@@ -491,7 +498,12 @@ def public_credentials(credentials: dict | None) -> dict:
         "simkl": {
             "client_id": raw["simkl"]["client_id"],
             "client_secret_saved": bool(raw["simkl"]["client_secret"]),
+            "v2_client_id": raw["simkl"]["v2_client_id"],
+            "v2_client_secret_saved": bool(raw["simkl"]["v2_client_secret"]),
             "access_token_saved": bool(raw["simkl"]["access_token"]),
+            "refresh_token_saved": bool(raw["simkl"]["refresh_token"]),
+            "access_token_expires_at": raw["simkl"]["access_token_expires_at"],
+            "auth_version": raw["simkl"]["auth_version"],
             "selected_statuses": copy.deepcopy(raw["simkl"]["selected_statuses"]),
         },
         "anilist": {
@@ -682,7 +694,12 @@ def merge_credentials(existing: dict | None, updates: dict | None) -> dict:
         "simkl": {
             "client_id": incoming["simkl"]["client_id"],
             "client_secret": keep_secret("simkl", "client_secret"),
+            "v2_client_id": incoming["simkl"]["v2_client_id"] or current["simkl"]["v2_client_id"],
+            "v2_client_secret": keep_secret("simkl", "v2_client_secret"),
             "access_token": keep_secret("simkl", "access_token"),
+            "refresh_token": keep_secret("simkl", "refresh_token"),
+            "access_token_expires_at": incoming["simkl"]["access_token_expires_at"] or current["simkl"]["access_token_expires_at"],
+            "auth_version": incoming["simkl"]["auth_version"] if incoming["simkl"]["access_token"] or incoming["simkl"]["refresh_token"] else current["simkl"]["auth_version"],
             "selected_statuses": incoming["simkl"]["selected_statuses"],
         },
         "anilist": {
@@ -922,7 +939,10 @@ def _migrate_legacy_pipeline_pairs(credentials: dict, options: dict) -> dict:
                 simkl_categories.append(category)
     if migrated.get("activity_history_source") == "simkl":
         simkl_categories.append("history")
-    if get_oauth_app_credentials("simkl", credentials)["client_id"] and credentials["simkl"]["access_token"]:
+    simkl_app = (get_simkl_v2_app_credentials(credentials)
+                 if credentials["simkl"].get("auth_version") == "v2"
+                 else get_oauth_app_credentials("simkl", credentials))
+    if simkl_app["client_id"] and credentials["simkl"]["access_token"]:
         add_or_merge("simkl", simkl_categories, simkl_lists, migrated.get("simkl_visibility", "private"))
 
     anilist_lists = [f"status:{status}" for status in credentials["anilist"]["selected_statuses"]]
@@ -1812,6 +1832,33 @@ class ProfileStore:
     def get_private_profile_by_id(self, profile_id: str) -> dict:
         with self._lock:
             return copy.deepcopy(self._get_profile_locked(profile_id))
+
+    def update_simkl_auth(self, profile_id: str, *, access_token: str,
+                          refresh_token: str, access_token_expires_at: str,
+                          auth_version: str = "v2", v2_client_id: str = "",
+                          v2_client_secret: str = "", selected_statuses: dict | None = None) -> None:
+        """Persist a V2 token rotation without touching profile options/pairs."""
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            credentials = normalize_credentials(profile.get("credentials"))
+            credentials["simkl"].update({
+                "access_token": str(access_token or "").strip(),
+                "refresh_token": str(refresh_token or "").strip(),
+                "access_token_expires_at": str(access_token_expires_at or "").strip(),
+                "auth_version": "v2" if auth_version == "v2" else "v1",
+            })
+            if v2_client_id:
+                credentials["simkl"]["v2_client_id"] = str(v2_client_id).strip()
+            if v2_client_secret:
+                credentials["simkl"]["v2_client_secret"] = str(v2_client_secret).strip()
+            # Device authentication is a save boundary.  Persist the status
+            # choices the user just made with the connection, so a V2 reconnect
+            # cannot leave Movies only in the browser draft.
+            if selected_statuses is not None:
+                credentials["simkl"]["selected_statuses"] = _normalize_simkl_selected_statuses(selected_statuses)
+            profile["credentials"] = credentials
+            profile["updated_at"] = utc_now_iso()
+            self._save_locked()
 
     def update_profile(self, profile_id: str, password: str, credentials: dict, options: dict) -> dict:
         normalized_options = normalize_profile_options(options)

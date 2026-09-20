@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
@@ -57,6 +57,17 @@ SIMKL_API_TYPE_MAP = {
 SIMKL_APP_NAME = "syncmeta"
 SIMKL_APP_VERSION = "1.0"
 SIMKL_USER_AGENT = "SyncMeta/1.0"
+SIMKL_V2_SCOPE = "media:read media:write"
+SIMKL_V2_EXPIRY_SKEW = timedelta(minutes=5)
+
+
+class SimklApiError(RuntimeError):
+    """Preserves SIMKL's machine-readable API error for UI-facing callers."""
+
+    def __init__(self, error: str, message: str = "", status_code: int = 0):
+        self.error = str(error or "api_error")
+        self.status_code = int(status_code or 0)
+        super().__init__(message or self.error)
 
 SIMKL_NORMALIZED_STATUS_MAP = {
     "watching": SIMKL_STATUS_WATCHING,
@@ -89,7 +100,7 @@ def _safe_lookup_int(value: object) -> int | None:
 
 
 class SimklClient:
-    """Client for the SIMKL API v2."""
+    """Client for SIMKL user APIs; AUTH V1 and AUTH V2 are distinct flows."""
 
     def __init__(self, config: SimklConfig, cancel_requested_callback=None):
         self._config = config
@@ -154,13 +165,15 @@ class SimklClient:
         return merged
 
     def _get(self, path: str, params: dict | None = None) -> dict | list | None:
+        self._ensure_v2_access_token()
         url = f"{self._config.base_url}{path}"
         logger.debug("GET %s params=%s", url, params)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
         resp = self._session.get(url, params=self._request_params(params), timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
-        resp.raise_for_status()
+        if not resp.ok:
+            self._raise_api_error(resp)
         if resp.status_code == 204 or not resp.text:
             return None
         return resp.json()
@@ -173,19 +186,88 @@ class SimklClient:
         )
 
     def _post_once(self, path: str, data: dict) -> dict | list | None:
+        self._ensure_v2_access_token()
         url = f"{self._config.base_url}{path}"
         logger.debug("POST %s", url)
         self._check_cancelled()
         self._limiter.wait(self._cancel_requested_callback)
         resp = self._session.post(url, params=self._request_params(), json=data, timeout=REQUEST_TIMEOUT)
         self._check_cancelled()
-        resp.raise_for_status()
+        if not resp.ok:
+            self._raise_api_error(resp)
         if resp.status_code == 204 or not resp.text:
             return None
         try:
             return resp.json()
         except ValueError:
             return None
+
+    @staticmethod
+    def _raise_api_error(resp) -> None:
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        raise SimklApiError(payload.get("error", "http_error"),
+                            payload.get("message") or payload.get("error_description") or resp.text,
+                            resp.status_code)
+
+    def _oauth2_post(self, path: str, data: dict) -> dict:
+        """OAuth V2 is form-encoded and must not inherit API URL parameters."""
+        url = f"{self._config.base_url}{path}"
+        response = self._session.post(url, data={k: str(v) for k, v in data.items() if v is not None},
+                                      timeout=REQUEST_TIMEOUT)
+        if not response.ok:
+            self._raise_api_error(response)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise SimklApiError("invalid_response", "SIMKL returned an invalid OAuth response")
+        return payload
+
+    def _ensure_v2_access_token(self) -> None:
+        if self._config.auth_version != "v2" or not self._config.refresh_token:
+            return
+        try:
+            expires_at = datetime.fromisoformat(self._config.access_token_expires_at.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at > datetime.now(timezone.utc) + SIMKL_V2_EXPIRY_SKEW:
+            return
+        self.refresh_access_token()
+
+    def refresh_access_token(self) -> dict:
+        if not self._config.refresh_token:
+            raise SimklApiError("missing_refresh_token", "SIMKL AUTH V2 refresh token is missing")
+        token = self._oauth2_post("/oauth2/token", {
+            "grant_type": "refresh_token", "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret or None,
+            "refresh_token": self._config.refresh_token,
+        })
+        return self._apply_v2_tokens(token)
+
+    def _apply_v2_tokens(self, token: dict) -> dict:
+        access_token = str(token.get("access_token") or "").strip()
+        refresh_token = str(token.get("refresh_token") or self._config.refresh_token or "").strip()
+        if not access_token or not refresh_token:
+            raise SimklApiError("invalid_token_response", "SIMKL did not return AUTH V2 tokens")
+        try:
+            expires_in = int(token.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            expires_in = 0
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat() if expires_in else ""
+        self._config.access_token = access_token
+        self._config.refresh_token = refresh_token
+        self._config.access_token_expires_at = expires_at
+        self._config.auth_version = "v2"
+        self._session.headers["Authorization"] = f"Bearer {access_token}"
+        callback = self._config.token_refreshed_callback
+        if callback:
+            callback(access_token, refresh_token, expires_at)
+        return {**token, "access_token_expires_at": expires_at}
 
     # ── Write API ──────────────────────────────────────────────────
     #
@@ -377,7 +459,36 @@ class SimklClient:
     def remove_from_history(self, items: list[dict]) -> dict:
         return self._sync_write("/sync/history/remove", items, episode_scoped=True)
 
-    # ── Authentication (PIN flow) ──────────────────────────────────
+    # ── Authentication ─────────────────────────────────────────────
+
+    def request_device_authorization(self) -> dict:
+        """Start AUTH V2's RFC 8628 device flow (not the legacy PIN API)."""
+        data = self._oauth2_post("/oauth2/device", {
+            "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret or None,
+            "scope": SIMKL_V2_SCOPE,
+        })
+        if not data.get("device_code") or not data.get("user_code"):
+            raise SimklApiError("invalid_device_response", "SIMKL did not return a device code")
+        return data
+
+    def poll_device_authorization(self, device_code: str) -> dict:
+        """Poll AUTH V2 and return either a pending OAuth error or saved tokens."""
+        try:
+            token = self._oauth2_post("/oauth2/token", {
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "client_id": self._config.client_id,
+                "client_secret": self._config.client_secret or None,
+                "device_code": device_code,
+            })
+        except SimklApiError as exc:
+            if exc.error in {"authorization_pending", "slow_down", "expired_token"}:
+                return {"status": "pending" if exc.error != "expired_token" else "expired", "error": exc.error}
+            raise
+        return {"status": "approved", **self._apply_v2_tokens(token)}
+
+    # AUTH V1 PIN methods are intentionally retained only for existing/manual
+    # V1 connections. New connections use the V2 methods above.
 
     def request_pin(self) -> dict:
         """Request a SIMKL PIN/device-code payload."""

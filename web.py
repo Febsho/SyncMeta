@@ -67,8 +67,8 @@ from src.mdblist_client import MdbListClient
 from src import fribb_client
 from src.publicmetadb_client import PublicMetaDBClient, PublicMetaDBListClearError
 from src.profile_store import ProfileStore, merge_credentials, normalize_credentials, normalize_profile_options
-from src.oauth_credentials import get_oauth_app_credentials, hosted_oauth_status
-from src.simkl_client import SimklClient
+from src.oauth_credentials import get_oauth_app_credentials, get_simkl_v2_app_credentials, hosted_oauth_status
+from src.simkl_client import SimklClient, SimklApiError
 from src.tmdb_client import TmdbClient, TmdbError, normalize_media_type as tmdb_media_kind
 from src.sync_service import SyncCancelled, SyncService, SyncStats, _status_list_name
 from src.trakt_client import TraktAuthenticationError, TraktClient
@@ -585,6 +585,7 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
     simkl_app = get_oauth_app_credentials("simkl", credentials)
     trakt_app = get_oauth_app_credentials("trakt", credentials)
     mdblist_app = get_oauth_app_credentials("mdblist", credentials)
+    simkl_v2_app = _resolved_simkl_v2_app(profile)
     options = normalize_profile_options(profile.get("options"))
     activity_state = profile.get("activity_state", {}) if isinstance(profile.get("activity_state"), dict) else {}
     anilist_username = credentials["anilist"]["username"]
@@ -601,8 +602,18 @@ def _config_from_profile(profile: dict, dry_run: bool = False, sync_modes: dict 
 
     return AppConfig(
         simkl=SimklConfig(
-            client_id=str(simkl_app["client_id"]), client_secret=str(simkl_app["client_secret"]),
+            client_id=str(simkl_v2_app["client_id"] if credentials["simkl"].get("auth_version") == "v2" else simkl_app["client_id"]),
+            client_secret=str(simkl_v2_app["client_secret"] if credentials["simkl"].get("auth_version") == "v2" else simkl_app["client_secret"]),
             access_token=credentials["simkl"]["access_token"],
+            refresh_token=credentials["simkl"].get("refresh_token", ""),
+            access_token_expires_at=credentials["simkl"].get("access_token_expires_at", ""),
+            auth_version=credentials["simkl"].get("auth_version", "v1"),
+            token_refreshed_callback=(
+                lambda at, rt, exp: _profile_store.update_simkl_auth(
+                    str(profile.get("profile_id") or ""), access_token=at,
+                    refresh_token=rt, access_token_expires_at=exp,
+                )
+            ) if profile.get("profile_id") else None,
             selected_statuses=credentials["simkl"]["selected_statuses"],
         ),
         anilist=AniListConfig(
@@ -2315,21 +2326,30 @@ def _resolved_oauth_app(provider: str, private_profile: dict | None) -> dict[str
     return get_oauth_app_credentials(provider, credentials)
 
 
-@app.route("/api/simkl/pin/start", methods=["POST"])
-def api_simkl_pin_start():
+def _resolved_simkl_v2_app(private_profile: dict | None) -> dict[str, str | bool]:
+    """AUTH V2 uses a separately registered client; never reuse V1's ID."""
+    return get_simkl_v2_app_credentials(normalize_credentials((private_profile or {}).get("credentials")))
+
+
+_simkl_device_authorizations: dict[str, dict] = {}
+
+
+@app.route("/api/simkl/device/start", methods=["POST"])
+def api_simkl_device_start():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    app_credentials = _resolved_oauth_app("simkl", private_profile)
-    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
+    app_credentials = _resolved_simkl_v2_app(private_profile)
+    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("v2_client_id") or app_credentials["client_id"]).strip()
 
     if not client_id:
         return _json_error("SIMKL client ID is required", 400)
 
     try:
-        client = SimklClient(SimklConfig(client_id=client_id))
-        pin_data = client.request_pin()
+        client_secret = str(app_credentials["client_secret"] if app_credentials["hosted"] else body.get("v2_client_secret") or app_credentials["client_secret"]).strip()
+        client = SimklClient(SimklConfig(client_id=client_id, client_secret=client_secret, auth_version="v2"))
+        pin_data = client.request_device_authorization()
     except Exception as exc:
-        logger.exception("Failed to start SIMKL PIN auth")
+        logger.exception("Failed to start SIMKL AUTH V2 device auth")
         return _json_error(
             f"Failed to start SIMKL auth: {exc}",
             400,
@@ -2339,31 +2359,34 @@ def api_simkl_pin_start():
 
     response = {
         "user_code": pin_data.get("user_code"),
-        "verification_url": pin_data.get("verification_url"),
+        "verification_url": pin_data.get("verification_uri_complete") or pin_data.get("verification_uri"),
         "interval": pin_data.get("interval", 5),
         "expires_in": pin_data.get("expires_in", 900),
     }
-    return jsonify(response)
+    handle = secrets.token_urlsafe(24)
+    _simkl_device_authorizations[handle] = {
+        "profile_id": _current_profile_id(), "client": client,
+        "device_code": pin_data["device_code"], "expires_at": time.time() + int(pin_data.get("expires_in") or 900),
+        "v2_client_id": client_id, "v2_client_secret": client_secret,
+        "selected_statuses": body.get("selected_statuses"),
+    }
+    return jsonify({**response, "device_handle": handle})
 
 
-@app.route("/api/simkl/pin/check", methods=["POST"])
-def api_simkl_pin_check():
+@app.route("/api/simkl/device/check", methods=["POST"])
+def api_simkl_device_check():
     body = request.get_json(silent=True) or {}
     private_profile = _current_private_profile()
-    app_credentials = _resolved_oauth_app("simkl", private_profile)
-    client_id = str(app_credentials["client_id"] if app_credentials["hosted"] else body.get("client_id") or app_credentials["client_id"]).strip()
-    user_code = str(body.get("user_code", "")).strip()
-
-    if not client_id:
-        return _json_error("SIMKL client ID is required", 400)
-    if not user_code:
-        return _json_error("SIMKL user code is required", 400)
+    handle = str(body.get("device_handle", "")).strip()
+    state = _simkl_device_authorizations.get(handle)
+    if not state or state.get("profile_id") != _current_profile_id() or time.time() >= state.get("expires_at", 0):
+        _simkl_device_authorizations.pop(handle, None)
+        return jsonify({"status": "expired"})
 
     try:
-        client = SimklClient(SimklConfig(client_id=client_id))
-        check = client.check_pin(user_code) or {}
+        check = state["client"].poll_device_authorization(state["device_code"]) or {}
     except Exception as exc:
-        logger.exception("Failed to check SIMKL PIN auth")
+        logger.exception("Failed to check SIMKL AUTH V2 device auth")
         return _json_error(
             f"Failed to check SIMKL auth: {exc}",
             400,
@@ -2371,16 +2394,50 @@ def api_simkl_pin_check():
             hint=_derive_provider_hint("SIMKL", exc),
         )
 
-    if check.get("result") == "OK" and check.get("access_token"):
-        return jsonify({
-            "status": "approved",
-            "access_token": check["access_token"],
-        })
+    if check.get("status") == "approved":
+        profile_id = str(state["profile_id"])
+        _profile_store.update_simkl_auth(profile_id, access_token=state["client"]._config.access_token,
+                                         refresh_token=state["client"]._config.refresh_token,
+                                         access_token_expires_at=state["client"]._config.access_token_expires_at,
+                                         v2_client_id=state.get("v2_client_id", ""),
+                                         v2_client_secret=state.get("v2_client_secret", ""),
+                                         selected_statuses=state.get("selected_statuses"))
+        _simkl_device_authorizations.pop(handle, None)
+        return jsonify({"status": "approved", "auth_version": "v2"})
 
     return jsonify({
-        "status": "pending",
-        "message": check.get("message", ""),
+        "status": check.get("status", "pending"),
+        "error": check.get("error", ""),
     })
+
+
+# Compatibility-only AUTH V1 endpoints.  The UI never calls these; retained so
+# old local clients can complete an already-started legacy PIN connection.
+@app.route("/api/simkl/pin/start", methods=["POST"])
+def api_simkl_v1_pin_start():
+    body = request.get_json(silent=True) or {}
+    app_credentials = _resolved_oauth_app("simkl", _current_private_profile())
+    client_id = str(body.get("client_id") or app_credentials["client_id"]).strip()
+    if not client_id:
+        return _json_error("SIMKL client ID is required", 400)
+    try:
+        data = SimklClient(SimklConfig(client_id=client_id)).request_pin()
+    except Exception as exc:
+        return _json_error(f"Failed to start SIMKL AUTH V1 PIN auth: {exc}", 400, provider="SIMKL")
+    return jsonify({key: data.get(key) for key in ("user_code", "verification_url", "interval", "expires_in")})
+
+
+@app.route("/api/simkl/pin/check", methods=["POST"])
+def api_simkl_v1_pin_check():
+    body = request.get_json(silent=True) or {}
+    client_id, user_code = str(body.get("client_id", "")).strip(), str(body.get("user_code", "")).strip()
+    if not client_id or not user_code:
+        return _json_error("SIMKL client ID and user code are required", 400)
+    try:
+        check = SimklClient(SimklConfig(client_id=client_id)).check_pin(user_code) or {}
+    except Exception as exc:
+        return _json_error(f"Failed to check SIMKL AUTH V1 PIN auth: {exc}", 400, provider="SIMKL")
+    return jsonify({"status": "approved", "access_token": check["access_token"]} if check.get("result") == "OK" and check.get("access_token") else {"status": "pending", "message": check.get("message", "")})
 
 
 @app.route("/api/anilist/auth/start", methods=["POST"])
@@ -4922,6 +4979,7 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
     """Collection capabilities for List Sync, kept out of frontend conditionals."""
     sources = []
     destinations = []
+    notices = []
     for provider, adapter in _build_provider_adapters(config, profile_id=profile_id).items():
         if provider in {"pmdb", "mdblist", "simkl", "anilist", "trakt"}:
             for entry in adapter.safe_list_sources():
@@ -4949,6 +5007,8 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
                     "supportsTwoWay": provider in {"pmdb", "mdblist", "trakt"} and kind == "list",
                     "semanticStatus": provider in {"simkl", "anilist"} and kind == "status",
                 })
+            if provider == "simkl" and getattr(adapter, "custom_lists_error", ""):
+                notices.append({"provider": "simkl", "message": adapter.custom_lists_error})
         if provider in {"pmdb", "mdblist"}:
             for entry in adapter.safe_target_lists():
                 if not str(entry.get("key") or "").startswith("list:"):
@@ -4960,7 +5020,7 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
                     "personal": True, "supportsCreate": True, "supportsRemove": True,
                     "supportsTwoWay": True, "semanticStatus": False,
                 })
-    return {"sources": sources, "destinations": destinations}
+    return {"sources": sources, "destinations": destinations, "notices": notices}
 
 
 @app.route("/api/profile/list-sync/capabilities", methods=["POST"])

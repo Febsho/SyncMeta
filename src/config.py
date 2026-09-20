@@ -30,6 +30,12 @@ class SimklConfig:
     client_id: str = ""
     client_secret: str = ""
     access_token: str = ""
+    refresh_token: str = ""
+    access_token_expires_at: str = ""
+    auth_version: str = "v1"
+    # Runtime-only callback supplied by the profile owner.  It keeps refreshed
+    # OAuth V2 credentials encrypted in the profile store.
+    token_refreshed_callback: object | None = None
     selected_statuses: dict[str, list[str]] = field(
         default_factory=lambda: {key: list(values) for key, values in SIMKL_DEFAULT_SELECTED_STATUSES.items()}
     )

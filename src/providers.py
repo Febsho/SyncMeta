@@ -1068,6 +1068,7 @@ class SimklAdapter(ProviderAdapter):
         # only for this adapter lifetime so repeated rendering does not make
         # another index request, while a later adapter can see renamed lists.
         self._custom_lists_cache: list[dict] | None = None
+        self.custom_lists_error = ""
 
     #: SIMKL's own list names, with the neutral category each maps onto.
     _STATUSES = (
@@ -1078,6 +1079,17 @@ class SimklAdapter(ProviderAdapter):
         ("dropped", "Dropped", CATEGORY_DROPPED),
     )
     _MEDIA_LABELS = {"shows": "Series", "movies": "Movies", "anime": "Anime"}
+
+    def _custom_list_error_message(self, exc: Exception) -> str:
+        error = str(getattr(exc, "error", "") or "").lower()
+        text = str(exc).lower()
+        if error == "oauth2_token_required" or "oauth2_token_required" in text:
+            return "SIMKL Custom Lists require reconnecting SIMKL with AUTH V2."
+        if error == "premium_only" or "premium_only" in text:
+            return "Custom Lists require SIMKL PRO or VIP."
+        if error in {"missing_refresh_token", "invalid_token", "expired_token", "user_token_required"} or "token" in text:
+            return "SIMKL Custom Lists need a valid SIMKL connection."
+        return "SIMKL Custom Lists could not be loaded."
 
     def list_sources(self) -> list[dict]:
         out = []
@@ -1094,9 +1106,11 @@ class SimklAdapter(ProviderAdapter):
         if self._custom_lists_cache is None:
             try:
                 self._custom_lists_cache = list(self._client.get_custom_lists() or [])
-            except Exception:
+                self.custom_lists_error = ""
+            except Exception as exc:
                 logger.warning("SIMKL: could not enumerate custom lists", exc_info=True)
                 self._custom_lists_cache = []
+                self.custom_lists_error = self._custom_list_error_message(exc)
         custom_lists = self._custom_lists_cache
         seen: set[str] = set()
         for entry in custom_lists:

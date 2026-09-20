@@ -1655,7 +1655,7 @@
               <div class="conn-grid">
                 <div class="conn-card form-section" id="connection-card-simkl">
                   <div class="conn-card-title"><span class="dot" id="dot-simkl"></span> SIMKL</div>
-                  <div class="conn-card-desc">Movies, shows, anime, watch history, and PIN auth.</div>
+                  <div class="conn-card-desc" id="simkl-connection-version">Movies, shows, anime, watch history, and AUTH V2 device auth.</div>
                   <div class="hint manual-oauth" style="margin-bottom:10px">Create an app at <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>, then paste the credentials below. Use the redirect URL if asked.</div>
                   <div class="form-row manual-oauth">
                     <label for="simkl-redirect-url">Redirect URL</label>
@@ -1666,19 +1666,21 @@
                   </div>
                   <div class="form-row manual-oauth"><label for="simkl-client-id">Client ID</label><input type="text" id="simkl-client-id" placeholder="From simkl.com/settings/developer" autocomplete="off"></div>
                   <div class="form-row manual-oauth"><label for="simkl-client-secret">Client Secret</label><input type="password" id="simkl-client-secret" placeholder="Optional" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="simkl-v2-client-id">AUTH V2 Client ID</label><input type="text" id="simkl-v2-client-id" placeholder="New AUTH V2 app ID" autocomplete="off"></div>
+                  <div class="form-row manual-oauth"><label for="simkl-v2-client-secret">AUTH V2 Client Secret</label><input type="password" id="simkl-v2-client-secret" placeholder="Only for Server apps & services" autocomplete="off"></div>
                   <div class="form-row"><label for="simkl-access-token">Access Token</label><input type="password" id="simkl-access-token" placeholder="From PIN auth or OAuth" autocomplete="off"></div>
                   <div class="actions-bar" style="margin-top:0">
-                    <button class="btn btn-sm" id="btn-simkl-auth" onclick="startSimklAuth()">Get SIMKL Token</button>
-                    <span class="actions-meta" id="simkl-auth-status">Start PIN auth here if no token yet.</span>
+                    <button class="btn btn-sm" id="btn-simkl-auth" onclick="startSimklAuth()">Reconnect with AUTH V2</button>
+                    <span class="actions-meta" id="simkl-auth-status">Connect with AUTH V2 to enable Custom Lists.</span>
                   </div>
                   <div class="auth-box hidden" id="simkl-auth-box">
-                    <div class="actions-meta">SIMKL PIN</div>
+                    <div class="actions-meta">SIMKL AUTH V2 DEVICE CODE</div>
                     <div class="auth-code mono" id="simkl-auth-code">-----</div>
                     <div class="actions-bar" style="margin-top:8px">
                       <button class="btn btn-sm" type="button" onclick="copySimklCode()">Copy PIN</button>
                       <button class="btn btn-sm" type="button" onclick="openSimklVerification()">Open SIMKL</button>
                     </div>
-                    <div class="hint">If the SIMKL page doesn't auto-fill, paste the PIN manually.</div>
+                    <div class="hint">Approve the code in SIMKL; tokens stay on this server.</div>
                   </div>
                   <div class="conn-token-error" id="token-error-simkl">
                     <span>⚠</span><span id="token-error-simkl-msg"></span>
@@ -2859,7 +2861,7 @@
 
     function emptySecretState() {
       return {
-        simkl: { client_secret_saved: false, access_token_saved: false },
+        simkl: { client_secret_saved: false, v2_client_secret_saved: false, access_token_saved: false },
         anilist: { client_secret_saved: false, access_token_saved: false },
         trakt: { client_secret_saved: false, access_token_saved: false, refresh_token_saved: false },
         mdblist: { api_key_saved: false, client_secret_saved: false, access_token_saved: false },
@@ -3079,6 +3081,8 @@
         simkl: {
           client_id: el('simkl-client-id').value.trim(),
           client_secret: el('simkl-client-secret').value.trim(),
+          v2_client_id: el('simkl-v2-client-id').value.trim(),
+          v2_client_secret: el('simkl-v2-client-secret').value.trim(),
           access_token: el('simkl-access-token').value.trim(),
           selected_statuses: cloneSimklStatuses(simklSelectedStatuses),
         },
@@ -3205,6 +3209,7 @@
       secretState = {
         simkl: {
           client_secret_saved: !!simkl.client_secret_saved,
+          v2_client_secret_saved: !!simkl.v2_client_secret_saved,
           access_token_saved: !!simkl.access_token_saved,
         },
         anilist: {
@@ -3233,7 +3238,9 @@
       el('profile-id').value = meta.profile_id || '';
       el('profile-password').value = '';
       el('simkl-client-id').value = simkl.client_id || '';
+      el('simkl-v2-client-id').value = simkl.v2_client_id || '';
       setSecretInputState('simkl-client-secret', 'simkl', 'client_secret_saved', 'Optional');
+      setSecretInputState('simkl-v2-client-secret', 'simkl', 'v2_client_secret_saved', 'Only for Server apps & services');
       setSecretInputState('simkl-access-token', 'simkl', 'access_token_saved', 'From PIN auth or OAuth');
       simklSelectedStatuses = normalizeSimklSelectedStatuses(simkl.selected_statuses);
       el('anilist-username').value = anilist.username || '';
@@ -3289,7 +3296,9 @@
       renderMdbListLists();
       if (!loadSimklPinState()) {
         setSimklAuthCode('');
-        setSimklAuthStatus(hasSavedSecret('simkl', 'access_token_saved') ? 'SIMKL access token is stored securely for this profile.' : 'Start PIN auth here if you do not have an access token yet.', false);
+        const isV2 = simkl.auth_version === 'v2';
+        el('simkl-connection-version').textContent = hasSavedSecret('simkl', 'access_token_saved') ? `Connected · AUTH ${isV2 ? 'V2' : 'V1'}${isV2 ? '' : ' · Reconnect to enable Custom Lists'}` : 'Movies, shows, anime, watch history, and AUTH V2 device auth.';
+        setSimklAuthStatus(isV2 ? 'Connected · AUTH V2' : (hasSavedSecret('simkl', 'access_token_saved') ? 'Connected · AUTH V1. Reconnect to enable Custom Lists.' : 'Connect with AUTH V2 to enable Custom Lists.'), false);
       }
       if (!loadTraktDeviceState()) {
         setTraktAuthCode('');
@@ -3945,13 +3954,14 @@
         if (!result.ok) throw new Error(formatApiError(result.data, 'Could not load List Sync capabilities.'));
         const sources = result.data.sources || [];
         const destinations = result.data.destinations || [];
+        const notices = (result.data.notices || []).map(row => `<div class="catalog-note">${esc(row.message || '')}</div>`).join('');
         if (!sources.length || !destinations.length) {
-          editor.innerHTML = '<div class="catalog-note">Connect the source provider and add PMDB or MDBList write access before creating a route.</div>';
+          editor.innerHTML = notices + '<div class="catalog-note">Connect the source provider and add PMDB or MDBList write access before creating a route.</div>';
           return;
         }
         const sourceOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${row.group === 'SIMKL Custom Lists' ? 'Custom List (read-only) · ' : ''}${esc(row.display_name)}</option>`;
         const destinationOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${esc(row.display_name)}</option>`;
-        editor.innerHTML = `<div class="pair-sec-title">Create List Sync route</div>
+        editor.innerHTML = notices + `<div class="pair-sec-title">Create List Sync route</div>
           <div class="pair-opt-grid"><label class="pair-flow-end"><span>Name</span><input class="pair-card-name" id="list-sync-name" placeholder="Weekend Movies"></label>
           <label class="pair-flow-end"><span>Source collection</span><select id="list-sync-source">${sources.map(sourceOption).join('')}</select><button class="btn btn-sm" type="button" id="btn-list-sync-public-anilist">Import public AniList list</button></label>
           <label class="pair-flow-end"><span>Destination list</span><select id="list-sync-destination">${destinations.map(destinationOption).join('')}</select><button class="btn btn-sm" type="button" id="btn-list-sync-new-destination">Create destination list</button></label>
@@ -6325,17 +6335,21 @@
     }
 
     async function startSimklAuth() {
-      const clientId = el('simkl-client-id').value.trim();
+      const clientId = el('simkl-v2-client-id').value.trim();
       if (!hostedOAuth.simkl && !clientId) {
-        showToast('Enter your SIMKL client ID first.', true, false);
+        showToast('Enter your SIMKL AUTH V2 client ID first.', true, false);
         return;
       }
 
       el('btn-simkl-auth').disabled = true;
-      setSimklAuthStatus('Requesting SIMKL PIN...', false);
+      setSimklAuthStatus('Requesting SIMKL AUTH V2 device code...', false);
 
       try {
-        const result = await apiPost('/api/simkl/pin/start', { client_id: clientId });
+        const result = await apiPost('/api/simkl/device/start', {
+          v2_client_id: clientId,
+          v2_client_secret: el('simkl-v2-client-secret').value.trim(),
+          selected_statuses: cloneSimklStatuses(simklSelectedStatuses),
+        });
         if (!result.ok) {
           setSimklAuthStatus(formatApiError(result.data, 'Could not start SIMKL auth.'), true);
           return;
@@ -6343,7 +6357,7 @@
 
         const pin = result.data;
         const state = {
-          client_id: clientId,
+          device_handle: pin.device_handle,
           user_code: pin.user_code,
           verification_url: pin.verification_url,
           interval: pin.interval || 5,
@@ -6351,7 +6365,7 @@
         };
         saveSimklPinState(state);
         setSimklAuthCode(pin.user_code);
-        setSimklAuthStatus(`Approve code ${pin.user_code} on SIMKL. Waiting for confirmation...`, false);
+        setSimklAuthStatus(`Approve AUTH V2 code ${pin.user_code} on SIMKL. Waiting for confirmation...`, false);
         try { await navigator.clipboard.writeText(pin.user_code); showToast(`Code ${pin.user_code} copied — opening SIMKL approval page.`, false, true); } catch {}
         window.open(buildSimklVerifyUrl(pin.verification_url, pin.user_code), '_blank', 'noopener');
         scheduleSimklPinCheck(1000);
@@ -6427,10 +6441,7 @@
       }
 
       try {
-        const result = await apiPost('/api/simkl/pin/check', {
-          client_id: state.client_id,
-          user_code: state.user_code,
-        });
+        const result = await apiPost('/api/simkl/device/check', { device_handle: state.device_handle });
 
         if (!result.ok) {
           setSimklAuthStatus(formatApiError(result.data, 'Could not check SIMKL auth.'), true);
@@ -6438,15 +6449,18 @@
           return;
         }
 
-        if (result.data.status === 'approved' && result.data.access_token) {
-          el('simkl-access-token').value = result.data.access_token;
+        if (result.data.status === 'approved') {
           clearSimklPinState();
           setSimklAuthCode('');
           updateDots();
-          saveDraft();
-          setSimklAuthStatus('SIMKL access token received and filled in.', false);
-          showToast('SIMKL token added.', false, true);
-          if (sessionProfileId) testConnections('simkl');
+          el('simkl-connection-version').textContent = 'Connected · AUTH V2';
+          setSimklAuthStatus('Connected · AUTH V2', false);
+          showToast('SIMKL AUTH V2 connected.', false, true);
+          if (sessionProfileId) {
+            await _forceStatusRefresh(); await fetchPairs();
+            const editor = el('list-sync-editor');
+            if (editor && editor.style.display !== 'none' && editor.innerHTML) await openListSyncEditor();
+          }
           return;
         }
 
