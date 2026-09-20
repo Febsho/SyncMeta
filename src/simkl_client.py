@@ -215,10 +215,18 @@ class SimklClient:
                             resp.status_code)
 
     def _oauth2_post(self, path: str, data: dict) -> dict:
-        """OAuth V2 is form-encoded and must not inherit API URL parameters."""
+        """Submit OAuth V2 form data with SIMKL's required app identity."""
         url = f"{self._config.base_url}{path}"
-        response = self._session.post(url, data={k: str(v) for k, v in data.items() if v is not None},
-                                      timeout=REQUEST_TIMEOUT)
+        response = self._session.post(
+            url,
+            # The normal API session defaults to JSON.  OAuth V2 device and
+            # token endpoints instead require a form body; leaving that header
+            # in place makes SIMKL attempt to parse form bytes as JSON.
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            params=self._request_params(),
+            data={k: str(v) for k, v in data.items() if v is not None},
+            timeout=REQUEST_TIMEOUT,
+        )
         if not response.ok:
             self._raise_api_error(response)
         payload = response.json()

@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from unittest.mock import Mock
 
 import requests
 
@@ -127,6 +128,21 @@ class SimklCustomListTests(unittest.TestCase):
         self.assertEqual(requests_seen[0][1], {"client_id": "v2-client", "scope": "media:read media:write"})
         self.assertEqual(requests_seen[1][1]["grant_type"], "urn:ietf:params:oauth:grant-type:device_code")
         self.assertNotIn("client_secret", requests_seen[1][1])
+
+    def test_v2_oauth_post_uses_form_content_type_and_required_query_parameters(self):
+        client = SimklClient(SimklConfig(client_id="v2-client", auth_version="v2"))
+        response = Mock(ok=True)
+        response.json.return_value = {"device_code": "opaque", "user_code": "ABCD-1234"}
+        client._session.post = Mock(return_value=response)
+
+        client._oauth2_post("/oauth2/device", {"client_id": "v2-client", "scope": "media:read media:write"})
+
+        _, kwargs = client._session.post.call_args
+        self.assertEqual(kwargs["headers"], {"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(kwargs["params"], {
+            "client_id": "v2-client", "app-name": "syncmeta", "app-version": "1.0",
+        })
+        self.assertEqual(kwargs["data"], {"client_id": "v2-client", "scope": "media:read media:write"})
 
     def test_client_discovers_and_normalizes_custom_list_items(self):
         client = CustomListClient()
