@@ -266,15 +266,22 @@ class WebTests(unittest.TestCase):
             "capabilities": {"readable": True, "writable": True}, "identity": "", "recovery_action": "none",
         }]
 
-        response = self.client.post("/api/profile/onboarding/destination", json={
-            "api_key": "pm-real-key", "password": "secret",
-        })
+        # The wizard renders this response directly, before its first status
+        # poll.  Hosted application setup must therefore be present here, not
+        # only on /api/profile/status.
+        with patch.dict(os.environ, {"TRAKT_CLIENT_ID": "hosted-id", "TRAKT_CLIENT_SECRET": "hosted-secret"}, clear=False):
+            response = self.client.post("/api/profile/onboarding/destination", json={
+                "api_key": "pm-real-key", "password": "secret",
+            })
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["created"])
         self.assertFalse(data["profile"]["options"]["onboarding_completed"])
         self.assertTrue(data["profile"]["credentials"]["pmdb"]["api_key_saved"])
+        self.assertIn("hosted_oauth", data["profile"])
+        self.assertTrue(data["profile"]["hosted_oauth"]["trakt"])
+        self.assertIn("connection_readiness", data["profile"])
         private = web._profile_store.get_private_profile_by_id(data["profile"]["profile_id"])
         self.assertEqual(private["credentials"]["pmdb"]["api_key"], "pm-real-key")
         self.assertEqual(private["connection_health"]["pmdb"]["status"], "healthy")

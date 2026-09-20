@@ -3297,7 +3297,8 @@
       if (!loadSimklPinState()) {
         setSimklAuthCode('');
         const isV2 = simkl.auth_version === 'v2';
-        el('simkl-connection-version').textContent = hasSavedSecret('simkl', 'access_token_saved') ? `Connected · AUTH ${isV2 ? 'V2' : 'V1'}${isV2 ? '' : ' · Reconnect to enable Custom Lists'}` : 'Movies, shows, anime, watch history, and AUTH V2 device auth.';
+        const versionNode = el('simkl-connection-version');
+        if (versionNode) versionNode.textContent = hasSavedSecret('simkl', 'access_token_saved') ? `Connected · AUTH ${isV2 ? 'V2' : 'V1'}${isV2 ? '' : ' · Reconnect to enable Custom Lists'}` : 'Movies, shows, anime, watch history, and AUTH V2 device auth.';
         setSimklAuthStatus(isV2 ? 'Connected · AUTH V2' : (hasSavedSecret('simkl', 'access_token_saved') ? 'Connected · AUTH V1. Reconnect to enable Custom Lists.' : 'Connect with AUTH V2 to enable Custom Lists.'), false);
       }
       if (!loadTraktDeviceState()) {
@@ -5745,6 +5746,7 @@
 
     function setSimklAuthStatus(message, isError) {
       const node = el('simkl-auth-status');
+      if (!node) return;
       node.textContent = flattenStatusMessage(message);
       node.style.color = isError ? 'var(--red)' : '';
     }
@@ -5752,6 +5754,7 @@
     function setSimklAuthCode(code) {
       const box = el('simkl-auth-box');
       const codeNode = el('simkl-auth-code');
+      if (!box || !codeNode) return;
       if (code) {
         codeNode.textContent = code;
         box.classList.remove('hidden');
@@ -5763,6 +5766,7 @@
 
     function setTraktAuthStatus(message, isError) {
       const node = el('trakt-auth-status');
+      if (!node) return;
       node.textContent = flattenStatusMessage(message);
       node.style.color = isError ? 'var(--red)' : '';
     }
@@ -5770,6 +5774,7 @@
     function setTraktAuthCode(code) {
       const box = el('trakt-auth-box');
       const codeNode = el('trakt-auth-code');
+      if (!box || !codeNode) return;
       if (code) {
         codeNode.textContent = code;
         box.classList.remove('hidden');
@@ -5781,6 +5786,7 @@
 
     function setTraktCatalogStatus(message, isError) {
       const node = el('trakt-catalog-status');
+      if (!node) return;
       node.textContent = flattenStatusMessage(message);
       node.style.color = isError ? 'var(--red)' : '';
     }

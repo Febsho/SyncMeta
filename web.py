@@ -2934,7 +2934,12 @@ def api_profile_save():
 
     if guesses_password:
         _login_limiter.clear(client_key)
-    response = {"profile": profile, "created": created}
+    # Keep save/create responses on the same public profile contract as a
+    # normal sign-in/status response.  In particular, the browser needs the
+    # safe hosted-OAuth flags immediately after profile creation; waiting for a
+    # later status poll made valid server credentials look "Not configured".
+    response = _profile_response(profile, include_credentials=True).get_json()
+    response["created"] = created
     return _with_session_cookie(make_response(jsonify(response)), session_token)
 
 
@@ -2988,11 +2993,12 @@ def api_profile_onboarding_destination():
     except (KeyError, ValueError) as exc:
         return _json_error(str(exc), 400)
 
-    return _with_session_cookie(make_response(jsonify({
-        "profile": profile,
-        "created": created,
-        "check": check,
-    })), session_token)
+    # This is the first profile response the onboarding UI receives.  Return
+    # the standard profile envelope so hosted app credentials are usable in the
+    # very next wizard step without a full-page reload.
+    response = _profile_response(profile, include_credentials=True).get_json()
+    response.update({"created": created, "check": check})
+    return _with_session_cookie(make_response(jsonify(response)), session_token)
 
 
 @app.route("/api/logs", methods=["GET"])
