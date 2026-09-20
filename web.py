@@ -2334,6 +2334,12 @@ def _resolved_simkl_v2_app(private_profile: dict | None) -> dict[str, str | bool
 _simkl_device_authorizations: dict[str, dict] = {}
 
 
+@app.route("/api/oauth/status", methods=["GET"])
+def api_oauth_status():
+    """Expose only server OAuth availability; this must work before profile login."""
+    return jsonify({"hosted_oauth": hosted_oauth_status()})
+
+
 @app.route("/api/simkl/device/start", methods=["POST"])
 def api_simkl_device_start():
     body = request.get_json(silent=True) or {}
@@ -2367,7 +2373,11 @@ def api_simkl_device_start():
     _simkl_device_authorizations[handle] = {
         "profile_id": _current_profile_id(), "client": client,
         "device_code": pin_data["device_code"], "expires_at": time.time() + int(pin_data.get("expires_in") or 900),
-        "v2_client_id": client_id, "v2_client_secret": client_secret,
+        # Hosted app credentials remain process-only.  Manual credentials are
+        # retained for legacy self-hosted profiles after device approval.
+        "hosted_app": bool(app_credentials["hosted"]),
+        "v2_client_id": "" if app_credentials["hosted"] else client_id,
+        "v2_client_secret": "" if app_credentials["hosted"] else client_secret,
         "selected_statuses": body.get("selected_statuses"),
     }
     return jsonify({**response, "device_handle": handle})

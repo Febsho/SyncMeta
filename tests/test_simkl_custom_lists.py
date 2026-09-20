@@ -113,7 +113,7 @@ class SimklCustomListTests(unittest.TestCase):
         self.assertEqual(saved[0][:2], ("new", "refresh"))
 
     def test_v2_device_flow_uses_oauth2_endpoints_and_stores_both_tokens(self):
-        client = SimklClient(SimklConfig(client_id="v2-client", auth_version="v2"))
+        client = SimklClient(SimklConfig(client_id="v2-client", client_secret="confidential-secret", auth_version="v2"))
         requests_seen = []
         def oauth(path, data):
             requests_seen.append((path, data))
@@ -124,7 +124,9 @@ class SimklCustomListTests(unittest.TestCase):
         self.assertEqual(client.request_device_authorization()["user_code"], "ABCD-1234")
         self.assertEqual(client.poll_device_authorization("opaque")["status"], "approved")
         self.assertEqual(client._config.refresh_token, "refresh")
+        self.assertEqual(requests_seen[0][1], {"client_id": "v2-client", "scope": "media:read media:write"})
         self.assertEqual(requests_seen[1][1]["grant_type"], "urn:ietf:params:oauth:grant-type:device_code")
+        self.assertNotIn("client_secret", requests_seen[1][1])
 
     def test_client_discovers_and_normalizes_custom_list_items(self):
         client = CustomListClient()

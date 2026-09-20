@@ -465,7 +465,6 @@ class SimklClient:
         """Start AUTH V2's RFC 8628 device flow (not the legacy PIN API)."""
         data = self._oauth2_post("/oauth2/device", {
             "client_id": self._config.client_id,
-            "client_secret": self._config.client_secret or None,
             "scope": SIMKL_V2_SCOPE,
         })
         if not data.get("device_code") or not data.get("user_code"):
@@ -478,7 +477,6 @@ class SimklClient:
             token = self._oauth2_post("/oauth2/token", {
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 "client_id": self._config.client_id,
-                "client_secret": self._config.client_secret or None,
                 "device_code": device_code,
             })
         except SimklApiError as exc:

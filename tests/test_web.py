@@ -313,6 +313,53 @@ class WebTests(unittest.TestCase):
         self.assertTrue(data["profile"]["hosted_oauth"]["trakt"])
         self.assertNotIn("hosted_oauth", data)
 
+    def test_oauth_status_is_available_without_profile_and_exposes_only_booleans(self) -> None:
+        with patch.dict(os.environ, {
+            "SIMKL_V2_CLIENT_ID": "hosted-v2-id",
+            "SIMKL_V2_CLIENT_SECRET": "hosted-v2-secret",
+            "TRAKT_CLIENT_ID": "hosted-trakt-id",
+            "TRAKT_CLIENT_SECRET": "hosted-trakt-secret",
+        }, clear=False):
+            response = self.client.get("/api/oauth/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["hosted_oauth"], {
+            "anilist": False, "mdblist": False, "simkl": True, "trakt": True,
+        })
+        self.assertNotIn("hosted-v2-id", response.get_data(as_text=True))
+        self.assertNotIn("hosted-v2-secret", response.get_data(as_text=True))
+
+    def test_index_loads_hosted_oauth_before_status_and_connect_uses_it(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("await fetch('/api/oauth/status')", html)
+        self.assertIn("loadHostedOAuthStatus().then(() => fetchStatus(false))", html)
+        self.assertIn("simkl: !!hostedOAuth.simkl || !!el('simkl-v2-client-id').value.trim()", html)
+        self.assertIn("trakt: !!hostedOAuth.trakt || !!el('trakt-client-id').value.trim()", html)
+
+    @patch("web.SimklClient.request_device_authorization")
+    def test_simkl_device_start_uses_hosted_v2_app_without_exposing_credentials(self, start_device) -> None:
+        start_device.return_value = {
+            "device_code": "opaque-device-code", "user_code": "ABCD-1234",
+            "verification_uri": "https://simkl.com/activate", "expires_in": 900,
+        }
+        with patch.dict(os.environ, {
+            "SIMKL_V2_CLIENT_ID": "hosted-v2-id",
+            "SIMKL_V2_CLIENT_SECRET": "hosted-v2-secret",
+        }, clear=False):
+            response = self.client.post("/api/simkl/device/start", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("hosted-v2-id", response.get_data(as_text=True))
+        self.assertNotIn("hosted-v2-secret", response.get_data(as_text=True))
+        handle = response.get_json()["device_handle"]
+        state = web._simkl_device_authorizations.pop(handle)
+        self.assertEqual(state["client"]._config.client_id, "hosted-v2-id")
+        self.assertTrue(state["hosted_app"])
+        self.assertEqual(state["v2_client_id"], "")
+        self.assertEqual(state["v2_client_secret"], "")
+
     @patch("web.check_connections")
     def test_connection_check_persists_only_saved_credential_results(self, check_connections_mock) -> None:
         credentials = _blank_credentials()

@@ -3519,14 +3519,13 @@
     }
 
     function connectProvider(provider) {
-      openConnectionAdvanced(provider, false);
-      const required = {
-        simkl: !!el('simkl-client-id').value.trim(),
-        trakt: !!el('trakt-client-id').value.trim(),
-        anilist: !!el('anilist-client-id').value.trim(),
-        mdblist: !!el('mdblist-client-id').value.trim(),
+      const configured = {
+        simkl: !!hostedOAuth.simkl || !!el('simkl-v2-client-id').value.trim(),
+        trakt: !!hostedOAuth.trakt || !!el('trakt-client-id').value.trim(),
+        anilist: !!hostedOAuth.anilist || !!el('anilist-client-id').value.trim(),
+        mdblist: !!hostedOAuth.mdblist || !!el('mdblist-client-id').value.trim(),
       };
-      if (!required[provider]) {
+      if (!configured[provider]) {
         openConnectionAdvanced(provider, true);
         showToast(`Enter your ${CONNECTION_LABELS[provider]} connection details first.`, true, false);
         return;
@@ -6976,6 +6975,17 @@
     }
 
     let hostedOAuth = {};
+    async function loadHostedOAuthStatus() {
+      try {
+        const response = await fetch('/api/oauth/status');
+        if (!response.ok) return;
+        const data = await response.json();
+        applyHostedOAuthUi(data.hosted_oauth || {});
+      } catch {
+        // A later profile status response can still populate this state.
+      }
+    }
+
     function applyHostedOAuthUi(status) {
       hostedOAuth = status || {};
       ['simkl', 'trakt', 'anilist', 'mdblist'].forEach(provider => {
@@ -10480,7 +10490,7 @@
 
     if (storageGet(ENTERED_KEY)) enterApp();
     bindRedesignEvents();
-    fetchStatus(false).then(profile => {
+    loadHostedOAuthStatus().then(() => fetchStatus(false)).then(profile => {
       if (profile) {
         if (storageGet(ENTERED_KEY)) switchView('overview');
         fetchUnresolved();
