@@ -301,6 +301,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(web._profile_store._profiles, {})
 
+    def test_profile_status_keeps_hosted_oauth_inside_profile(self) -> None:
+        profile = web._profile_store.create_profile("secret", _blank_credentials(), {"auto_sync": False})
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        with patch.dict(os.environ, {"TRAKT_CLIENT_ID": "hosted-id", "TRAKT_CLIENT_SECRET": "hosted-secret"}, clear=False):
+            response = self.client.post("/api/profile/status", json={})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["profile"]["hosted_oauth"]["trakt"])
+        self.assertNotIn("hosted_oauth", data)
+
     @patch("web.check_connections")
     def test_connection_check_persists_only_saved_credential_results(self, check_connections_mock) -> None:
         credentials = _blank_credentials()

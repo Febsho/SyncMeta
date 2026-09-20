@@ -3037,10 +3037,10 @@ def api_profile_status():
     if not profile:
         return _clear_session_cookie(_json_error("Sign in first", 401)[0]), 401
 
-    response = _profile_response(profile, include_credentials=include_credentials)
-    payload = response.get_json()
-    payload["hosted_oauth"] = hosted_oauth_status()
-    return jsonify(payload)
+    # _profile_response already places hosted_oauth inside ``profile``.  Adding
+    # it to the outer envelope made the browser read an empty value and ask for
+    # manual app credentials even when the container had them configured.
+    return _profile_response(profile, include_credentials=include_credentials)
 
 
 @app.route("/api/profile/connections/check", methods=["POST"])
