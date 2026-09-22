@@ -7058,7 +7058,19 @@
         : (profile.sync_error ? `<span style="color:var(--red)">${esc(profile.sync_error)}</span>` : 'Background sync ready');
 
       const connectedProviders = connectedProviderKeys();
-      const syncMetrics = syncMetricTotals(profile, results);
+      // New and onboarding profiles have no completed runs yet.  In that
+      // case syncMetricTotals intentionally returns null, but rendering the
+      // dashboard must still succeed so a successful save is not reported as
+      // a misleading network failure.
+      const syncMetrics = syncMetricTotals(profile, results) || {
+        checked: 0,
+        changes: 0,
+        added: 0,
+        removed: 0,
+        updated: 0,
+        skipped: 0,
+        seen: false,
+      };
       const metrics = {
         checked: syncMetrics.seen ? syncMetrics.checked : null,
         changes: syncMetrics.seen ? syncMetrics.changes : null,

@@ -258,6 +258,17 @@ class WebTests(unittest.TestCase):
         self.assertIn("onboardingReadyGraphHtml", html)
         self.assertNotIn("Enter a profile password. Leave UUID blank", html)
 
+    def test_index_renders_a_new_profile_without_sync_metrics(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        # syncMetricTotals deliberately returns null until a route has run.
+        # Saving the first PMDB key must not turn that render-only state into
+        # a client exception which the UI then misreports as a network error.
+        self.assertIn(
+            "const syncMetrics = syncMetricTotals(profile, results) || {",
+            html,
+        )
+
     @patch("web.check_connections")
     def test_onboarding_destination_validates_and_creates_incomplete_profile(self, check_connections_mock) -> None:
         check_connections_mock.return_value = [{
