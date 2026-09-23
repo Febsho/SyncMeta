@@ -3857,7 +3857,6 @@
       const settingsTab = VIEW_ALIAS_SETTINGS_TAB[requested];
       if (target === 'settings') {
         if (settingsTab) showSettingsTab(settingsTab);
-        if (requested === 'connections' && sessionProfileId) testConnections(undefined, true);
         if (!settingsTab && activeSettingsTab === 'schedule') fetchPairs();
         if (settingsTab === 'about' || activeSettingsTab === 'about') {
           fetchSiteStats();
@@ -7090,14 +7089,13 @@
       updateNavIssuesBadge(metrics.problems);
 
       updateLiveActivityPanel(profile);
-      renderPipelinesPanel(profile, results);
+      // This legacy panel is permanently hidden; rebuilding its cards during
+      // every status refresh only adds DOM work to visible interactions.
       renderPairsDashPanel(profile);
       renderActivityPanel(profile);
-      renderAnimeHealth(profile);
       renderDryRunPreview(profile, results);
       renderSyncGraph(profile);
       renderRecentActivity(profile);
-      renderAttentionPanel(profile);
       maybeOpenPreview(profile);
       if (currentView === 'activity') renderActivityPage();
       if (currentView === 'issues') renderIssuesPage();
@@ -7277,14 +7275,17 @@
         if (historyNext) historyNext.addEventListener('click', () => goToHistoryPage(historyPage + 1));
       }
 
-      switchIssuesTab(currentIssueTab);
-      // While the run is still going its detail keeps changing, so bypass the
-      // cache; otherwise the Errors panel shows the first snapshot all run long.
-      const runStillGoing = !!profile.sync_running;
-      if (profile.latest_run_id && (runStillGoing || !runDetailsCache[profile.latest_run_id])) {
-        fetchRunDetail(profile.latest_run_id, runStillGoing).then(() => renderErrorsPanel(profile));
-      } else {
-        renderErrorsPanel(profile);
+      // Detailed failures can be large.  They are only useful in Issues, and
+      // switchIssuesTab fetches them on demand there instead of making every
+      // dashboard refresh compete with normal interaction.
+      if (currentView === 'issues') {
+        switchIssuesTab(currentIssueTab);
+        const runStillGoing = !!profile.sync_running;
+        if (profile.latest_run_id && (runStillGoing || !runDetailsCache[profile.latest_run_id])) {
+          fetchRunDetail(profile.latest_run_id, runStillGoing).then(() => renderErrorsPanel(profile));
+        } else {
+          renderErrorsPanel(profile);
+        }
       }
 
       const stopping = !!profile.sync_cancel_requested;
@@ -9696,6 +9697,7 @@
           });
         });
       }
+      renderAnimeHealth(lastDashboardProfile);
       renderAttentionPanel(lastDashboardProfile);
       // The detailed mapping/error panel below is only relevant to two filters.
       const detail = el('issues-panel');
@@ -10505,7 +10507,11 @@
     loadHostedOAuthStatus().then(() => fetchStatus(false)).then(profile => {
       if (profile) {
         if (storageGet(ENTERED_KEY)) switchView('overview');
-        fetchUnresolved();
+        // The dashboard already receives aggregate unresolved counts in the
+        // status payload.  Loading every issue (and conflicts) here competes
+        // with the first interactive render even when the Issues page is never
+        // opened; switchView('issues') loads the detail on demand instead.
+        if (currentView === 'issues') fetchUnresolved();
       } else {
         renderEmptyDashboard('Save or load a profile in Settings to enable background sync.');
       }
@@ -10568,7 +10574,9 @@
       // Opening a section is what should pay for its data, not every page load.
       if (target === 'schedule') fetchPairs();
       if (target === 'about') fetchSiteStats();
-      if (target === 'connections' && sessionProfileId) testConnections(undefined, true);
+      // Connections renders persisted health immediately.  A live check can
+      // wait on several third-party APIs, so it is deliberately opt-in via
+      // the provider Test buttons or Test all.
       if (target === 'notifications') renderNotificationSettings();
       const content = document.querySelector('.settings-content');
       if (content && window.matchMedia('(max-width: 860px)').matches) {

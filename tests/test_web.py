@@ -269,6 +269,24 @@ class WebTests(unittest.TestCase):
             html,
         )
 
+    def test_index_defers_issue_detail_fetch_until_the_issues_page(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if (currentView === 'issues') fetchUnresolved();", html)
+
+    def test_index_keeps_issue_detail_work_out_of_normal_dashboard_refreshes(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if (currentView === 'issues') {\n        switchIssuesTab(currentIssueTab);", html)
+
+    def test_index_does_not_probe_all_connections_when_opening_the_tab(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertNotIn(
+            "target === 'connections' && sessionProfileId) testConnections",
+            html,
+        )
+
     @patch("web.check_connections")
     def test_onboarding_destination_validates_and_creates_incomplete_profile(self, check_connections_mock) -> None:
         check_connections_mock.return_value = [{
