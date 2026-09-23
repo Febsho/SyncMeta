@@ -1674,13 +1674,12 @@
                     <span class="actions-meta" id="simkl-auth-status">Connect with AUTH V2 to enable Custom Lists.</span>
                   </div>
                   <div class="auth-box hidden" id="simkl-auth-box">
-                    <div class="actions-meta">SIMKL AUTH V2 DEVICE CODE</div>
-                    <div class="auth-code mono" id="simkl-auth-code">-----</div>
+                    <div class="actions-meta">The SIMKL approval page opened in a new tab. Press <strong>Allow</strong>; SyncMeta finishes connecting automatically.</div>
                     <div class="actions-bar" style="margin-top:8px">
-                      <button class="btn btn-sm" type="button" onclick="copySimklCode()">Copy PIN</button>
-                      <button class="btn btn-sm" type="button" onclick="openSimklVerification()">Open SIMKL</button>
+                      <button class="btn btn-sm" type="button" onclick="openSimklVerification()">Open SIMKL again</button>
                     </div>
-                    <div class="hint">Approve the code in SIMKL; tokens stay on this server.</div>
+                    <details class="tech-details" style="margin-top:10px"><summary>SIMKL asked for a code?</summary><div class="auth-code mono" id="simkl-auth-code">-----</div><button class="btn btn-sm" type="button" onclick="copySimklCode()">Copy code</button></details>
+                    <div class="hint">Usually the opened link already includes the code. Tokens stay on this server.</div>
                   </div>
                   <div class="conn-token-error" id="token-error-simkl">
                     <span>⚠</span><span id="token-error-simkl-msg"></span>
@@ -6292,7 +6291,8 @@
       }
     }
 
-    function buildSimklVerifyUrl(baseUrl, userCode) {
+    function buildSimklVerifyUrl(baseUrl, userCode, isCompleteUrl) {
+      if (isCompleteUrl) return baseUrl;
       if (baseUrl && baseUrl.endsWith('/')) return baseUrl + encodeURIComponent(userCode);
       return baseUrl;
     }
@@ -6317,7 +6317,7 @@
         showToast('Start SIMKL auth first.', true, false);
         return;
       }
-      window.open(buildSimklVerifyUrl(state.verification_url, state.user_code), '_blank', 'noopener');
+      window.open(buildSimklVerifyUrl(state.verification_url, state.user_code, state.verification_url_complete), '_blank', 'noopener');
     }
 
     async function copyTraktCode() {
@@ -6369,14 +6369,14 @@
           device_handle: pin.device_handle,
           user_code: pin.user_code,
           verification_url: pin.verification_url,
+          verification_url_complete: !!pin.verification_url_complete,
           interval: pin.interval || 5,
           expires_at: Date.now() + ((pin.expires_in || 900) * 1000),
         };
         saveSimklPinState(state);
         setSimklAuthCode(pin.user_code);
-        setSimklAuthStatus(`Approve AUTH V2 code ${pin.user_code} on SIMKL. Waiting for confirmation...`, false);
-        try { await navigator.clipboard.writeText(pin.user_code); showToast(`Code ${pin.user_code} copied — opening SIMKL approval page.`, false, true); } catch {}
-        window.open(buildSimklVerifyUrl(pin.verification_url, pin.user_code), '_blank', 'noopener');
+        setSimklAuthStatus('Press Allow on the SIMKL page. Connecting automatically…', false);
+        window.open(buildSimklVerifyUrl(pin.verification_url, pin.user_code, pin.verification_url_complete), '_blank', 'noopener');
         scheduleSimklPinCheck(1000);
       } catch {
         setSimklAuthStatus('Network error while starting SIMKL auth.', true);
@@ -6473,7 +6473,7 @@
           return;
         }
 
-        setSimklAuthStatus(`Approve code ${state.user_code} on SIMKL. Waiting for confirmation...`, false);
+        setSimklAuthStatus('Waiting for SIMKL approval…', false);
         scheduleSimklPinCheck((state.interval || 5) * 1000);
       } catch {
         setSimklAuthStatus('Network error while checking SIMKL auth.', true);

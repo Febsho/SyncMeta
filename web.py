@@ -2363,9 +2363,13 @@ def api_simkl_device_start():
             hint=_derive_provider_hint("SIMKL", exc, "Double-check your SIMKL client ID in Settings."),
         )
 
+    verification_url_complete = bool(pin_data.get("verification_uri_complete"))
     response = {
         "user_code": pin_data.get("user_code"),
         "verification_url": pin_data.get("verification_uri_complete") or pin_data.get("verification_uri"),
+        # A complete URI already carries the device code.  The browser must
+        # open it verbatim instead of appending the fallback code again.
+        "verification_url_complete": verification_url_complete,
         "interval": pin_data.get("interval", 5),
         "expires_in": pin_data.get("expires_in", 900),
     }

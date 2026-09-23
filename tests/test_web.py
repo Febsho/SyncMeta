@@ -287,6 +287,12 @@ class WebTests(unittest.TestCase):
             html,
         )
 
+    def test_index_explains_simkl_approval_is_automatic(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("Press <strong>Allow</strong>; SyncMeta finishes connecting automatically.", html)
+        self.assertIn("verification_url_complete: !!pin.verification_url_complete", html)
+
     @patch("web.check_connections")
     def test_onboarding_destination_validates_and_creates_incomplete_profile(self, check_connections_mock) -> None:
         check_connections_mock.return_value = [{
@@ -371,7 +377,9 @@ class WebTests(unittest.TestCase):
     def test_simkl_device_start_uses_hosted_v2_app_without_exposing_credentials(self, start_device) -> None:
         start_device.return_value = {
             "device_code": "opaque-device-code", "user_code": "ABCD-1234",
-            "verification_uri": "https://simkl.com/activate", "expires_in": 900,
+            "verification_uri": "https://simkl.com/activate",
+            "verification_uri_complete": "https://simkl.com/activate/ABCD-1234",
+            "expires_in": 900,
         }
         with patch.dict(os.environ, {
             "SIMKL_V2_CLIENT_ID": "hosted-v2-id",
@@ -380,6 +388,8 @@ class WebTests(unittest.TestCase):
             response = self.client.post("/api/simkl/device/start", json={})
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["verification_url"], "https://simkl.com/activate/ABCD-1234")
+        self.assertTrue(response.get_json()["verification_url_complete"])
         self.assertNotIn("hosted-v2-id", response.get_data(as_text=True))
         self.assertNotIn("hosted-v2-secret", response.get_data(as_text=True))
         handle = response.get_json()["device_handle"]
