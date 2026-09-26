@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import requests
 
 from src.config import SimklConfig
-from src.providers import CATEGORY_COLLECTION, CATEGORY_DROPPED, CATEGORY_WATCHLIST, PmdbAdapter, SimklAdapter
+from src.providers import CATEGORY_COLLECTION, CATEGORY_DROPPED, CATEGORY_WATCHLIST, PmdbAdapter, SimklAdapter, is_planned
 from src.profile_store import ProfileStore
 from src.simkl_client import SimklApiError, SimklClient
 
@@ -194,6 +194,16 @@ class SimklCustomListTests(unittest.TestCase):
         self.assertEqual(len(items), 3)
         self.assertEqual({item["tmdb_id"] for item in items if item.get("tmdb_id")}, {"10"})
         self.assertTrue(any(item.get("anilist_id") == "40" for item in items))
+        self.assertTrue(all(is_planned(item) is False for item in items))
+
+    def test_simkl_custom_list_is_not_planned(self):
+        class FakeSimkl:
+            def get_custom_list_items(self, list_id):
+                return [{"title": "Curated", "media_type": "movie", "tmdb_id": "1"}]
+
+        adapter = SimklAdapter(FakeSimkl(), media_types=["movies"])
+        items = adapter.fetch(CATEGORY_WATCHLIST, ["custom:123"])
+        self.assertIs(is_planned(items[0]), False)
 
     def test_custom_selection_never_falls_back_to_a_status(self):
         client = AdapterClient()

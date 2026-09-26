@@ -145,7 +145,7 @@ def is_planned(item: dict) -> bool | None:
 
 def plan_to_watch_only(items: list[dict]) -> tuple[list[dict], int]:
     """Split watchlist items into the plan-to-watch ones and a count of the rest."""
-    kept = [item for item in items or [] if is_planned(item) is not False]
+    kept = [item for item in items or [] if is_planned(item) is True]
     return kept, len(items or []) - len(kept)
 
 
@@ -1179,7 +1179,7 @@ class SimklAdapter(ProviderAdapter):
                     add(item)
             for list_id in selected_custom:
                 for item in self._client.get_custom_list_items(list_id) or []:
-                    add(item)
+                    add({**item, PLANNED_FLAG: False})
             return items
 
         if source_lists:
@@ -1728,15 +1728,15 @@ class PmdbAdapter(ProviderAdapter):
 
         A named destination is exempt — there the user chose the list — but the
         native watchlist takes only what a source actually declared as planned.
-        An item whose source never said either way is still accepted: it may
-        predate the flag, and dropping it would be the opposite failure.
+        Unknown planning state is refused so a broad catalog or a new adapter
+        cannot silently turn into a plan-to-watch source.
         """
         destination = str(target_list or "").strip()
         if category != CATEGORY_WATCHLIST:
             return True
         if destination.startswith("list:") or destination == "picks":
             return True
-        return is_planned(item) is not False
+        return is_planned(item) is True
 
     def add(
         self, category: str, items: list[dict], target_list: str = "",

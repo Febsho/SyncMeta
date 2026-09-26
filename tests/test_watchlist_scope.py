@@ -166,8 +166,8 @@ class PmdbWatchlistAcceptsTests(unittest.TestCase):
             self.adapter.accepts(CATEGORY_WATCHLIST, _movie(**{PLANNED_FLAG: True}))
         )
 
-    def test_an_unknown_item_is_accepted(self) -> None:
-        self.assertTrue(self.adapter.accepts(CATEGORY_WATCHLIST, _movie()))
+    def test_an_unknown_item_is_rejected_by_the_native_watchlist(self) -> None:
+        self.assertFalse(self.adapter.accepts(CATEGORY_WATCHLIST, _movie()))
 
     def test_a_named_destination_list_takes_anything(self) -> None:
         # There the user picked the list, so the plan-to-watch rule does not apply.
