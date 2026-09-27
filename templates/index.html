@@ -1174,7 +1174,8 @@
       </a>
       <div class="nav-links">
         <button class="nav-link" data-nav="overview" style="display:none">Overview</button>
-        <button class="nav-link" data-nav="list-sync" style="display:none">List Sync</button>
+        <button class="nav-link" data-nav="list-sync" style="display:none">Sync</button>
+        <button class="nav-link" data-nav="lists" style="display:none">Lists</button>
         <button class="nav-link" data-nav="activity" style="display:none">Activity</button>
         <button class="nav-link" data-nav="library" style="display:none">Library</button>
         <button class="nav-link" data-nav="issues" style="display:none">Issues<span class="nav-badge hidden" id="nav-issues-badge" aria-hidden="true">0</span></button>
@@ -1328,7 +1329,7 @@
       </div>
 
       <div id="view-list-sync" style="display:none">
-        <h1 class="page-title">List Sync</h1>
+        <h1 class="page-title">Sync</h1>
         <p class="page-sub">Choose what each route synchronizes, including watchlists, collections, dropped shows, history, and saved lists.</p>
         <div class="cards activity-cards" id="sync-cards" style="margin-bottom:20px"></div>
         <div class="panel">
@@ -1360,7 +1361,16 @@
             <div id="pairs-results" style="margin-top:12px"></div>
           </div>
         </div>
-        <div class="panel"><div class="panel-header"><span>Static list routes</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Create static route</button></div><div class="panel-body" id="list-sync-editor" style="display:none"></div><div class="panel-body" id="list-sync-routes"><div class="empty">Loading static list routes...</div></div></div>
+      </div>
+
+      <div id="view-lists" style="display:none">
+        <h1 class="page-title">Lists</h1>
+        <p class="page-sub">View and manage lists connected to your list sync routes.</p>
+        <div class="panel">
+          <div class="panel-header"><span>Synced Lists</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Add list sync</button></div>
+          <div class="panel-body" id="list-sync-editor" style="display:none"></div>
+          <div class="panel-body" id="list-sync-routes"><div class="empty">Loading synced lists...</div></div>
+        </div>
       </div>
 
       <div id="view-activity" style="display:none">
@@ -1740,10 +1750,10 @@
                   <div class="form-row"><label for="anilist-access-token">Access Token</label><input type="password" id="anilist-access-token" placeholder="Filled in after you connect" autocomplete="off"><div class="hint">A username alone is enough to <strong>read</strong> a public list. A token is only needed to <strong>write</strong> to AniList &mdash; private lists, or using AniList as a sync-pair target.</div></div>
                   <div class="actions-bar" style="margin-top:0">
                     <button class="btn btn-sm" id="btn-anilist-auth" onclick="startAniListAuth()">Connect AniList</button>
-                    <span class="actions-meta" id="anilist-auth-status">Enter your client ID and secret, then connect.</span>
+                    <span class="actions-meta" id="anilist-auth-status">Optional: connect only if SyncMeta needs permission to write to AniList.</span>
                   </div>
                   <div class="auth-box hidden" id="anilist-auth-box">
-                    <div class="actions-meta">Authorize on AniList, then paste the code it shows you.</div>
+                    <div class="actions-meta"><strong>1.</strong> Open AniList and approve access. <strong>2.</strong> Copy the code AniList displays. <strong>3.</strong> Return here and finish connecting.</div>
                     <div class="actions-bar" style="margin-top:8px">
                       <button class="btn btn-sm" type="button" onclick="openAniListVerification()">Open AniList</button>
                       <button class="btn btn-sm" type="button" onclick="copyAniListAuthUrl()">Copy Link</button>
@@ -2502,8 +2512,13 @@
     async function startAniListAuth() {
       const btn = el('btn-anilist-auth');
       const clientId = el('anilist-client-id').value.trim();
+      const clientSecret = el('anilist-client-secret').value.trim();
       if (!hostedOAuth.anilist && !clientId && !hasSavedSecret('anilist', 'client_secret_saved')) {
-        setAniListAuthStatus('Enter your AniList client ID first.', true);
+        setAniListAuthStatus('Enter your AniList client ID from developer settings first.', true);
+        return;
+      }
+      if (!hostedOAuth.anilist && !clientSecret && !hasSavedSecret('anilist', 'client_secret_saved')) {
+        setAniListAuthStatus('Enter your AniList client secret before starting. You will need it to exchange the one-time code.', true);
         return;
       }
       if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
@@ -2515,7 +2530,7 @@
         }
         anilistAuthUrl = result.data.authorize_url || '';
         el('anilist-auth-box').classList.remove('hidden');
-        setAniListAuthStatus('Authorize on AniList, then paste the code below.', false);
+        setAniListAuthStatus('AniList authorization opened. Approve access, then paste the one-time code shown by AniList.', false);
         openAniListVerification();
       } catch {
         setAniListAuthStatus('Network error while starting AniList auth.', true);
@@ -2542,7 +2557,7 @@
       anilistAuthUrl = '';
       el('anilist-auth-code').value = '';
       el('anilist-auth-box').classList.add('hidden');
-      setAniListAuthStatus('Enter your client ID and secret, then connect.', false);
+      setAniListAuthStatus('Optional: connect only if SyncMeta needs permission to write to AniList.', false);
     }
 
     async function finishAniListAuth() {
@@ -3819,7 +3834,7 @@
     // The top-level destinations. Everything the old six-view nav offered
     // still exists — it moved into one of these, and the aliases below keep old
     // deep links and in-app calls working.
-    const VIEW_IDS = ['overview', 'list-sync', 'activity', 'library', 'issues', 'settings'];
+    const VIEW_IDS = ['overview', 'list-sync', 'lists', 'activity', 'library', 'issues', 'settings'];
     const VIEW_ALIASES = {
       dashboard: 'overview',
       'sync-now': 'overview',
@@ -3830,7 +3845,7 @@
       unresolved: 'issues',
       sync: 'list-sync',
       rules: 'list-sync',
-      lists: 'list-sync',
+      lists: 'lists',
       behavior: 'list-sync',
       connections: 'settings',
     };
@@ -3870,8 +3885,8 @@
       if (target === 'library') openLibrary();
       if (target === 'list-sync') {
         fetchPairs();
-        fetchListSyncRoutes();
       }
+      if (target === 'lists') fetchListSyncRoutes();
       if (target === 'activity') {
         renderActivityPage();
         loadActivityRuns(activityPage);
@@ -3910,7 +3925,7 @@
         if (!result.ok) { node.innerHTML = '<div class="empty">Sign in to view List Sync routes.</div>'; return; }
         const routes = Array.isArray(result.data.routes) ? result.data.routes : [];
         if (!routes.length) {
-          node.innerHTML = '<div class="empty">No migrated static-list routes yet. Existing watch, history, resume, and status routes remain under Sync.</div>';
+          node.innerHTML = '<div class="empty">No synced lists yet. Add a list sync to show it here.</div>';
           return;
         }
         node.innerHTML = routes.map(route => {

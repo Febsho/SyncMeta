@@ -119,6 +119,7 @@ VISIBILITY_LABELS = {
 #: ``plantowatch``, AniList ``PLANNING``, Trakt's own watchlist, MDBList's own
 #: ``/watchlist``, PMDB's native watchlist.
 PLANNED_FLAG = "_syncmeta_planned"
+SIMKL_CUSTOM_LIST_FLAG = "_syncmeta_simkl_custom_list"
 
 #: Statuses that mean plan-to-watch, across the providers that name one.
 PLANNED_STATUSES = frozenset({
@@ -1179,7 +1180,7 @@ class SimklAdapter(ProviderAdapter):
                     add(item)
             for list_id in selected_custom:
                 for item in self._client.get_custom_list_items(list_id) or []:
-                    add({**item, PLANNED_FLAG: False})
+                    add({**item, PLANNED_FLAG: False, SIMKL_CUSTOM_LIST_FLAG: True})
             return items
 
         if source_lists:
@@ -1431,7 +1432,9 @@ class PmdbAdapter(ProviderAdapter):
     # for, and the history write deliberately does not ask for it.
     records_plays = True
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
+    # PMDB has no native collection write; named lists remain available only
+    # through an explicitly selected `list:` destination.
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_RESUME, CATEGORY_DROPPED)
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
@@ -1736,7 +1739,7 @@ class PmdbAdapter(ProviderAdapter):
             return True
         if destination.startswith("list:") or destination == "picks":
             return True
-        return is_planned(item) is True
+        return is_planned(item) is True or bool(item.get(SIMKL_CUSTOM_LIST_FLAG))
 
     def add(
         self, category: str, items: list[dict], target_list: str = "",
@@ -1765,14 +1768,21 @@ class PmdbAdapter(ProviderAdapter):
             return totals
         if category == CATEGORY_WATCHLIST:
             # The native watchlist is a plan-to-watch list, so only plan-to-watch
-            # sources may write to it. Several things map onto this category
+            # sources may write to it. An explicitly selected SIMKL Custom List
+            # is also accepted as a deliberate route into this destination.
+            # Several things map onto this category
             # without meaning it — a curated MDBList list, a Trakt personal list,
             # Picks — and letting them through is what filled a watchlist with
             # thousands of titles nobody planned to watch. An item whose source
             # never declared either way is still allowed: it may predate the
             # flag, and silently dropping it would be the opposite failure.
             # A named destination list is exempt; there the user chose the list.
-            items, not_planned = plan_to_watch_only(items)
+            original_items = items
+            items = [
+                item for item in original_items
+                if is_planned(item) is True or item.get(SIMKL_CUSTOM_LIST_FLAG)
+            ]
+            not_planned = len(original_items) - len(items)
             if not_planned:
                 logger.info(
                     "PublicMetaDB watchlist: skipped %d item(s) that are not "
@@ -1815,20 +1825,10 @@ class PmdbAdapter(ProviderAdapter):
                 totals["added"] += 1
             return totals
         if category == CATEGORY_COLLECTION:
-            list_id = self._collection_id(create=True, visibility=visibility)
-            if not list_id:
-                totals["not_found"] = len(items)
-                return totals
-            payload = []
-            for item in items:
-                tmdb_id = str(item.get("tmdb_id") or "").strip()
-                if not tmdb_id.isdigit():
-                    totals["not_found"] += 1
-                    continue
-                payload.append({"tmdb_id": int(tmdb_id), "media_type": item.get("media_type") or "movie"})
-            if payload:
-                self._client.add_items_to_list_batch(list_id, payload)
-                totals["added"] += len(payload)
+            # PMDB has no native collection endpoint. Do not silently create a
+            # SyncMeta-named custom list when a route selects Completed / Collection;
+            # a custom destination is supported only when the user chose it.
+            totals["not_found"] = len(items)
             return totals
         if category == CATEGORY_RESUME:
             payload = []
@@ -1896,17 +1896,9 @@ class PmdbAdapter(ProviderAdapter):
                 totals["deleted"] += 1
             return totals
         if category == CATEGORY_COLLECTION:
-            list_id = self._collection_id(create=False)
-            if not list_id:
-                totals["not_found"] = len(items)
-                return totals
-            for item in items:
-                pmdb_item_id = item.get("pmdb_item_id")
-                if not pmdb_item_id:
-                    totals["not_found"] += 1
-                    continue
-                self._client.remove_item_from_list(list_id, str(pmdb_item_id))
-                totals["deleted"] += 1
+            # The implicit SyncMeta Collection destination is retired. Removing
+            # from a custom list is allowed only through the explicit list: branch.
+            totals["not_found"] = len(items)
             return totals
         if category == CATEGORY_HISTORY:
             # PublicMetaDB does support this — DELETE /api/external/watched

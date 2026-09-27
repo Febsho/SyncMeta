@@ -195,6 +195,7 @@ class SimklCustomListTests(unittest.TestCase):
         self.assertEqual({item["tmdb_id"] for item in items if item.get("tmdb_id")}, {"10"})
         self.assertTrue(any(item.get("anilist_id") == "40" for item in items))
         self.assertTrue(all(is_planned(item) is False for item in items))
+        self.assertTrue(all(item.get("_syncmeta_simkl_custom_list") for item in items))
 
     def test_simkl_custom_list_is_not_planned(self):
         class FakeSimkl:

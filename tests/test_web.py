@@ -3219,15 +3219,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["profile"]["last_results"][0]["items_added"], 1)
         mock_add_item_to_list.assert_called_once_with("pmdb-list-1", 4567, "tv")
 
-    def test_index_uses_the_five_page_information_architecture(self) -> None:
-        """Overview / Activity / Library / Issues / Settings, and nothing else.
-
-        The six-view nav (Dashboard, Sync, Library, Logs, Stats, Settings) is
-        gone; everything it held moved into one of these five, so this also
-        pins the pieces that moved rather than being deleted.
-        """
+    def test_index_uses_the_current_page_information_architecture(self) -> None:
+        """Overview, Sync, Lists, Activity, Library, Issues, and Settings."""
         html = self.client.get("/").get_data(as_text=True)
-        for nav in ("overview", "activity", "library", "issues", "settings"):
+        for nav in ("overview", "list-sync", "lists", "activity", "library", "issues", "settings"):
             self.assertIn(f'data-nav="{nav}"', html)
             self.assertIn(f'id="view-{nav}"', html)
         for gone in ("dashboard", "sync", "logs", "stats"):
@@ -3961,8 +3956,11 @@ class WebTests(unittest.TestCase):
         for key in ("simkl", "anilist", "trakt", "mdblist", "schedule", "activity"):
             self.assertIn(f'id="pipe-{key}"', html)
         self.assertIn("Sync All Routes", html)
-        self.assertLess(html.index(">List Sync<"), html.index('id="sync-settings"'),
+        self.assertLess(html.index(">Sync<"), html.index('id="sync-settings"'),
                         "the destination-first setup must remain the primary list-sync UI")
+        self.assertIn('data-nav="lists"', html)
+        self.assertIn('id="view-lists"', html)
+        self.assertIn("Synced Lists", html)
         self.assertIn('id="multi-sync-target"', html)
         self.assertIn('id="multi-sync-sources"', html)
         self.assertIn('id="btn-multi-sync-add"', html)

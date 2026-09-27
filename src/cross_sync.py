@@ -561,6 +561,11 @@ class CrossSyncService:
 
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
+        # Some adapters (notably PMDB) expose collection membership only when
+        # a user explicitly selects a named list destination. Do not advertise
+        # that as a default account-level write capability.
+        if target_list:
+            writable.update(getattr(target, "target_list_categories", ()) or ())
         if two_way:
             # Both ends must handle the category in both directions.
             readable &= set(target.readable_categories())
