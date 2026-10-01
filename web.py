@@ -80,6 +80,7 @@ from src.providers import (
     ADAPTER_TYPES,
     CATEGORY_LABELS,
     CATEGORY_COLLECTION,
+    CATEGORY_DROPPED,
     CATEGORY_WATCHLIST,
     enrich_identity,
     item_key,
@@ -814,7 +815,7 @@ def _profile_response(profile: dict, include_credentials: bool = False):
     payload["queue_status"] = _sync_runner.snapshot(payload.get("profile_id"))
     payload["hosted_oauth"] = hosted_oauth_status()
     try:
-        private_profile = _profile_store.get_private_profile_by_id(payload.get("profile_id"))
+        private_profile = _profile_store.get_readiness_context(payload.get("profile_id"))
         config = _config_from_profile(private_profile)
         payload["connection_readiness"] = _connection_readiness(
             config, list((private_profile.get("connection_health") or {}).values()),
@@ -5036,7 +5037,7 @@ def _list_sync_capabilities(config: AppConfig, profile_id: str) -> dict:
                 })
             if provider == "simkl" and getattr(adapter, "custom_lists_error", ""):
                 notices.append({"provider": "simkl", "message": adapter.custom_lists_error})
-        if provider in {"pmdb", "mdblist"}:
+        if provider in {"pmdb", "mdblist", "trakt"} and adapter.can_write():
             for entry in adapter.safe_target_lists():
                 if not str(entry.get("key") or "").startswith("list:"):
                     continue  # native watchlist/Picks are semantic, not List Sync destinations
@@ -5133,7 +5134,7 @@ def api_profile_list_sync_create():
         ])
         saved = _profile_store.upsert_list_sync_route(profile_id, {
             "id": route_id, "name": name,
-            "source": {"provider": source_provider, "collection_type": "static_list" if source_row["static"] else "status", "collection_id": source_id},
+            "source": {"provider": source_provider, "collection_type": "static_list" if source_row["static"] else "status", "collection_id": source_id, "collection_name": source_row["display_name"]},
             "destination": {"provider": destination_provider, "list_id": destination_id, "list_name": destination_row["display_name"]},
             "mode": mode, "managed_by_list_sync": True,
         })
@@ -5150,8 +5151,8 @@ def api_profile_list_sync_destination_create():
     body = request.get_json(silent=True) or {}
     provider = str(body.get("provider") or "").strip().lower()
     name = str(body.get("name") or "").strip()
-    if provider not in {"pmdb", "mdblist"} or not name:
-        return _json_error("Choose PMDB or MDBList and enter a list name", 400)
+    if provider not in {"pmdb", "mdblist", "trakt"} or not name:
+        return _json_error("Choose PMDB, MDBList, or Trakt and enter a list name", 400)
     try:
         profile = _profile_store.get_private_profile_by_id(profile_id)
     except KeyError:

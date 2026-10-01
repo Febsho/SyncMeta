@@ -223,6 +223,19 @@
     .pair-card-name:focus{border-color:var(--accent);outline:none}
     /* What the pair does, so a collapsed card still says something. */
     .pair-summary{font-size:12px;color:var(--z500);line-height:1.4}
+    .synced-list-summary{font-size:12px;color:var(--z500);margin-bottom:14px}
+    .synced-list-card{border:1px solid var(--line);border-radius:10px;background:var(--z950);margin-bottom:10px;overflow:hidden}
+    .synced-list-card:last-child{margin-bottom:0}
+    .synced-list-main{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:15px 16px}
+    .synced-list-details{flex:1;min-width:220px}
+    .synced-list-title{font-size:14px;font-weight:600;color:var(--z100);overflow-wrap:anywhere}
+    .synced-list-path{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:5px;color:var(--z400);font-size:12px}
+    .synced-list-path .provider{color:var(--z600)}
+    .synced-list-meta{font-size:11px;color:var(--z500);margin-top:7px}
+    .synced-list-state{font-size:11px;font-weight:600;color:var(--z400);border:1px solid var(--z800);border-radius:999px;padding:4px 9px;white-space:nowrap}
+    .synced-list-state.ok{color:var(--green);border-color:rgba(52,211,153,.35)}
+    .synced-list-state.issue{color:var(--red);border-color:rgba(248,113,113,.35)}
+    .synced-list-actions{display:flex;gap:7px;flex-wrap:wrap}
     .pair-sec{padding:16px;border-bottom:1px solid var(--line)}
     .pair-sec:last-child{border-bottom:none}
     .pair-sec-title{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--label);margin-bottom:10px}
@@ -1365,7 +1378,7 @@
 
       <div id="view-lists" style="display:none">
         <h1 class="page-title">Lists</h1>
-        <p class="page-sub">View and manage lists connected to your list sync routes.</p>
+        <p class="page-sub">Lists connected through List Sync, with their latest sync status.</p>
         <div class="panel">
           <div class="panel-header"><span>Synced Lists</span><button class="btn btn-sm btn-primary" type="button" id="btn-list-sync-create">Add list sync</button></div>
           <div class="panel-body" id="list-sync-editor" style="display:none"></div>
@@ -2003,7 +2016,7 @@
                   </div>
                   <div class="settings-group form-section">
                     <div class="settings-group-title">Resume Progress</div>
-                    <div class="settings-group-desc">Resume progress is a normal route category wherever both ends expose compatible playback APIs. Trakt and SIMKL can provide it; PublicMetaDB and Library can store it.</div>
+                    <div class="settings-group-desc">Resume progress is a normal route category wherever both ends expose compatible playback APIs. PublicMetaDB, Trakt, SIMKL, MDBList, and Library can send and receive it.</div>
                     <button class="btn btn-sm" type="button" onclick="switchView('list-sync')">Configure resume routes</button>
                   </div>
                 </div>
@@ -3925,18 +3938,31 @@
         if (!result.ok) { node.innerHTML = '<div class="empty">Sign in to view List Sync routes.</div>'; return; }
         const routes = Array.isArray(result.data.routes) ? result.data.routes : [];
         if (!routes.length) {
-          node.innerHTML = '<div class="empty">No synced lists yet. Add a list sync to show it here.</div>';
+          node.innerHTML = '<div class="empty">No list syncs configured yet. Add a list sync to see its lists here.</div>';
           return;
         }
-        node.innerHTML = routes.map(route => {
+        const listName = (name, id) => {
+          if (name) return String(name);
+          const key = String(id || '');
+          if (key.startsWith('list:')) return key.slice(5);
+          if (key.startsWith('status:')) return key.slice(7).split(':').map(part => part.replace(/\b\w/g, letter => letter.toUpperCase())).join(' · ');
+          return key || 'Unknown list';
+        };
+        const activeCount = routes.filter(route => route.enabled !== false).length;
+        node.innerHTML = `<div class="synced-list-summary">${routes.length} list ${routes.length === 1 ? 'sync' : 'syncs'} configured · ${activeCount} active</div>` + routes.map(route => {
           const source = route.source || {};
           const destination = route.destination || {};
-          const result = route.last_result || {};
-          const last = result.timestamp ? `Last sync ${esc(timeAgo(result.timestamp))}` : 'Never run';
-          const changes = result.timestamp ? ` · +${Number(result.added || 0)} / −${Number(result.removed || 0)}` : '';
-          const state = route.destination_needs_selection ? 'Destination required' : (route.enabled === false ? 'Paused' : (result.error_count ? 'Needs review' : 'Healthy'));
+          const lastResult = route.last_result || {};
+          const hasRun = !!lastResult.timestamp;
+          const hasIssue = !!(route.problem || route.destination_needs_selection || lastResult.error_count || lastResult.unconfirmed || (lastResult.blocked_removals || []).length);
+          const state = route.destination_needs_selection ? 'Destination required' : route.problem ? 'Needs review' : route.enabled === false ? 'Paused' : !hasRun ? 'Not synced yet' : hasIssue ? 'Needs review' : lastResult.dry_run ? 'Dry run' : 'Synced';
+          const stateClass = hasIssue ? 'issue' : state === 'Synced' ? 'ok' : '';
+          const last = hasRun ? `Last run ${esc(timeAgo(lastResult.timestamp))}` : 'No runs yet';
+          const changes = hasRun ? (lastResult.dry_run ? ` · ${Number(lastResult.added || 0)} would add · ${Number(lastResult.removed || 0)} would remove` : ` · ${Number(lastResult.added || 0)} added · ${Number(lastResult.removed || 0)} removed`) : '';
+          const sourceName = listName(source.collection_name, source.collection_id);
+          const destinationName = listName(destination.list_name, destination.list_id);
           const destinationPicker = route.destination_needs_selection ? `<div class="pair-card-foot"><span class="catalog-note">${esc(route.problem || 'Destination list was deleted. Select a replacement.')}</span><select data-list-sync-destination="${escAttr(route.pair_id)}"><option value="">Select destination…</option>${(route.destination_options || []).map(entry => `<option value="${escAttr(entry.key)}">${esc(entry.label)}</option>`).join('')}</select><button class="btn btn-sm" type="button" data-list-sync-destination-save="${escAttr(route.pair_id)}">Use destination</button></div>` : '';
-          return `<div class="pair-card"><div class="pair-card-top" style="cursor:default"><div class="pair-card-headings"><div class="pair-card-title">${esc(route.name || 'List Sync route')}</div><div class="pair-summary">${esc(providerLabel(source.provider))} · ${esc(source.collection_name || source.collection_id || '')} ${route.mode === 'two_way' ? '↔' : '→'} ${esc(providerLabel(destination.provider))} · ${esc(destination.list_name || destination.list_id || '')}</div><div class="pair-summary">${esc(state)} · ${last}${changes}</div></div><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}">Sync now</button><button class="btn btn-sm" type="button" data-list-sync-toggle="${escAttr(route.pair_id)}" data-list-sync-enabled="${route.enabled ? '0' : '1'}">${route.enabled ? 'Disable' : 'Enable'}</button></div>${destinationPicker}</div>`;
+          return `<div class="synced-list-card"><div class="synced-list-main"><div class="synced-list-details"><div class="synced-list-title">${esc(route.name || destinationName)}</div><div class="synced-list-path"><span><span class="provider">${esc(providerLabel(source.provider))} · </span>${esc(sourceName)}</span><span aria-label="${route.mode === 'two_way' ? 'two-way sync' : 'syncs to'}">${route.mode === 'two_way' ? '↔' : '→'}</span><span><span class="provider">${esc(providerLabel(destination.provider))} · </span>${esc(destinationName)}</span></div><div class="synced-list-meta">${last}${changes}</div></div><span class="synced-list-state ${stateClass}">${esc(state)}</span><div class="synced-list-actions"><button class="btn btn-sm" type="button" data-list-sync-run="${escAttr(route.pair_id)}" ${route.enabled === false || route.destination_needs_selection ? 'disabled' : ''}>Sync now</button><button class="btn btn-sm" type="button" data-list-sync-toggle="${escAttr(route.pair_id)}" data-list-sync-enabled="${route.enabled ? '0' : '1'}">${route.enabled ? 'Disable' : 'Enable'}</button></div></div>${destinationPicker}</div>`;
         }).join('');
         node.querySelectorAll('[data-list-sync-run]').forEach(button => button.addEventListener('click', () => runPairs(button.dataset.listSyncRun, false)));
         node.querySelectorAll('[data-list-sync-destination-save]').forEach(button => button.addEventListener('click', async () => {
@@ -3974,7 +4000,7 @@
         const destinations = result.data.destinations || [];
         const notices = (result.data.notices || []).map(row => `<div class="catalog-note">${esc(row.message || '')}</div>`).join('');
         if (!sources.length || !destinations.length) {
-          editor.innerHTML = notices + '<div class="catalog-note">Connect the source provider and add PMDB or MDBList write access before creating a route.</div>';
+          editor.innerHTML = notices + '<div class="catalog-note">Connect the source provider and add PMDB, MDBList, or Trakt write access before creating a route.</div>';
           return;
         }
         const sourceOption = row => `<option value="${escAttr(`${row.provider}|${row.id}`)}">${esc(providerLabel(row.provider))} · ${row.group === 'SIMKL Custom Lists' ? 'Custom List (read-only) · ' : ''}${esc(row.display_name)}</option>`;
@@ -4235,6 +4261,7 @@
       if (status) status.innerHTML = `<span class="live-step">Sync complete</span><span class="history-time">${esc(new Date().toLocaleTimeString())}</span>`;
       [el('btn-pairs-run'), el('btn-pairs-dry-run')].filter(Boolean).forEach(button => { button.disabled = false; });
       document.querySelectorAll('[data-pair-run], [data-pair-dry-run]').forEach(button => { button.disabled = false; });
+      if (el('view-lists')?.style.display !== 'none') fetchListSyncRoutes();
     }
 
     async function fetchLiveActivity() {
@@ -8133,10 +8160,12 @@
         }
 
         const profile = result.data.profile;
+        invalidateStatusFetch();
         // The tokens are on the profile now, so stop carrying them in memory.
         mdblistPendingAuth = null;
         populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
         renderDashboard(profile);
+        refreshPollingForProfile(profile);
         clearDraftDirty();
         connectionHealth = { ...(profile.connection_health || {}) };
         connectionReadiness = profile.connection_readiness || null;
@@ -8170,6 +8199,7 @@
       // Immediate feedback on the explicit Load button.
       const loadBtns = silent ? [] : Array.from(document.querySelectorAll('button[onclick="loadProfile()"]'));
       loadBtns.forEach(b => { b.disabled = true; b.dataset.origText = b.textContent; b.textContent = 'Loading...'; });
+      invalidateStatusFetch();
 
       try {
         const result = await apiPost('/api/profile/login', auth);
@@ -8180,8 +8210,10 @@
         }
 
         const profile = result.data.profile;
+        invalidateStatusFetch();
         populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
         renderDashboard(profile);
+        refreshPollingForProfile(profile);
         saveDraft(false);
         clearDraftDirty();
         loadBtns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText || 'Load Profile'; });
@@ -8241,9 +8273,7 @@
         // to come before the profile-identity writes below: a superseded response
         // must not rewrite sessionProfileId or localStorage just because its
         // render is skipped.
-        if (!wantsCredentials && myGen !== _statusGeneration) {
-          return profile;
-        }
+        if (myGen !== _statusGeneration) return null;
         if (profile && profile.profile_id) {
           sessionProfileId = profile.profile_id;
           el('profile-id').value = profile.profile_id;
@@ -8308,14 +8338,16 @@
       return await request;
     }
 
-    function _forceStatusRefresh() {
-      // Bump generation so any in-flight poll response is discarded, then fetch fresh.
+    function invalidateStatusFetch() {
+      // A login, logout or forced refresh supersedes every older response.
       _statusGeneration++;
       statusFetchInFlight = null;
-      // Drop ownership too, so the superseded request's finally block leaves the
-      // handle installed by the fresh fetch below alone.
       statusFetchToken = null;
-      fetchStatus(false);
+    }
+
+    function _forceStatusRefresh() {
+      invalidateStatusFetch();
+      return fetchStatus(false);
     }
 
     async function triggerSync(dryRun) {
@@ -8516,6 +8548,7 @@
       try {
         await apiPost('/api/profile/logout', {});
       } catch {}
+      invalidateStatusFetch();
       sessionProfileId = '';
       secretState = emptySecretState();
       storageRemove(CREDS_KEY);
@@ -8687,6 +8720,7 @@
         return;
       }
 
+      invalidateStatusFetch();
       sessionProfileId = '';
       secretState = emptySecretState();
       storageRemove(CREDS_KEY);
@@ -10519,7 +10553,11 @@
 
     if (storageGet(ENTERED_KEY)) enterApp();
     bindRedesignEvents();
-    loadHostedOAuthStatus().then(() => fetchStatus(false)).then(profile => {
+    loadHostedOAuthStatus().then(async () => {
+      // Restore editable settings from a valid session; a remembered UUID alone
+      // only grants the read-only dashboard and must never reveal credentials.
+      return await fetchStatus(true) || await fetchStatus(false);
+    }).then(profile => {
       if (profile) {
         if (storageGet(ENTERED_KEY)) switchView('overview');
         // The dashboard already receives aggregate unresolved counts in the
@@ -12029,7 +12067,7 @@
 
     async function runPairs(pairId, dryRun) {
       const buttons = [el('btn-pairs-run'), el('btn-pairs-dry-run'),
-        ...document.querySelectorAll('[data-pair-run], [data-pair-dry-run]')].filter(Boolean);
+        ...document.querySelectorAll('[data-pair-run], [data-pair-dry-run], [data-list-sync-run]:not(:disabled)')].filter(Boolean);
       buttons.forEach(b => { b.disabled = true; });
       const node = el('pairs-results');
       if (node) node.innerHTML = '<div class="empty">Running...</div>';
@@ -12119,6 +12157,7 @@
         }
         // Ownership records changed, so refresh to pick up any new problems.
         await fetchPairs();
+        if (el('view-lists')?.style.display !== 'none') await fetchListSyncRoutes();
         // The dashboard renders the same last-run data, so keep it in step.
         if (!dryRun) _forceStatusRefresh();
       } catch {

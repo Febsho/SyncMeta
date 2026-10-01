@@ -97,6 +97,34 @@ class _TraktClient:
 
 
 class PlanToWatchRoutingTests(unittest.TestCase):
+    def test_simkl_custom_list_writes_to_named_trakt_list(self) -> None:
+        class CustomSimkl(_SimklClient):
+            def get_custom_list_items(self, list_id):
+                self.asserted_list_id = list_id
+                return [_movie()]
+
+        class PersonalTrakt(_TraktClient):
+            def get_list_items(self, user, slug):
+                return []
+
+        simkl = CustomSimkl([])
+        trakt = PersonalTrakt()
+        pair = SyncPair.from_dict({
+            "source": "simkl", "target": "trakt", "categories": ["watchlist"],
+            "source_lists": ["custom:123"], "target_list": "list:me/favorites",
+        })
+
+        result = CrossSyncService({
+            "simkl": SimklAdapter(simkl, media_types=["movies"]),
+            "trakt": TraktAdapter(trakt),
+        }).run_pair(pair)
+
+        self.assertEqual(result.error_count, 0)
+        self.assertEqual(result.added, 1)
+        self.assertEqual(simkl.asserted_list_id, "123")
+        self.assertEqual(trakt.custom_adds[0][:2], ("me", "favorites"))
+        self.assertEqual(trakt.native_adds, [])
+
     def _run(self, *, target_list: str = "") -> _TraktClient:
         simkl_client = _SimklClient([_movie()])
         trakt_client = _TraktClient()

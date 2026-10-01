@@ -3068,13 +3068,20 @@ class SyncService:
             finally:
                 pool.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
 
-        # Expose the keys this sync owns so callers (e.g. watchlist) can persist them.
-        stats.synced_keys = sorted(desired_keys)
-
+        removed_keys: set[str] = set()
         if should_remove_missing:
             self._set_status(f"Removing stale items from {actual_list_name}")
-            stats.items_removed = self._remove_stale(list_id, existing_items, desired_keys, managed_keys)
+            stats.items_removed = self._remove_stale(
+                list_id, existing_items, desired_keys, managed_keys, removed_keys,
+            )
             self._publish_progress([stats], force=True)
+
+        # Keep ownership of stale entries whose removal failed, so a later run
+        # can retry instead of treating them as manually added PMDB items.
+        still_present = set(existing_map) - removed_keys
+        stats.synced_keys = sorted(
+            desired_keys | ((managed_keys or frozenset()) & still_present)
+        )
 
         if pending_mapping_contributions:
             self._set_status(f"Contributing PMDB mappings for {actual_list_name}")
@@ -3373,6 +3380,7 @@ class SyncService:
         existing_items: list[dict],
         desired_keys: set[str],
         managed_keys: frozenset[str] | None = None,
+        removed_keys: set[str] | None = None,
     ) -> int:
         stale_items: list[dict] = []
         for item in existing_items:
@@ -3391,6 +3399,8 @@ class SyncService:
 
         removed = 0
         if stale_items:
+            successful_keys: set[str] = set()
+            failed_keys: set[str] = set()
             pool = ThreadPoolExecutor(max_workers=min(_LIST_WRITE_WORKERS, len(stale_items)))
             shutdown_wait = True
             try:
@@ -3400,9 +3410,11 @@ class SyncService:
                 }
                 for future in self._iter_completed_futures(futures):
                     item = futures[future]
+                    key = f"{item.get('tmdb_id')}:{item.get('media_type')}"
                     try:
                         future.result()
                         removed += 1
+                        successful_keys.add(key)
                         self._record_cached_list_item_remove(list_id, item.get("id", ""))
                         logger.info(
                             "  │ − '%s' (tmdb %s, %s) removed as stale",
@@ -3412,12 +3424,15 @@ class SyncService:
                     except SyncCancelled:
                         raise
                     except Exception as exc:
+                        failed_keys.add(key)
                         logger.error("Failed to remove item %s: %s", item.get("id"), exc)
             except SyncCancelled:
                 shutdown_wait = False
                 raise
             finally:
                 pool.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
+            if removed_keys is not None:
+                removed_keys.update(successful_keys - failed_keys)
         if removed:
             logger.info("  │ Removed %d stale item(s) from list %s", removed, list_id)
         return removed

@@ -2,6 +2,7 @@ import unittest
 
 from src.config import SyncPair
 from src.providers import (
+    PLANNED_FLAG,
     VISIBILITY_PRIVATE,
     VISIBILITY_PUBLIC,
     PmdbAdapter,
@@ -78,30 +79,31 @@ class PmdbVisibilityTests(unittest.TestCase):
     def test_a_public_pair_creates_a_public_watchlist(self) -> None:
         client = FakePmdbClient()
         PmdbAdapter(client).add(
-            "watchlist", [{"tmdb_id": "5", "media_type": "movie"}],
+            "watchlist", [{"tmdb_id": "5", "media_type": "movie", PLANNED_FLAG: True}],
             visibility=VISIBILITY_PUBLIC,
         )
         self.assertEqual(client.created, [("Watchlist", True, "watchlist")])
 
     def test_the_default_stays_private(self) -> None:
         client = FakePmdbClient()
-        PmdbAdapter(client).add("watchlist", [{"tmdb_id": "5", "media_type": "movie"}])
+        PmdbAdapter(client).add("watchlist", [{"tmdb_id": "5", "media_type": "movie", PLANNED_FLAG: True}])
         self.assertEqual(client.created, [("Watchlist", False, "watchlist")])
 
-    def test_a_public_pair_creates_a_public_collection_list(self) -> None:
+    def test_collection_does_not_implicitly_create_a_list(self) -> None:
         client = FakePmdbClient()
-        PmdbAdapter(client).add(
+        result = PmdbAdapter(client).add(
             "collection", [{"tmdb_id": "5", "media_type": "movie"}],
             visibility=VISIBILITY_PUBLIC,
         )
-        self.assertEqual([c[1] for c in client.created], [True])
+        self.assertEqual(client.created, [])
+        self.assertEqual(result["not_found"], 1)
 
     def test_an_existing_list_is_never_re_flagged(self) -> None:
         # The setting describes what SyncMeta creates. Flipping a list the user
         # already had would publish something they chose to keep private.
         client = FakePmdbClient(existing={"id": "old-list"})
         PmdbAdapter(client).add(
-            "watchlist", [{"tmdb_id": "5", "media_type": "movie"}],
+            "watchlist", [{"tmdb_id": "5", "media_type": "movie", PLANNED_FLAG: True}],
             visibility=VISIBILITY_PUBLIC,
         )
         self.assertEqual(client.created, [])

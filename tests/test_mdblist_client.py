@@ -8,6 +8,25 @@ from src.mdblist_client import MdbListClient
 
 
 class MdbListClientTests(unittest.TestCase):
+    def test_resume_read_and_pause_write(self) -> None:
+        client = MdbListClient(MdbListConfig(api_key="key"))
+        response = Mock()
+        response.json.return_value = [{
+            "id": 1, "type": "episode", "progress": 30, "runtime": 40,
+            "show": {"title": "Show", "ids": {"tmdb": 42}},
+            "episode": {"season": 2, "number": 3},
+        }]
+        with patch.object(client, "_get", return_value=response):
+            rows = client.get_playback_progress()
+        self.assertEqual(rows[0]["position_ms"], 720000)
+        self.assertEqual(rows[0]["episode"], 3)
+        with patch.object(client, "_post", return_value={"action": "pause"}) as post:
+            self.assertTrue(client.save_playback_progress(rows[0]))
+        post.assert_called_once_with("/scrobble/pause", {
+            "show": {"ids": {"tmdb": 42}, "season": 2, "episode": 3},
+            "progress": 30.0,
+        })
+
     def test_get_user_lists_normalizes_response(self) -> None:
         client = MdbListClient(MdbListConfig(api_key="key"))
         response = Mock()

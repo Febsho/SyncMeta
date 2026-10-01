@@ -132,6 +132,21 @@ class FribbIndexTests(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry["anilist_id"], 20)
 
+    def test_shared_tvdb_id_resolves_only_the_agreed_series(self) -> None:
+        store = self._loaded_store()
+        store._fribb_by_tvdb[78857].append({
+            "anilist_id": 21, "themoviedb_id": {"tv": 46260},
+            "season": {"tmdb": 2},
+        })
+        self.assertIsNone(store.lookup_fribb(tvdb_id=78857))
+        self.assertEqual(store.lookup_tvdb_series(78857), {
+            "tvdb_id": 78857, "themoviedb_id": {"tv": 46260},
+        })
+        store._fribb_by_tvdb[78857].append({
+            "anilist_id": 22, "themoviedb_id": {"tv": 99999},
+        })
+        self.assertIsNone(store.lookup_tvdb_series(78857))
+
     def test_validate_tmdb_accepts_movie_mappings(self) -> None:
         store = self._loaded_store()
         entry = store.lookup_fribb(anilist_id=164)
@@ -178,6 +193,13 @@ class XmlTmdbCoordinateTests(unittest.TestCase):
         self.assertEqual(result["tmdb_season"], 3)
         self.assertEqual(result["tmdb_episode"], 8)  # 3 + tmdboffset 5
         self.assertEqual(result["tmdb_id"], 55555)
+
+    def test_tvdb_episode_can_reverse_to_explicit_tmdb_coordinates(self) -> None:
+        store = self._loaded_store()
+        self.assertEqual(store.resolve_tmdb_episode_from_tvdb_episode(70000, 2, 15), {
+            "tmdb_id": 55555, "tmdb_season": 3, "tmdb_episode": 8,
+        })
+        self.assertIsNone(store.resolve_tmdb_episode_from_tvdb_episode(70001, 1, 4))
 
     def test_entries_without_tmdb_attributes_are_unchanged(self) -> None:
         store = self._loaded_store()

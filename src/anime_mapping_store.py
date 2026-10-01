@@ -185,6 +185,26 @@ class AnimeMappingStore:
         self._ensure_fribb_loaded()
         return list(self._fribb_by_tmdb.get(int(tmdb_id)) or [])
 
+    def lookup_tvdb_series(self, tvdb_id: int) -> dict | None:
+        """Resolve a shared TVDB show id only when every cour has one TMDB show.
+
+        A TVDB series often contains several AniList entries. The shared id can
+        identify the series, but it cannot choose an AniList cour or episode
+        offset. Return only the agreed series identity in that case.
+        """
+        self._ensure_fribb_loaded()
+        entries = self._fribb_by_tvdb.get(int(tvdb_id)) or []
+        identities = {
+            extract_tmdb(entry.get("themoviedb_id") or entry.get("themoviedb"))
+            for entry in entries
+        }
+        if len(identities) != 1:
+            return None
+        tmdb_id, namespace = next(iter(identities))
+        if not tmdb_id or namespace != "tv":
+            return None
+        return {"tvdb_id": int(tvdb_id), "themoviedb_id": {"tv": tmdb_id}}
+
     def validate_tmdb(self, entry: dict | None, tmdb_id: int | None) -> bool:
         if not entry or not tmdb_id:
             return False
@@ -210,6 +230,53 @@ class AnimeMappingStore:
         if not result:
             return result
         return self._with_tmdb_coordinates(result, anidb_id, anidb_episode)
+
+    def resolve_tmdb_episode_from_tvdb_episode(
+        self, tvdb_id: int, tvdb_season: int, tvdb_episode: int,
+    ) -> dict | None:
+        """Invert only XML mappings that explicitly supply TMDB coordinates.
+
+        Each candidate is checked through the forward mapper. Overlapping
+        cours or TVDB-only XML entries never produce a guessed TMDB episode.
+        """
+        if min(tvdb_id, tvdb_season, tvdb_episode) <= 0:
+            return None
+        self._ensure_xml_loaded()
+        matches: set[tuple[int, int, int]] = set()
+        for entry in self._xml_by_tvdb.get(int(tvdb_id), []):
+            anidb_id = _safe_int(entry.attrib.get("anidbid"))
+            if not anidb_id:
+                continue
+            mappings = self._get_mapping_list(entry)
+            offsets = {_safe_int(entry.attrib.get("episodeoffset")) or 0}
+            offsets.update(_safe_int(row.attrib.get("offset")) or 0 for row in mappings)
+            seasons = {1}
+            seasons.update(
+                season for row in mappings
+                if (season := _safe_int(row.attrib.get("anidbseason"))) and season > 0
+            )
+            for offset in offsets:
+                local_episode = tvdb_episode - offset
+                if not 1 <= local_episode <= 500:
+                    continue
+                for local_season in seasons:
+                    mapped = self.resolve_tvdb_episode_from_anidb_episode(
+                        anidb_id, local_episode, local_season,
+                    ) or {}
+                    if (mapped.get("tvdb_id") != tvdb_id
+                            or mapped.get("tvdb_season") != tvdb_season
+                            or mapped.get("tvdb_episode") != tvdb_episode):
+                        continue
+                    tmdb_id = _safe_int(mapped.get("tmdb_id"))
+                    tmdb_season = _safe_int(mapped.get("tmdb_season"))
+                    tmdb_episode = _safe_int(mapped.get("tmdb_episode"))
+                    if tmdb_id and tmdb_season and tmdb_episode:
+                        matches.add((tmdb_id, tmdb_season, tmdb_episode))
+        if len(matches) != 1:
+            return None
+        tmdb_id, tmdb_season, tmdb_episode = next(iter(matches))
+        return {"tmdb_id": tmdb_id, "tmdb_season": tmdb_season,
+                "tmdb_episode": tmdb_episode}
 
     def _with_tmdb_coordinates(self, result: dict, anidb_id: int, anidb_episode: int) -> dict:
         """Attach TMDB coordinates to a TVDB resolution when the feed has them.
@@ -745,8 +812,18 @@ def resolve_tvdb_episode_from_anidb_episode(
     return _STORE.resolve_tvdb_episode_from_anidb_episode(anidb_id, anidb_episode, anidb_season)
 
 
+def resolve_tmdb_episode_from_tvdb_episode(
+    tvdb_id: int, tvdb_season: int, tvdb_episode: int,
+) -> dict | None:
+    return _STORE.resolve_tmdb_episode_from_tvdb_episode(tvdb_id, tvdb_season, tvdb_episode)
+
+
 def lookup_fribb_entries_by_tmdb(tmdb_id: int) -> list[dict]:
     return _STORE.lookup_fribb_entries_by_tmdb(int(tmdb_id))
+
+
+def lookup_tvdb_series(tvdb_id: int) -> dict | None:
+    return _STORE.lookup_tvdb_series(int(tvdb_id))
 
 
 def get_xml_entries_by_tmdb(tmdb_id: int) -> list[ET.Element]:

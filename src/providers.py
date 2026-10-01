@@ -202,6 +202,26 @@ def item_key(item: dict) -> str:
     return key
 
 
+def _write_resume_points(client, items: list[dict]) -> dict:
+    """Keep exact receipts because each scrobble is a separate API call."""
+    confirmed, rejected = [], []
+    for item in items:
+        key = item_key(item)
+        try:
+            saved = client.save_playback_progress(item)
+        except Exception:
+            logger.warning("Could not save resume point for %s", key, exc_info=True)
+            continue  # No receipt: leave this action outstanding for a retry.
+        if saved:
+            confirmed.append(key)
+        else:
+            rejected.append(key)
+    return {
+        "added": len(confirmed), "not_found": len(rejected),
+        "confirmed_keys": confirmed, "not_found_keys": rejected,
+    }
+
+
 #: The canonical shape a play timestamp is compared in. Providers report the
 #: same instant with different spellings ("2024-01-02T03:04:05.000Z",
 #: "2024-01-02T03:04:05+00:00"), and two spellings of one play must not read as
@@ -378,7 +398,35 @@ def has_portable_identity(item: dict) -> bool:
     return ":title:" not in item_key(item)
 
 
-def enrich_identity(item: dict) -> dict:
+def _map_tvdb_episode_with_anime_seasons(
+    seasons: list[dict], tvdb_season: int, tvdb_episode: int,
+) -> tuple[int, int] | None:
+    """Translate one TVDB episode only when the PMDB arc identifies one target."""
+    matches: set[tuple[int, int]] = set()
+    for row in seasons:
+        try:
+            if int(row["season_number"]) != tvdb_season:
+                continue
+            season = int(row["tmdb_season"])
+            start = int(row["tmdb_episode_start"])
+            count = row.get("episode_count")
+            end = row.get("tmdb_episode_end")
+            if season <= 0 or start <= 0 or tvdb_episode <= 0:
+                continue
+            if count is not None:
+                if int(count) <= 0 or tvdb_episode > int(count):
+                    continue
+            episode = start + tvdb_episode - 1
+            if end is not None:
+                if int(end) < start or episode > int(end):
+                    continue
+            matches.add((season, episode))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def enrich_identity(item: dict, anime_seasons_lookup=None, infer_anime_from_tvdb: bool = False) -> dict:
     """Map anime identity and episode coordinates into TMDB's structure.
 
     AniList reports AniList/MAL ids and no TMDB id, while Trakt and PMDB report
@@ -397,6 +445,24 @@ def enrich_identity(item: dict) -> dict:
     ids = item.get("ids") or {}
     has_tmdb = bool(str(item.get("tmdb_id") or ids.get("tmdb") or "").strip())
     looks_anime = is_anime(item)
+    if infer_anime_from_tvdb and has_tmdb and not looks_anime:
+        tvdb_id = item.get("tvdb_id") or ids.get("tvdb")
+        if tvdb_id:
+            try:
+                from . import fribb_client
+                mapped = fribb_client.lookup_tvdb_series(int(tvdb_id))
+                mapped_tmdb, namespace = fribb_client.extract_tmdb(
+                    (mapped or {}).get("themoviedb_id") or (mapped or {}).get("themoviedb")
+                )
+                if mapped_tmdb and namespace == "tv":
+                    if str(mapped_tmdb) != str(item.get("tmdb_id") or ids.get("tmdb")):
+                        return {**item, "match_confidence": "ambiguous"}
+                    item = {**item, "is_anime": True}
+                    looks_anime = True
+            except (TypeError, ValueError):
+                pass
+            except Exception:
+                logger.debug("TVDB anime identification failed for %r", item.get("title"), exc_info=True)
     if has_tmdb and not looks_anime:
         return item
 
@@ -429,6 +495,25 @@ def enrich_identity(item: dict) -> dict:
                 )
                 if candidate:
                     candidates.append((source_name, entry, candidate, namespace))
+        # A TVDB id alone does not prove that a show is anime. Once the source
+        # explicitly says it is, a *unique* Fribb TVDB match can still give a
+        # portable series identity for watchlist and collection sync. Shared
+        # TVDB ids span multiple cours, so lookup_by_tvdb refuses those.
+        if looks_anime and not candidates:
+            tvdb_id = item.get("tvdb_id") or ids.get("tvdb")
+            try:
+                tvdb_entry = (
+                    fribb_client.lookup_by_tvdb(int(tvdb_id))
+                    or fribb_client.lookup_tvdb_series(int(tvdb_id))
+                ) if tvdb_id else None
+            except (TypeError, ValueError):
+                tvdb_entry = None
+            if isinstance(tvdb_entry, dict):
+                candidate, namespace = fribb_client.extract_tmdb(
+                    tvdb_entry.get("themoviedb_id") or tvdb_entry.get("themoviedb")
+                )
+                if candidate:
+                    candidates.append(("tvdb", tvdb_entry, candidate, namespace))
     except Exception:
         logger.debug("Identity enrichment failed for %r", item.get("title"), exc_info=True)
         return {**item, "match_confidence": "probable"} if looks_anime else item
@@ -461,6 +546,10 @@ def enrich_identity(item: dict) -> dict:
     enriched["mapping_evidence"] = [source for source, _, _, _ in chosen]
     enriched_ids = dict(ids)
     enriched_ids["tmdb"] = str(tmdb_id)
+    mapped_tvdb_id = entry.get("tvdb_id")
+    if mapped_tvdb_id and not (item.get("tvdb_id") or ids.get("tvdb")):
+        enriched["tvdb_id"] = str(mapped_tvdb_id)
+        enriched_ids["tvdb"] = str(mapped_tvdb_id)
     # The same Fribb entry usually carries the IMDB id too. Trakt and SIMKL
     # match on IMDB more reliably than on a TMDB tv id, so an anime-native item
     # gains the id the target's writer actually wants.
@@ -502,6 +591,20 @@ def enrich_identity(item: dict) -> dict:
     mapped_season = source_season if coordinates_are_tmdb else None
     mapped_episode = episode if coordinates_are_tmdb else None
     mapped_tmdb_id = None
+    if source_name == "tvdb" and episode is not None and not coordinates_are_tmdb:
+        try:
+            from . import anime_mapping_store
+            tvdb_id = int(item.get("tvdb_id") or ids.get("tvdb"))
+            tvdb_mapping = anime_mapping_store.resolve_tmdb_episode_from_tvdb_episode(
+                tvdb_id, source_season, episode,
+            )
+            if (tvdb_mapping and int(tvdb_mapping["tmdb_id"]) == tmdb_id):
+                mapped_season = int(tvdb_mapping["tmdb_season"])
+                mapped_episode = int(tvdb_mapping["tmdb_episode"])
+        except (TypeError, ValueError, KeyError):
+            pass
+        except Exception:
+            logger.debug("TVDB episode lookup failed for %r", item.get("title"), exc_info=True)
     if mapped_season is None and isinstance(direct_coordinates, dict):
         if direct_coordinates.get("tmdb_season") is not None and direct_coordinates.get("tmdb_episode") is not None:
             mapped_season = direct_coordinates.get("tmdb_season")
@@ -565,7 +668,7 @@ def enrich_identity(item: dict) -> dict:
             enriched["episode_start"] = simple_offset + 1
             enriched["episode_end"] = simple_offset + episode_count
             enriched["episode_offset"] = simple_offset
-    if mapped_season is None and isinstance(season_map, dict):
+    if mapped_season is None and source_name != "tvdb" and isinstance(season_map, dict):
         mapped_season = season_map.get("tmdb")
         if mapped_season is not None and episode is not None:
             offset = offset_map.get("tmdb", 0) if isinstance(offset_map, dict) else 0
@@ -574,21 +677,54 @@ def enrich_identity(item: dict) -> dict:
             except (TypeError, ValueError):
                 mapped_episode = episode
 
-    # Some mappings only carry TVDB coordinates. Anime-Lists is still a better
-    # coordinate than the provider-local "season 1"; for the common case TMDB
-    # follows the same season boundary, and PMDB-specific remapping can refine it
-    # later when that provider is the target.
-    if mapped_season is None and isinstance(direct_coordinates, dict):
-        mapped_season = direct_coordinates.get("tvdb_season")
-        mapped_episode = direct_coordinates.get("tvdb_episode")
-    if mapped_season is None and isinstance(season_map, dict):
-        mapped_season = season_map.get("tvdb")
-        if mapped_season is not None and episode is not None:
+    # Keep TVDB coordinates in their own namespace. A TVDB season/episode is
+    # not a TMDB season/episode, even when the numbers happen to coincide.
+    tvdb_season = source_season if source_name == "tvdb" else (
+        direct_coordinates.get("tvdb_season") if isinstance(direct_coordinates, dict) else None
+    )
+    tvdb_episode = episode if source_name == "tvdb" else (
+        direct_coordinates.get("tvdb_episode") if isinstance(direct_coordinates, dict) else None
+    )
+    if tvdb_season is None and isinstance(season_map, dict):
+        tvdb_season = season_map.get("tvdb")
+        if tvdb_season is not None and episode is not None:
             offset = offset_map.get("tvdb", 0) if isinstance(offset_map, dict) else 0
             try:
-                mapped_episode = int(offset or 0) + episode
+                tvdb_episode = int(offset or 0) + episode
             except (TypeError, ValueError):
-                mapped_episode = episode
+                tvdb_episode = episode
+    if (mapped_season is None and tvdb_season is not None
+            and tvdb_episode is not None and anime_seasons_lookup is not None):
+        try:
+            translated = _map_tvdb_episode_with_anime_seasons(
+                anime_seasons_lookup(tmdb_id), int(tvdb_season), int(tvdb_episode),
+            )
+            if translated:
+                mapped_season, mapped_episode = translated
+        except Exception:
+            logger.debug("PMDB anime season lookup failed for %r", item.get("title"), exc_info=True)
+    try:
+        if tvdb_season is not None and int(tvdb_season) > 0:
+            enriched["tvdb_season"] = int(tvdb_season)
+            if tvdb_episode is not None and int(tvdb_episode) > 0:
+                enriched["tvdb_episode"] = int(tvdb_episode)
+    except (TypeError, ValueError):
+        pass
+
+    # A TVDB-only mapping establishes the series but cannot justify a history
+    # or resume write to a TMDB-keyed destination. Leave it unresolved until a
+    # direct TMDB mapping (or a verified manual mapping) is available.
+    native_episode_structure = bool(
+        item.get("anilist_id") or ids.get("anilist")
+        or item.get("mal_id") or ids.get("mal")
+        or item.get("anidb_id") or ids.get("anidb")
+        or source_name == "simkl"
+        or str(item.get("simkl_type") or "").lower() == "anime"
+    )
+    if (episode is not None and not coordinates_are_tmdb
+            and mapped_season is None
+            and (source_name == "tvdb" or native_episode_structure)):
+        enriched["match_confidence"] = "probable"
 
     try:
         if mapped_tmdb_id:
@@ -799,7 +935,7 @@ class TraktAdapter(ProviderAdapter):
     # paginated read hands all of them back.
     records_plays = True
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_DROPPED)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
     supports_list_selection = True
     supports_target_lists = True
     supports_visibility = True
@@ -967,6 +1103,15 @@ class TraktAdapter(ProviderAdapter):
             if meta.get("user") and meta.get("slug")
         ]
 
+    def create_target_list(self, name: str, visibility: str = VISIBILITY_PRIVATE) -> dict:
+        meta = self._client.get_or_create_personal_list(name, privacy=visibility)
+        if not meta.get("user") or not meta.get("slug"):
+            raise RuntimeError("Trakt did not return a usable list reference")
+        return {
+            "key": f"list:{meta['user']}/{meta['slug']}",
+            "label": str(meta.get("name") or name),
+        }
+
     def search_lists(self, query: str) -> list[dict]:
         return [
             {
@@ -1013,6 +1158,8 @@ class TraktAdapter(ProviderAdapter):
             return self._client.add_to_watchlist(items)
         if category == CATEGORY_HISTORY:
             return self._client.add_to_history(items)
+        if category == CATEGORY_RESUME:
+            return _write_resume_points(self._client, items)
         if category == CATEGORY_COLLECTION:
             return self._client.add_to_collection(items)
         if category == CATEGORY_DROPPED:
@@ -1057,7 +1204,7 @@ class SimklAdapter(ProviderAdapter):
     # is invisible on the next read, so rewatches are not carried to it.
     records_plays = False
     reads = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME, CATEGORY_DROPPED)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_HISTORY, CATEGORY_COLLECTION, CATEGORY_RESUME)
     supports_list_selection = True
     supports_target_lists = False
 
@@ -1235,6 +1382,8 @@ class SimklAdapter(ProviderAdapter):
     ) -> dict:
         if category == CATEGORY_HISTORY:
             return self._client.add_to_history(items)
+        if category == CATEGORY_RESUME:
+            return _write_resume_points(self._client, items)
         if category in (CATEGORY_WATCHLIST, CATEGORY_COLLECTION):
             return self._client.add_to_list(items, category)
         return self._unsupported(category, "write")
@@ -1980,8 +2129,8 @@ class MdbListAdapter(ProviderAdapter):
     # MDBList's sync API has watchlist, collection, and watched-history
     # endpoints. It has no dropped-status endpoint; advertising one lets routes
     # be saved that can only fail at runtime.
-    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
-    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY)
+    reads = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_RESUME)
+    writes = (CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_RESUME)
     supports_list_selection = True
     supports_list_search = True
     supports_target_lists = True
@@ -2140,6 +2289,9 @@ class MdbListAdapter(ProviderAdapter):
         if category not in self.reads:
             return self._unsupported(category, "read")
 
+        if category == CATEGORY_RESUME:
+            return self._client.get_playback_progress()
+
         selected = [str(key) for key in (source_lists or []) if str(key).strip()]
         picked_lists = [key for key in selected if key.startswith("list:")]
 
@@ -2183,6 +2335,8 @@ class MdbListAdapter(ProviderAdapter):
             raise ValueError(self.write_blocked_reason())
         if category not in self.writes:
             return self._unsupported(category, "write")
+        if category == CATEGORY_RESUME:
+            return _write_resume_points(self._client, items)
         list_id = self._list_id(target_list)
         if list_id:
             if category == CATEGORY_HISTORY:

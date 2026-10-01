@@ -611,6 +611,70 @@ class MdbListClient:
         "history": "/sync/watched",
     }
 
+    def get_playback_progress(self) -> list[dict]:
+        """Read paused sessions using MDBList's playback feed."""
+        payload = self._get("/sync/playback").json() or []
+        if not isinstance(payload, list):
+            return []
+        points = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") not in {"movie", "episode"}:
+                continue
+            media_type = "movie" if entry.get("type") == "movie" else "tv"
+            media = entry.get("movie") if media_type == "movie" else entry.get("show")
+            if not isinstance(media, dict):
+                continue
+            ids = media.get("ids") or {}
+            tmdb_id = ids.get("tmdb")
+            runtime = entry.get("runtime")
+            progress = entry.get("progress")
+            if not tmdb_id or not runtime or progress is None:
+                continue
+            try:
+                runtime_ms = int(runtime) * 60000
+                position_ms = round(runtime_ms * float(progress) / 100)
+            except (ValueError, TypeError):
+                continue
+            row = {
+                "tmdb_id": tmdb_id, "media_type": media_type,
+                "title": media.get("title") or "Unknown",
+                "position_ms": position_ms, "runtime_ms": runtime_ms,
+                "progress": float(progress), "paused_at": entry.get("paused_at") or entry.get("updated_at"),
+            }
+            if media_type == "tv":
+                episode = entry.get("episode") or {}
+                season = episode.get("season")
+                number = episode.get("number") or episode.get("episode")
+                if not season or not number:
+                    continue
+                row.update(season=int(season), episode=int(number))
+            points.append(row)
+        return points
+
+    def save_playback_progress(self, item: dict) -> bool:
+        tmdb_id = str(item.get("tmdb_id") or "")
+        runtime = int(item.get("runtime_ms") or 0)
+        position = int(item.get("position_ms") or 0)
+        if not tmdb_id.isdigit() or runtime <= 0 or position <= 0:
+            return False
+        progress = round(100 * position / runtime, 2)
+        if not 0 < progress < 80:
+            return False
+        if item.get("media_type") == "movie":
+            media = {"movie": {"ids": {"tmdb": int(tmdb_id)}}}
+        else:
+            season, episode = item.get("season"), item.get("episode")
+            if not str(season or "").isdigit() or not str(episode or "").isdigit():
+                return False
+            if int(season) < 1 or int(episode) < 1:
+                return False
+            media = {"show": {"ids": {"tmdb": int(tmdb_id)},
+                              "season": int(season), "episode": int(episode)}}
+        response = self._post("/scrobble/pause", {**media, "progress": progress})
+        return isinstance(response, dict) and response.get("action") == "pause"
+
     _SYNC_WRITE_PATHS = {
         "watchlist": ("/watchlist/items/add", "/watchlist/items/remove"),
         "collection": ("/sync/collection", "/sync/collection/remove"),

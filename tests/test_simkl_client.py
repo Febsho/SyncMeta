@@ -219,6 +219,19 @@ class RecordingSimklClient(SimklClient):
 
 
 class SimklClientTests(unittest.TestCase):
+    def test_resume_write_uses_paused_scrobble_with_typed_tmdb_show(self) -> None:
+        client = RecordingSimklClient()
+        posts = []
+        client._post = lambda path, payload: posts.append((path, payload)) or {"action": "pause"}
+        self.assertTrue(client.save_playback_progress({
+            "tmdb_id": 42, "media_type": "tv", "season": 2, "episode": 3,
+            "position_ms": 30000, "runtime_ms": 100000,
+        }))
+        self.assertEqual(posts, [("/scrobble/pause", {
+            "show": {"ids": {"tmdb": 42, "type": "show"}},
+            "episode": {"season": 2, "number": 3}, "progress": 30.0,
+        })])
+
     def test_fetch_list_uses_type_specific_endpoint(self) -> None:
         client = RecordingSimklClient()
 

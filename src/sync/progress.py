@@ -44,7 +44,7 @@ from .planner import (
 MIN_MEANINGFUL_PERCENT = 2.0
 #: At or above this the title is finished, not in progress. Providers broadly
 #: agree on this band; PublicMetaDB deletes the resume point outright at 80%.
-COMPLETED_PERCENT = 90.0
+COMPLETED_PERCENT = 80.0
 #: A drop at least this large is a new viewing or a stale record, and the data
 #: cannot say which.
 SUSPICIOUS_REWIND_PERCENT = 50.0

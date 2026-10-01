@@ -2874,6 +2874,57 @@ class SyncServiceTests(unittest.TestCase):
             [("pmdb-active", "stale-1"), ("pmdb-active", "stale-2")],
         )
 
+    def test_pmdb_watchlist_keeps_ownership_when_a_removal_fails(self) -> None:
+        config = AppConfig(
+            pmdb=PublicMetaDBConfig(api_key="pmdb-key"),
+            sync=SyncConfig(
+                media_types=["movies"],
+                pmdb_watchlist_managed_keys=["101:movie", "999:movie"],
+            ),
+        )
+        service = SyncService(config)
+
+        class FailingPMDB(StubPMDBClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail_removal = True
+
+            def remove_item_from_list(self, list_id: str, item_id: str) -> None:
+                if item_id == "stale" and self.fail_removal:
+                    raise RuntimeError("temporary PMDB failure")
+                super().remove_item_from_list(list_id, item_id)
+
+        pmdb = FailingPMDB()
+        pmdb.list_items_by_id["pmdb-active"] = [
+            {"id": "keep", "tmdb_id": 101, "media_type": "movie"},
+            {"id": "stale", "tmdb_id": 999, "media_type": "movie"},
+            {"id": "stale-duplicate", "tmdb_id": 999, "media_type": "movie"},
+        ]
+        service._pmdb = pmdb
+        service._matcher = StubMatcher()
+
+        def sync() -> SyncStats:
+            return service._sync_list(
+                [{"title": "Keep", "tmdb_id": 101, "media_type": "movie"}],
+                "Watchlist", "Combined watchlist", display_name="PMDB Watchlist",
+                source_name="Combined", list_type="watchlist",
+                force_remove_missing=True, managed_keys=frozenset(config.sync.pmdb_watchlist_managed_keys),
+            )
+
+        first = sync()
+        self.assertEqual(first.items_removed, 1)
+        self.assertEqual(first.synced_keys, ["101:movie", "999:movie"])
+
+        config.sync.pmdb_watchlist_managed_keys = first.synced_keys
+        pmdb.fail_removal = False
+        second = sync()
+        self.assertEqual(second.items_removed, 1)
+        self.assertEqual(second.synced_keys, ["101:movie"])
+        self.assertEqual(
+            pmdb.removed_list_items,
+            [("pmdb-active", "stale-duplicate"), ("pmdb-active", "stale")],
+        )
+
     def test_trakt_watched_history_skips_already_watched_title_even_with_new_timestamp(self) -> None:
         config = AppConfig(
             simkl=SimklConfig(

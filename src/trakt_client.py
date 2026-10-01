@@ -553,6 +553,7 @@ class TraktClient:
                         continue
                     items.append({
                         "tmdb_id": int(tmdb_id),
+                        "tvdb_id": str((show.get("ids") or {}).get("tvdb") or "") or None,
                         "media_type": "tv",
                         "season": season_number,
                         "episode": episode_number,
@@ -569,6 +570,41 @@ class TraktClient:
         progress.extend(self._get_paginated_playback("/sync/playback/movies", self._normalize_movie_playback_entry))
         progress.extend(self._get_paginated_playback("/sync/playback/episodes", self._normalize_episode_playback_entry))
         return progress
+
+    def save_playback_progress(self, item: dict) -> bool:
+        """Save a resume point without marking the title watched."""
+        tmdb_id = str(item.get("tmdb_id") or "")
+        runtime = int(item.get("runtime_ms") or 0)
+        position = int(item.get("position_ms") or 0)
+        if not tmdb_id.isdigit() or runtime <= 0 or position <= 0:
+            return False
+        progress = round(100 * position / runtime, 2)
+        if not 1 <= progress < 80:
+            return False
+        if item.get("media_type") == "movie":
+            media = {"movie": {"ids": {"tmdb": int(tmdb_id)}}}
+        else:
+            season, episode = item.get("season"), item.get("episode")
+            if not str(season or "").isdigit() or not str(episode or "").isdigit():
+                return False
+            if int(season) < 1 or int(episode) < 1:
+                return False
+            # Scrobble accepts an episode ID, not a show ID plus S/E numbers.
+            matches = self._get(f"/search/tmdb/{tmdb_id}", params={"type": "show"}) or []
+            if not isinstance(matches, list):
+                return False
+            show_id = next((row.get("show", {}).get("ids", {}).get("trakt") for row in matches
+                            if isinstance(row, dict) and isinstance(row.get("show"), dict)
+                            and str(row["show"].get("ids", {}).get("tmdb")) == tmdb_id), None)
+            if not show_id:
+                return False
+            resolved = self._get(f"/shows/{show_id}/seasons/{int(season)}/episodes/{int(episode)}")
+            episode_id = (resolved or {}).get("ids", {}).get("trakt") if isinstance(resolved, dict) else None
+            if not episode_id:
+                return False
+            media = {"episode": {"ids": {"trakt": episode_id}}}
+        response = self._post("/scrobble/pause", {**media, "progress": progress})
+        return isinstance(response, dict) and response.get("action") == "pause"
 
     def _get_paginated_history(self, path: str, normalizer, since: str | None = None, status_callback=None, label: str = "") -> list[dict]:
         items: list[dict] = []
@@ -764,6 +800,7 @@ class TraktClient:
             return None
         return {
             "tmdb_id": int(tmdb_id),
+            "tvdb_id": str(show_ids.get("tvdb") or "") or None,
             "media_type": "tv",
             "season": int(season),
             "episode": int(number),
@@ -822,6 +859,7 @@ class TraktClient:
             return None
         return {
             "tmdb_id": int(tmdb_id),
+            "tvdb_id": str(show_ids.get("tvdb") or "") or None,
             "media_type": "tv",
             "season": int(season),
             "episode": int(number),

@@ -5,11 +5,14 @@ The dangerous behaviours are removal (irreversible) and cross-provider identity
 source list on every run).  Both are covered here.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from src.config import SyncPair
 from src.cross_sync import CrossSyncService
+from src.library_store import LibraryStore
 from src.providers import (
     CATEGORY_COLLECTION,
     CATEGORY_HISTORY,
@@ -18,6 +21,7 @@ from src.providers import (
     REMOVAL_ADDITIVE,
     REMOVAL_MANAGED,
     REMOVAL_MIRROR,
+    LibraryAdapter,
     ProviderAdapter,
     enrich_identity,
     has_portable_identity,
@@ -635,6 +639,192 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(enriched["tmdb_id"], "9000")
         self.assertEqual((enriched["season"], enriched["episode"]), (3, 7))
         self.assertEqual(item_key(enriched), "tv:tmdb:9000:s3e7")
+
+    @patch("src.fribb_client.lookup_by_tvdb")
+    def test_anime_tvdb_only_series_can_match_a_portable_watchlist_id(self, lookup) -> None:
+        lookup.return_value = {
+            "tvdb_id": 77, "themoviedb_id": {"tv": 9000},
+        }
+        enriched = enrich_identity({
+            "media_type": "tv", "is_anime": True, "tvdb_id": "77",
+        })
+        self.assertEqual(item_key(enriched), "tv:tmdb:9000")
+        self.assertTrue(has_portable_identity(enriched))
+
+    @patch("src.fribb_client.lookup_tvdb_series")
+    @patch("src.fribb_client.lookup_by_tvdb", return_value=None)
+    def test_shared_tvdb_cours_match_one_series_without_guessing_a_cour(
+        self, _unique_lookup, series_lookup,
+    ) -> None:
+        series_lookup.return_value = {
+            "tvdb_id": 77, "themoviedb_id": {"tv": 9000},
+        }
+        enriched = enrich_identity({
+            "media_type": "tv", "is_anime": True, "tvdb_id": "77",
+        })
+        self.assertEqual(item_key(enriched), "tv:tmdb:9000")
+        self.assertNotIn("anilist_id", enriched)
+
+    @patch("src.anime_mapping_store.resolve_tmdb_episode_from_tvdb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_tvdb")
+    def test_tvdb_only_episode_is_not_assumed_to_use_tmdb_numbering(
+        self, lookup, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {
+            "tvdb_id": 77, "themoviedb_id": {"tv": 9000},
+            "season": {"tmdb": 2},
+        }
+        enriched = enrich_identity({
+            "media_type": "tv", "is_anime": True, "tvdb_id": "77",
+            "season": 1, "episode": 3,
+        })
+        self.assertEqual(enriched["match_confidence"], "probable")
+        self.assertFalse(has_portable_identity(enriched))
+
+    @patch("src.anime_mapping_store.resolve_tmdb_episode_from_tvdb_episode")
+    @patch("src.fribb_client.lookup_by_tvdb")
+    def test_tvdb_episode_uses_explicit_xml_tmdb_mapping(
+        self, lookup, resolve_episode,
+    ) -> None:
+        lookup.return_value = {"tvdb_id": 77, "themoviedb_id": {"tv": 9000}}
+        resolve_episode.return_value = {
+            "tmdb_id": 9000, "tmdb_season": 2, "tmdb_episode": 14,
+        }
+        enriched = enrich_identity({
+            "media_type": "tv", "is_anime": True, "tvdb_id": "77",
+            "season": 1, "episode": 3,
+        })
+        self.assertEqual((enriched["season"], enriched["episode"]), (2, 14))
+        self.assertEqual((enriched["tvdb_season"], enriched["tvdb_episode"]), (1, 3))
+        self.assertTrue(has_portable_identity(enriched))
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_tvdb_only_cour_mapping_does_not_write_tmdb_history(
+        self, lookup, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {
+            "themoviedb_id": {"tv": 9000}, "season": {"tvdb": 4},
+            "episode_offset": {"tvdb": 12},
+        }
+        raw = {"media_type": "tv", "anilist_id": 200, "season": 1, "episode": 2}
+        enriched = enrich_identity(raw)
+        self.assertEqual((enriched["tvdb_season"], enriched["tvdb_episode"]), (4, 14))
+        self.assertEqual((enriched["season"], enriched["episode"]), (1, 2))
+        self.assertFalse(has_portable_identity(enriched))
+        source = FakeAdapter("anilist", {CATEGORY_HISTORY: [raw]},
+                             reads=(CATEGORY_HISTORY,), writes=())
+        target = FakeAdapter("trakt", {CATEGORY_HISTORY: []},
+                             reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,))
+        stats = CrossSyncService({"anilist": source, "trakt": target}).run_pair(
+            _pair(source="anilist", target="trakt", categories=[CATEGORY_HISTORY]),
+        )
+        self.assertEqual(stats.categories[0].unmapped, 1)
+        self.assertEqual(target.added, [])
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_pmdb_anime_season_map_recovers_cour_episode_for_library(
+        self, lookup, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {
+            "themoviedb_id": {"tv": 9000}, "season": {"tvdb": 4},
+            "episode_offset": {"tvdb": 12},
+        }
+        source = FakeAdapter("anilist", {CATEGORY_HISTORY: [{
+            "media_type": "tv", "anilist_id": 200, "season": 1,
+            "episode": 2, "watched_at": "2024-01-01T00:00:00Z",
+        }]}, reads=(CATEGORY_HISTORY,), writes=())
+        target = FakeAdapter("library", {CATEGORY_HISTORY: []},
+                             reads=(CATEGORY_HISTORY,), writes=(CATEGORY_HISTORY,))
+        pmdb = FakeAdapter("pmdb")
+        pmdb._client = type("Client", (), {"get_anime_seasons": lambda self, tmdb_id: [
+            {"season_number": 4, "episode_count": 24, "tmdb_season": 2,
+             "tmdb_episode_start": 1},
+        ]})()
+
+        stats = CrossSyncService({"anilist": source, "library": target, "pmdb": pmdb}).run_pair(
+            _pair(source="anilist", target="library", categories=[CATEGORY_HISTORY]),
+        )
+
+        self.assertEqual(stats.categories[0].unmapped, 0)
+        self.assertEqual(stats.added, 1)
+        self.assertEqual((target.added[0][1][0]["season"], target.added[0][1][0]["episode"]), (2, 14))
+
+    @patch("src.anime_mapping_store.resolve_tvdb_episode_from_anidb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_pmdb_anime_season_map_rejects_out_of_range_episode(
+        self, lookup, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {
+            "themoviedb_id": {"tv": 9000}, "season": {"tvdb": 4},
+            "episode_offset": {"tvdb": 12},
+        }
+        row = {"media_type": "tv", "anilist_id": 200, "season": 1, "episode": 2}
+        mapped = enrich_identity(row, anime_seasons_lookup=lambda _id: [
+            {"season_number": 4, "episode_count": 12, "tmdb_season": 2,
+             "tmdb_episode_start": 1},
+        ])
+        self.assertFalse(has_portable_identity(mapped))
+        self.assertEqual((mapped["season"], mapped["episode"]), (1, 2))
+        placeholder = enrich_identity(row, anime_seasons_lookup=lambda _id: [
+            {"season_number": 4, "episode_count": 0, "tmdb_season": 2,
+             "tmdb_episode_start": 1},
+        ])
+        self.assertFalse(has_portable_identity(placeholder))
+
+    @patch("src.anime_mapping_store.resolve_tmdb_episode_from_tvdb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_by_tvdb")
+    def test_tvdb_episode_rejects_conflicting_pmdb_arc_rows(
+        self, lookup, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {"tvdb_id": 77, "themoviedb_id": {"tv": 9000}}
+        mapped = enrich_identity({
+            "media_type": "tv", "is_anime": True, "tvdb_id": "77",
+            "season": 1, "episode": 3,
+        }, anime_seasons_lookup=lambda _id: [
+            {"season_number": 1, "episode_count": 12,
+             "tmdb_season": 2, "tmdb_episode_start": 1},
+            {"season_number": 1, "episode_count": 12,
+             "tmdb_season": 3, "tmdb_episode_start": 1},
+        ])
+        self.assertFalse(has_portable_identity(mapped))
+
+    @patch("src.anime_mapping_store.resolve_tmdb_episode_from_tvdb_episode", return_value=None)
+    @patch("src.fribb_client.lookup_tvdb_series")
+    @patch("src.fribb_client.lookup_by_tvdb")
+    def test_tvdb_history_reaches_persisted_library_in_tmdb_coordinates(
+        self, lookup, lookup_series, _resolve_episode,
+    ) -> None:
+        lookup.return_value = {"tvdb_id": 77, "themoviedb_id": {"tv": 9000}}
+        lookup_series.return_value = lookup.return_value
+        source = FakeAdapter("trakt", {CATEGORY_HISTORY: [{
+            "media_type": "tv", "tmdb_id": "9000", "tvdb_id": "77",
+            "season": 1, "episode": 3, "watched_at": "2024-01-01T00:00:00Z",
+        }]}, reads=(CATEGORY_HISTORY,), writes=())
+        pmdb = FakeAdapter("pmdb")
+        pmdb._client = type("Client", (), {"get_anime_seasons": lambda self, tmdb_id: [
+            {"season_number": 1, "episode_count": 12, "tmdb_season": 2,
+             "tmdb_episode_start": 10},
+        ]})()
+        with tempfile.TemporaryDirectory() as directory:
+            store = LibraryStore(Path(directory) / "library.json")
+            target = LibraryAdapter(store)
+            stats = CrossSyncService({"trakt": source, "library": target, "pmdb": pmdb}).run_pair(
+                _pair(source="trakt", target="library", categories=[CATEGORY_HISTORY]),
+            )
+            self.assertEqual(stats.added, 1)
+            entry = LibraryStore(store.path).entry("tmdb:tv:9000")
+            self.assertEqual(set(entry["watched"]), {"2x12"})
+
+    @patch("src.fribb_client.lookup_by_anilist")
+    def test_unmapped_anilist_episode_numbers_are_not_treated_as_tmdb(self, lookup) -> None:
+        lookup.return_value = {"themoviedb_id": {"tv": 9000}}
+        enriched = enrich_identity({
+            "media_type": "tv", "anilist_id": 200, "season": 1, "episode": 3,
+        })
+        self.assertEqual(enriched["tmdb_id"], "9000")
+        self.assertFalse(has_portable_identity(enriched))
 
     @patch("src.fribb_client.lookup_by_anilist")
     def test_anilist_season_entries_share_the_mapped_tmdb_series_key(
@@ -1522,7 +1712,7 @@ class MdbListProviderTests(unittest.TestCase):
         self.assertTrue(adapter.can_write())
         self.assertEqual(
             sorted(adapter.writable_categories()),
-            sorted([CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY]),
+            sorted([CATEGORY_WATCHLIST, CATEGORY_COLLECTION, CATEGORY_HISTORY, CATEGORY_RESUME]),
         )
 
     def test_not_writable_without_any_credential(self) -> None:

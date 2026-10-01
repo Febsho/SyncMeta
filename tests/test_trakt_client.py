@@ -74,6 +74,39 @@ class AccountLimitSession:
 
 
 class TraktClientTests(unittest.TestCase):
+    def test_episode_history_keeps_tvdb_series_id_for_anime_mapping(self) -> None:
+        row = TraktClient._normalize_episode_history_entry({
+            "show": {"title": "Anime", "ids": {"tmdb": 9000, "tvdb": 77}},
+            "episode": {"season": 1, "number": 3},
+            "watched_at": "2024-01-01T00:00:00Z",
+        })
+        self.assertEqual(row["tvdb_id"], "77")
+
+    def test_resume_write_resolves_episode_and_requires_pause_receipt(self) -> None:
+        client = TraktClient(TraktConfig())
+        calls = []
+        def get(path, params=None):
+            calls.append(("GET", path, params))
+            if path.startswith("/search/"):
+                return [{"show": {"ids": {"tmdb": 42, "trakt": 8}}}]
+            return {"ids": {"trakt": 123}}
+        def post(path, payload):
+            calls.append(("POST", path, payload))
+            return {"action": "pause"}
+        client._get = get
+        client._post = post
+        self.assertTrue(client.save_playback_progress({
+            "tmdb_id": 42, "media_type": "tv", "season": 2, "episode": 3,
+            "position_ms": 30000, "runtime_ms": 100000,
+        }))
+        self.assertEqual(calls[-1], ("POST", "/scrobble/pause", {
+            "episode": {"ids": {"trakt": 123}}, "progress": 30.0,
+        }))
+        self.assertFalse(client.save_playback_progress({
+            "tmdb_id": 42, "media_type": "movie", "position_ms": 90000,
+            "runtime_ms": 100000,
+        }))
+
     def test_420_is_reported_as_an_actionable_account_limit(self) -> None:
         """A bare HTTP 420 looks like throttling, but Trakt means item limit."""
         client = TraktClient(TraktConfig(base_url="https://api.trakt.tv"))

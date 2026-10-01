@@ -369,7 +369,8 @@ class WebTests(unittest.TestCase):
         html = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("await fetch('/api/oauth/status')", html)
-        self.assertIn("loadHostedOAuthStatus().then(() => fetchStatus(false))", html)
+        self.assertIn("loadHostedOAuthStatus().then(async () => {", html)
+        self.assertIn("return await fetchStatus(true) || await fetchStatus(false)", html)
         self.assertIn("simkl: !!hostedOAuth.simkl || !!el('simkl-v2-client-id').value.trim()", html)
         self.assertIn("trakt: !!hostedOAuth.trakt || !!el('trakt-client-id').value.trim()", html)
 
@@ -1254,11 +1255,56 @@ class WebTests(unittest.TestCase):
         self.assertEqual(pair["removal_mode"], "managed")
         route = private["options"]["list_sync_routes"][0]
         self.assertEqual(route["source"]["collection_type"], "status")
+        self.assertEqual(route["source"]["collection_name"], "Plan to Watch — Anime")
         toggled = self.client.post("/api/profile/list-sync/toggle", json={
             "route_id": route["id"], "enabled": False,
         })
         self.assertEqual(toggled.status_code, 200)
         self.assertFalse(web._profile_store.get_private_profile_by_id(profile["profile_id"])["options"]["sync_pairs"][0]["enabled"])
+
+    @patch("web._list_sync_capabilities")
+    def test_simkl_custom_list_can_route_to_trakt_personal_list(self, capabilities) -> None:
+        capabilities.return_value = {
+            "sources": [{
+                "provider": "simkl", "id": "custom:123", "display_name": "Favorites",
+                "category": "watchlist", "static": True, "supportsTwoWay": False,
+            }],
+            "destinations": [{
+                "provider": "trakt", "id": "list:me/favorites", "display_name": "Favorites",
+                "static": True, "supportsTwoWay": True,
+            }],
+        }
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/list-sync/create", json={
+            "source": {"provider": "simkl", "id": "custom:123"},
+            "destination": {"provider": "trakt", "id": "list:me/favorites"},
+            "mode": "managed_sync",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        pair = web._profile_store.get_private_profile_by_id(profile["profile_id"])["options"]["sync_pairs"][0]
+        self.assertEqual(pair["source_lists"], ["custom:123"])
+        self.assertEqual(pair["target_list"], "list:me/favorites")
+
+    @patch("web._build_provider_adapters")
+    def test_list_sync_capabilities_offer_trakt_personal_list(self, build_adapters) -> None:
+        simkl = mock.Mock()
+        simkl.safe_list_sources.return_value = [{
+            "key": "custom:123", "label": "Favorites", "category": "watchlist",
+            "kind": "list", "group": "custom",
+        }]
+        trakt = mock.Mock()
+        trakt.safe_list_sources.return_value = []
+        trakt.safe_target_lists.return_value = [{"key": "list:me/favorites", "label": "Favorites"}]
+        trakt.can_write.return_value = True
+        build_adapters.return_value = {"simkl": simkl, "trakt": trakt}
+
+        result = web._list_sync_capabilities(mock.Mock(), "profile")
+
+        self.assertIn("custom:123", [row["id"] for row in result["sources"]])
+        self.assertIn("list:me/favorites", [row["id"] for row in result["destinations"]])
 
     def test_saving_a_pair_that_uses_the_library_round_trips(self) -> None:
         """The Library is a provider like any other, at either end.
@@ -1318,7 +1364,7 @@ class WebTests(unittest.TestCase):
         # Zero-based, so the editor can index straight into its own card list.
         self.assertEqual(response.get_json()["pair_index"], 1)
 
-    def test_saving_simkl_pmdb_collection_pair_is_supported(self) -> None:
+    def test_saving_simkl_pmdb_collection_pair_needs_an_explicit_destination(self) -> None:
         profile = self._make_bare_profile()
         self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
 
@@ -1331,10 +1377,7 @@ class WebTests(unittest.TestCase):
             "source_lists": ["status:completed:movies"],
         }]})
 
-        self.assertEqual(response.status_code, 200)
-        saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
-        self.assertEqual(saved["categories"], ["collection"])
-        self.assertEqual(saved["mode"], "two_way")
+        self.assertEqual(response.status_code, 400)
 
     def test_anilist_can_be_a_history_source_in_a_pair(self) -> None:
         """Its rows are derived from progress counts, but they are readable."""
@@ -1547,7 +1590,7 @@ class WebTests(unittest.TestCase):
         self.assertTrue(providers["mdblist"]["reads"], "MDBList must be usable as a source")
         # MDBList's sync API is readable and writable, so it is a valid target.
         self.assertEqual(
-            sorted(providers["mdblist"]["writes"]), ["collection", "history", "watchlist"],
+            sorted(providers["mdblist"]["writes"]), ["collection", "history", "resume", "watchlist"],
         )
         self.assertEqual(providers["mdblist"]["write_blocked_reason"], "")
         self.assertTrue(providers["mdblist"]["has_target_lists"])

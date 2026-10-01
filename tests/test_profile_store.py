@@ -105,6 +105,22 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded["next_sync_at"])
         self.assertGreater(datetime.fromisoformat(loaded["next_sync_at"]), datetime.now(timezone.utc))
 
+    def test_readiness_context_excludes_large_state_and_is_a_snapshot(self) -> None:
+        created = self.store.create_profile("secret", self.credentials, self.options)
+        profile_id = created["profile_id"]
+        with self.store._lock:
+            profile = self.store._profiles[profile_id]
+            profile["resolution_cache"] = {"large": [1] * 1000}
+            profile["activity_state"]["pmdb_watchlist_managed_keys"] = ["movie:tmdb:1"]
+            profile["activity_state"]["pair_managed_keys"] = {"large": [1] * 1000}
+
+        context = self.store.get_readiness_context(profile_id)
+        self.assertNotIn("resolution_cache", context)
+        self.assertNotIn("pair_managed_keys", context["activity_state"])
+        self.assertEqual(context["activity_state"]["pmdb_watchlist_managed_keys"], ["movie:tmdb:1"])
+        context["credentials"]["pmdb"]["api_key"] = "changed"
+        self.assertEqual(self.store.get_private_profile_by_id(profile_id)["credentials"]["pmdb"]["api_key"], "pm-key")
+
     def test_notification_channels_are_encrypted_and_masked(self) -> None:
         created = self.store.create_profile("secret", self.credentials, self.options)
         profile_id = created["profile_id"]

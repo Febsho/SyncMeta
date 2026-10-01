@@ -459,6 +459,14 @@ class CrossSyncService:
         self.last_run_cache_hits = 0
         self.last_run_provider_reads = 0
 
+    def _enrich_identity(self, item: dict, provider: str = "") -> dict:
+        pmdb = self._adapters.get("pmdb")
+        lookup = getattr(getattr(pmdb, "_client", None), "get_anime_seasons", None)
+        return enrich_identity(
+            item, anime_seasons_lookup=lookup,
+            infer_anime_from_tvdb=provider == "trakt",
+        )
+
     # ── helpers ────────────────────────────────────────────────────────────
 
     @contextmanager
@@ -598,8 +606,8 @@ class CrossSyncService:
         if category not in ("watchlist", "collection"):
             return ""
         if pair.source == "simkl" and pair.target == "trakt":
-            if category in ("watchlist", "history"):
-                return ""
+            if category == "watchlist":
+                return requested
             if category == "collection" and not requested:
                 selected = []
                 for key in getattr(pair, "source_lists", []) or []:
@@ -765,7 +773,7 @@ class CrossSyncService:
         # rewatches, and collapsing them here is what lost them.
         source_rows: list[tuple[str, dict]] = []
         for raw_item in source_items:
-            item = enrich_identity(raw_item)
+            item = self._enrich_identity(raw_item, source.key)
             if not has_portable_identity(item):
                 # Nothing portable to match on; count it rather than guessing.
                 result.unmapped += 1
@@ -786,7 +794,7 @@ class CrossSyncService:
         target_plays: dict[str, list] = {}
         keeps_plays = is_history and bool(getattr(target, "records_plays", False))
         for raw_item in target_items:
-            item = enrich_identity(raw_item)
+            item = self._enrich_identity(raw_item, target.key)
             key = self._comparison_key(item, target_list)
             target_by_key.setdefault(key, item)
             if keeps_plays:
@@ -803,7 +811,7 @@ class CrossSyncService:
         if is_history:
             history_plan = self._plan_history_category(
                 pair, category, source_rows=[item for _key, item in source_rows],
-                target_items=[enrich_identity(row) for row in target_items],
+                target_items=[self._enrich_identity(row, target.key) for row in target_items],
                 source=source, target=target,
             )
             plan = history_plan.plan if history_plan is not None else None
@@ -1063,13 +1071,13 @@ class CrossSyncService:
 
         is_history = category == CATEGORY_HISTORY
 
-        def _index(raw_items, count_unmapped):
+        def _index(raw_items, count_unmapped, adapter):
             """Index by identity, and for history also keep every play row."""
             out: dict[str, dict] = {}
             rows: list[tuple[str, dict]] = []
             plays: dict[str, list] = {}
             for raw in raw_items:
-                item = enrich_identity(raw)
+                item = self._enrich_identity(raw, adapter.key)
                 if count_unmapped and not has_portable_identity(item):
                     result.unmapped += 1
                     continue
@@ -1080,8 +1088,8 @@ class CrossSyncService:
                     plays.setdefault(key, []).append(item.get("watched_at"))
             return out, rows, plays
 
-        first_by_key, first_rows, first_plays = _index(sides["first"], True)
-        second_by_key, second_rows, second_plays = _index(sides["second"], True)
+        first_by_key, first_rows, first_plays = _index(sides["first"], True, first)
+        second_by_key, second_rows, second_plays = _index(sides["second"], True, second)
         result.source_items = len(first_by_key)
         result.target_items = len(second_by_key)
 
@@ -1364,7 +1372,7 @@ class CrossSyncService:
             logger.debug("Could not verify removals on %s", target.label, exc_info=True)
             return
         present = {
-            self._comparison_key(enrich_identity(item), target_list) for item in current
+            self._comparison_key(self._enrich_identity(item, target.key), target_list) for item in current
         }
         survivors = [
             item for item in removed
@@ -1827,7 +1835,7 @@ class CrossSyncService:
         def verify(actions):
             live = target.fetch_target(category, target_list) or []
             present = {
-                self._comparison_key(enrich_identity(item), target_list)
+                self._comparison_key(self._enrich_identity(item, target.key), target_list)
                 for item in live
             }
             if removing:
@@ -2096,7 +2104,7 @@ class CrossSyncService:
                     continue
                 keys = set()
                 for raw in items:
-                    item = enrich_identity(raw)
+                    item = self._enrich_identity(raw, source.key)
                     if has_portable_identity(item):
                         keys.add(item_key(item))
                 self._ownership.record(

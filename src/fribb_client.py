@@ -38,6 +38,10 @@ def lookup_by_tvdb(tvdb_id: int) -> dict | None:
     return _store.lookup_fribb(tvdb_id=int(tvdb_id))
 
 
+def lookup_tvdb_series(tvdb_id: int) -> dict | None:
+    return _store.lookup_tvdb_series(int(tvdb_id))
+
+
 def extract_tmdb(value: object) -> tuple[int | None, str | None]:
     """Return ``(tmdb_id, media_type)`` from a Fribb ``themoviedb_id`` value."""
     return _store.extract_tmdb(value)

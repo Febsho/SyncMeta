@@ -1088,6 +1088,31 @@ class SimklClient:
             entries = self._merge_next_up_resume_fallback(entries)
         return entries
 
+    def save_playback_progress(self, item: dict) -> bool:
+        """Store a paused playback in SIMKL's temporary playback feed."""
+        tmdb_id = str(item.get("tmdb_id") or "")
+        runtime = int(item.get("runtime_ms") or 0)
+        position = int(item.get("position_ms") or 0)
+        if not tmdb_id.isdigit() or runtime <= 0 or position <= 0:
+            return False
+        progress = round(100 * position / runtime, 2)
+        if not 0 < progress < 80:
+            return False
+        if item.get("media_type") == "movie":
+            media = {"movie": {"ids": {"tmdb": int(tmdb_id)}}}
+        else:
+            season, episode = item.get("season"), item.get("episode")
+            if not str(season or "").isdigit() or not str(episode or "").isdigit():
+                return False
+            if int(season) < 1 or int(episode) < 1:
+                return False
+            media = {
+                "show": {"ids": {"tmdb": int(tmdb_id), "type": "show"}},
+                "episode": {"season": int(season), "number": int(episode)},
+            }
+        response = self._post("/scrobble/pause", {**media, "progress": progress})
+        return isinstance(response, dict) and response.get("action") == "pause"
+
     def _merge_next_up_resume_fallback(self, entries: list[dict]) -> list[dict]:
         merged = list(entries)
         seen = {self._resume_identity_key(item) for item in entries if self._resume_identity_key(item)}

@@ -1833,6 +1833,30 @@ class ProfileStore:
         with self._lock:
             return copy.deepcopy(self._get_profile_locked(profile_id))
 
+    def get_readiness_context(self, profile_id: str) -> dict:
+        """Copy only the fields needed to build dashboard connection readiness.
+
+        A full private-profile copy also includes large resolution caches,
+        unresolved items and run records. Status polling needs none of them.
+        """
+        with self._lock:
+            profile = self._get_profile_locked(profile_id)
+            activity = profile.get("activity_state") or {}
+            return {
+                "profile_id": profile["profile_id"],
+                "credentials": copy.deepcopy(profile.get("credentials") or {}),
+                "options": copy.deepcopy(profile.get("options") or {}),
+                "activity_state": {
+                    key: copy.deepcopy(activity[key])
+                    for key in (
+                        "simkl_history_cursor", "trakt_history_cursor",
+                        "simkl_activities_ts", "trakt_activities_ts",
+                        "pmdb_watchlist_managed_keys",
+                    ) if key in activity
+                },
+                "connection_health": copy.deepcopy(profile.get("connection_health") or {}),
+            }
+
     def update_simkl_auth(self, profile_id: str, *, access_token: str,
                           refresh_token: str, access_token_expires_at: str,
                           auth_version: str = "v2", v2_client_id: str = "",
