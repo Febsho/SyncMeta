@@ -1022,6 +1022,8 @@
     .modal-card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;
       width:100%;max-width:440px;max-height:85vh;overflow:auto}
     .modal-card-wide{max-width:640px}
+    .quick-login-copy{margin:0 0 18px;color:var(--z400);font-size:13px;line-height:1.55}
+    .quick-login-error{min-height:20px;margin-top:10px;color:var(--red);font-size:12px}
     .modal-title{font-size:16px;font-weight:600;color:var(--z100);margin-bottom:10px}
     .modal-body{font-size:13px;color:var(--z400);line-height:1.6}
     .modal-body p + p{margin-top:9px}
@@ -2096,6 +2098,28 @@
   </div>
 
   <!-- Application dialogs replace the browser's alert()/confirm(). -->
+  <div class="modal-overlay hidden" id="quick-login-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-login-title">
+    <div class="modal-card" role="document">
+      <h2 class="modal-title" id="quick-login-title">Open your SyncMeta profile</h2>
+      <p class="quick-login-copy">Sign in quickly with your profile UUID and password. This browser remembers only the UUID.</p>
+      <form id="quick-login-form">
+        <div class="form-row">
+          <label for="quick-login-profile-id">Profile UUID</label>
+          <input type="text" id="quick-login-profile-id" class="mono" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" required>
+        </div>
+        <div class="form-row">
+          <label for="quick-login-password">Profile Password</label>
+          <input type="password" id="quick-login-password" placeholder="Your profile password" autocomplete="off" required>
+        </div>
+        <div class="quick-login-error" id="quick-login-error" role="alert"></div>
+        <div class="modal-actions">
+          <button class="btn" type="button" id="quick-login-skip">Not now</button>
+          <button class="btn btn-primary" type="submit" id="quick-login-submit">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div class="modal-overlay hidden" id="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
     <div class="modal-card onboarding-card" role="document">
       <div class="onboarding-head">
@@ -2638,9 +2662,14 @@
       const node = el('profile-quick-setup');
       const needsSetup = !sessionProfileId || onboardingCompleted === false;
       if (node) node.style.display = needsSetup ? '' : 'none';
-      if (needsSetup && !onboardingAutoOpened && storageGet(ENTERED_KEY) && el('app').classList.contains('active')) {
-        onboardingAutoOpened = true;
-        setTimeout(() => openOnboardingWizard(), 0);
+      if (needsSetup && !onboardingAutoOpened && storageGet(ENTERED_KEY)
+          && el('app').classList.contains('active')
+          && el('quick-login-dialog').classList.contains('hidden')) {
+        setTimeout(() => {
+          if (onboardingAutoOpened || !el('quick-login-dialog').classList.contains('hidden')) return;
+          onboardingAutoOpened = true;
+          openOnboardingWizard();
+        }, 0);
       }
     }
 
@@ -3805,6 +3834,73 @@
       renderAniListStatuses();
       updateDots();
       saveDraft();
+    }
+
+    function closeQuickLogin() {
+      const overlay = el('quick-login-dialog');
+      if (!overlay) return;
+      overlay.classList.add('hidden');
+      overlay.onkeydown = null;
+      el('quick-login-password').value = '';
+      el('quick-login-error').textContent = '';
+      renderQuickSetupVisibility();
+    }
+
+    function openQuickLogin() {
+      const overlay = el('quick-login-dialog');
+      if (!overlay) return;
+      const profileInput = el('quick-login-profile-id');
+      const remembered = storageGet(PROFILE_KEY) || el('profile-id').value.trim();
+      profileInput.value = remembered || '';
+      el('quick-login-password').value = '';
+      el('quick-login-error').textContent = '';
+      overlay.classList.remove('hidden');
+      trapDialogFocus(overlay);
+      requestAnimationFrame(() => (remembered ? el('quick-login-password') : profileInput).focus());
+    }
+
+    async function submitQuickLogin(event) {
+      if (event) event.preventDefault();
+      const profileId = el('quick-login-profile-id').value.trim();
+      const password = el('quick-login-password').value;
+      const errorNode = el('quick-login-error');
+      const submit = el('quick-login-submit');
+      if (!profileId || !password) {
+        errorNode.textContent = 'Enter your profile UUID and password.';
+        return;
+      }
+
+      submit.disabled = true;
+      submit.textContent = 'Signing in...';
+      errorNode.textContent = '';
+      invalidateStatusFetch();
+      try {
+        const result = await apiPost('/api/profile/login', { profile_id: profileId, password });
+        if (!result.ok) {
+          errorNode.textContent = formatApiError(result.data, 'Unable to sign in.').message;
+          return;
+        }
+
+        const profile = result.data.profile;
+        populateForm(profile.credentials, profile.options, { profile_id: profile.profile_id }, profile.sync_error || '');
+        renderDashboard(profile);
+        refreshPollingForProfile(profile);
+        saveDraft(false);
+        clearDraftDirty();
+        if (profile.credentials?.trakt?.client_id && profile.credentials?.trakt?.access_token_saved) {
+          refreshTraktLists(true);
+        }
+        if (profile.credentials?.mdblist?.api_key_saved) refreshMdbListLists(true);
+        closeQuickLogin();
+        enterApp('overview');
+        showToast('Profile loaded.', false, true);
+      } catch (error) {
+        console.error('Quick profile login failed:', error);
+        errorNode.textContent = 'Network error while signing in.';
+      } finally {
+        submit.disabled = false;
+        submit.textContent = 'Sign in';
+      }
     }
 
     function enterApp(defaultView) {
@@ -8569,6 +8665,7 @@
       clearDraftDirty();
       setPollingInterval(POLL_IDLE_MS);
       showToast('Logged out.', false, true);
+      openQuickLogin();
     }
 
     async function resetProfilePassword() {
@@ -10546,6 +10643,9 @@
       sessionProfileId = storedProfileId;
       renderQuickSetupVisibility();
     }
+    el('quick-login-form').addEventListener('submit', submitQuickLogin);
+    el('quick-login-skip').addEventListener('click', closeQuickLogin);
+    openQuickLogin();
     applyMdbListCallback(MDBLIST_CALLBACK);
     credentialsHydrated = false;
     resumeSimklPinState();
@@ -10559,6 +10659,7 @@
       return await fetchStatus(true) || await fetchStatus(false);
     }).then(profile => {
       if (profile) {
+        closeQuickLogin();
         if (storageGet(ENTERED_KEY)) switchView('overview');
         // The dashboard already receives aggregate unresolved counts in the
         // status payload.  Loading every issue (and conflicts) here competes

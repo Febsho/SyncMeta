@@ -1615,6 +1615,25 @@ class PmdbCollectionTargetTests(unittest.TestCase):
         self.assertEqual(client.created, [])
         self.assertEqual(client.added[0][0], "user-list")
 
+    def test_named_custom_list_collection_runs_through_cross_sync(self) -> None:
+        from src.providers import PmdbAdapter
+        source = FakeAdapter(
+            "simkl", {CATEGORY_COLLECTION: [_movie("7")]},
+            reads=(CATEGORY_COLLECTION,), writes=(CATEGORY_COLLECTION,),
+        )
+        client = self.FakePmdbClient()
+
+        result = CrossSyncService({
+            "simkl": source, "pmdb": PmdbAdapter(client),
+        }).run_pair(_pair(
+            source="simkl", target="pmdb", categories=[CATEGORY_COLLECTION],
+            target_list="list:user-list",
+        ))
+
+        self.assertEqual(result.added, 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(client.added, [("user-list", [{"tmdb_id": 7, "media_type": "movie"}])])
+
     def test_two_way_simkl_pmdb_collection_without_named_target_is_rejected(self) -> None:
         from src.providers import PmdbAdapter
         simkl = FakeAdapter(

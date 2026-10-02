@@ -670,6 +670,11 @@ class CrossSyncService:
         target = self._adapter_for(pair, "target")
         readable = set(source.readable_categories())
         writable = set(target.writable_categories())
+        if str(getattr(pair, "target_list", "") or "").strip():
+            # Keep execution aligned with validate_pair(): a named list may
+            # safely accept categories that the provider's default account
+            # destination does not (notably PMDB Collection).
+            writable.update(getattr(target, "target_list_categories", ()) or ())
         if two_way:
             readable &= set(target.readable_categories())
             writable &= set(source.writable_categories())

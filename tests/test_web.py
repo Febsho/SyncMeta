@@ -76,6 +76,20 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="anilist-client-id"', html)
         self.assertIn('id="anilist-client-secret"', html)
 
+    def test_index_opens_fast_profile_login_and_remembers_only_the_uuid(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="quick-login-dialog"', html)
+        self.assertIn('id="quick-login-profile-id"', html)
+        self.assertIn('id="quick-login-password"', html)
+        self.assertIn('id="quick-login-form"', html)
+        self.assertIn("const remembered = storageGet(PROFILE_KEY)", html)
+        self.assertIn("apiPost('/api/profile/login', { profile_id: profileId, password })", html)
+        self.assertIn("el('quick-login-form').addEventListener('submit', submitQuickLogin)", html)
+        self.assertIn("openQuickLogin();", html)
+        self.assertIn("This browser remembers only the UUID.", html)
+        self.assertNotIn("storageSet(PROFILE_KEY, password)", html)
+
     def test_pin_and_device_flows_advertise_the_oob_redirect(self) -> None:
         # SIMKL connects by PIN and Trakt by device code: neither client ever
         # sends a redirect_uri, so the field in their developer console is only
@@ -1378,6 +1392,24 @@ class WebTests(unittest.TestCase):
         }]})
 
         self.assertEqual(response.status_code, 400)
+
+    def test_saving_simkl_pmdb_collection_pair_accepts_a_named_destination(self) -> None:
+        profile = self._make_bare_profile()
+        self.client.post("/api/profile/login", json={"profile_id": profile["profile_id"], "password": "secret"})
+
+        response = self.client.post("/api/profile/pairs/save", json={"pairs": [{
+            "name": "SIMKL Completed → PublicMetaDB list",
+            "source": "simkl",
+            "target": "pmdb",
+            "categories": ["collection"],
+            "source_lists": ["status:completed:movies"],
+            "target_list": "list:completed-movies",
+        }]})
+
+        self.assertEqual(response.status_code, 200)
+        saved = response.get_json()["profile"]["options"]["sync_pairs"][0]
+        self.assertEqual(saved["categories"], ["collection"])
+        self.assertEqual(saved["target_list"], "list:completed-movies")
 
     def test_anilist_can_be_a_history_source_in_a_pair(self) -> None:
         """Its rows are derived from progress counts, but they are readable."""

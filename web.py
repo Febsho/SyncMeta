@@ -5268,9 +5268,15 @@ def api_profile_pairs_save():
             return _json_error(
                 f"Pair {index + 1}: unknown provider {unknown!r}", 400, pair_index=index,
             )
+        target_writes = set(target_type.writes)
+        # A named destination can support categories that have no safe default
+        # account-level write. PublicMetaDB Collection is the important case:
+        # it is writable only after the user explicitly chooses a custom list.
+        if pair.target_list:
+            target_writes.update(target_type.target_list_categories)
         unsupported = [
             category for category in pair.categories
-            if category not in source_type.reads or category not in target_type.writes
+            if category not in source_type.reads or category not in target_writes
         ]
         if unsupported:
             return _json_error(
